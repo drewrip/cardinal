@@ -7,6 +7,7 @@
 
 mod analyzer;
 mod bounds;
+mod domain;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};

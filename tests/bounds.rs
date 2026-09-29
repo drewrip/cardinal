@@ -225,3 +225,79 @@ async fn product_cap_is_configurable() {
         .unwrap();
     assert_eq!(a.bounds().unwrap().constant, Some(1));
 }
+
+#[tokio::test]
+async fn contradictory_filter_returns_nothing() {
+    let b = bounds("SELECT * FROM users WHERE age > 20 AND age < 10").await;
+    assert_eq!(b.constant, Some(0));
+    // Also across operators: the join key cannot satisfy both sides' filters.
+    let b = bounds(
+        "SELECT * FROM (SELECT * FROM users WHERE id < 5) u
+         JOIN (SELECT * FROM orders WHERE user_id > 10) o ON u.id = o.user_id",
+    )
+    .await;
+    assert_eq!(b.constant, Some(0));
+}
+
+#[tokio::test]
+async fn range_on_a_key_is_a_constant_bound() {
+    let b = bounds("SELECT * FROM users WHERE id BETWEEN 1 AND 10").await;
+    assert_eq!(b.constant, Some(10));
+    let b = bounds("SELECT * FROM users WHERE (id IN (1, 2) OR id >= 7 AND id < 9) AND id <> 2").await;
+    assert_eq!(b.constant, Some(3));
+}
+
+#[tokio::test]
+async fn range_on_a_joined_key_bounds_the_other_side_of_an_equality() {
+    // o.user_id takes the values of u.id, which is in 1..=5; grouping by it
+    // gives at most 5 groups.
+    let b = bounds(
+        "SELECT o.user_id, count(*) FROM orders o JOIN users u ON o.user_id = u.id
+         WHERE u.id BETWEEN 1 AND 5 GROUP BY o.user_id",
+    )
+    .await;
+    assert_eq!(b.constant, Some(5));
+}
+
+#[tokio::test]
+async fn group_by_case_has_one_group_per_branch() {
+    let b = bounds(
+        "SELECT CASE WHEN age > 60 THEN 'old' WHEN age < 20 THEN 'young' END, count(*)
+         FROM users GROUP BY 1",
+    )
+    .await;
+    // 'old', 'young', NULL
+    assert_eq!(b.constant, Some(3));
+}
+
+#[tokio::test]
+async fn group_by_date_parts() {
+    let b = bounds(
+        "SELECT date_part('month', make_date(2000, id, 1)), count(*) FROM users GROUP BY 1",
+    )
+    .await;
+    // 12 months and NULL.
+    assert_eq!(b.constant, Some(13));
+    let b = bounds(
+        "SELECT date_part('year', d), count(*)
+         FROM (SELECT make_date(1990 + age, 1, 1) AS d FROM users)
+         WHERE d >= DATE '1995-06-01' AND d < DATE '1998-01-01' GROUP BY 1",
+    )
+    .await;
+    // 1995, 1996, 1997
+    assert_eq!(b.constant, Some(3));
+}
+
+#[tokio::test]
+async fn tpch_queries_filtered_to_few_groups_are_constant() {
+    let ctx = common::tpch_datasets().remove(0).context(true);
+    // Two nations each, and two ship years.
+    let b = bounds_in(&ctx, include_str!("tpch/q07.sql")).await;
+    assert_eq!(b.constant, Some(8));
+    // Two order years.
+    let b = bounds_in(&ctx, include_str!("tpch/q08.sql")).await;
+    assert_eq!(b.constant, Some(2));
+    // Seven country codes, from a filter on the grouped expression.
+    let b = bounds_in(&ctx, include_str!("tpch/q22.sql")).await;
+    assert_eq!(b.constant, Some(7));
+}

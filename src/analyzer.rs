@@ -5,17 +5,19 @@
 //! counted as one value). Constraints relate each operator's variables to its
 //! inputs'.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, Constraint, JoinType};
+use datafusion::common::{Column, Constraint, JoinType, NullEquality};
 use datafusion::logical_expr::logical_plan::{
     Aggregate, Distinct, FetchType, Join, LogicalPlan, SkipType, TableScan,
 };
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::{Bool, Int};
+
+use crate::domain::{self, Dom, Facts};
 use z3::{Params, Solver};
 
 /// How a `TableScan` is treated.
@@ -42,6 +44,8 @@ pub(crate) struct TableVar {
 pub(crate) struct Rel {
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
+    /// What every row's values satisfy, whatever the data.
+    pub(crate) facts: Facts,
 }
 
 pub(crate) struct Analyzer<'a> {
@@ -178,7 +182,11 @@ impl<'a> Analyzer<'a> {
                 v
             })
             .collect();
-        let rel = Rel { card, ndv };
+        let rel = Rel {
+            card,
+            ndv,
+            facts: Facts::default(),
+        };
         self.unique_columns(plan, &rel);
         rel
     }
@@ -245,6 +253,7 @@ impl<'a> Analyzer<'a> {
         // Subquery nodes stand on their own; they are not inputs of this node.
         self.frontier.truncate(mark);
         let (out, raw_scan) = self.visit_node(plan);
+        self.apply_domains(plan, &out);
         let inputs = self.frontier.split_off(mark);
         debug_assert_eq!(inputs.len(), plan.inputs().len());
         let var = self.name_of(&out.card);
@@ -260,6 +269,23 @@ impl<'a> Analyzer<'a> {
         out
     }
 
+    /// Bounds each output column's NDV by the size of its domain. A relation
+    /// with an expression that can take no value has no rows.
+    fn apply_domains(&self, plan: &LogicalPlan, rel: &Rel) {
+        let schema = plan.schema();
+        if rel.facts.contradictory() {
+            self.assert(rel.card.eq(int(0)));
+        }
+        for (j, v) in rel.ndv.iter().enumerate() {
+            let col = Expr::Column(Column::from(schema.qualified_field(j)));
+            match rel.facts.dom(&col, schema).size() {
+                Some(0) => self.assert(rel.card.eq(int(0))),
+                Some(n) if n <= u64::MAX as u128 => self.assert(v.le(int(n as u64))),
+                _ => {}
+            }
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     fn visit_node(
         &mut self,
@@ -271,11 +297,12 @@ impl<'a> Analyzer<'a> {
         let out = match plan {
             LogicalPlan::Projection(p) => {
                 let l = self.visit(&p.input);
-                let o = self.fresh("Projection", plan);
+                let mut o = self.fresh("Projection", plan);
                 self.assert(o.card.eq(&l.card));
                 for (j, e) in p.expr.iter().enumerate() {
                     self.expr_ndv(&o.ndv[j], e, &p.input, &l);
                 }
+                o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
                 o
             }
             LogicalPlan::Subquery(p) => self.same_rows("Subquery", plan, &p.subquery),
@@ -286,15 +313,18 @@ impl<'a> Analyzer<'a> {
             LogicalPlan::Window(p) => self.same_rows("Window", plan, &p.input),
             LogicalPlan::Filter(f) => {
                 let l = self.visit(&f.input);
-                let o = self.fresh("Filter", plan);
+                let mut o = self.fresh("Filter", plan);
                 self.assert(o.card.le(&l.card));
                 self.subset_ndv(&o, &l);
                 self.filter_ndv(&f.predicate, &f.input, &o, &l);
+                o.facts = l.facts.clone();
+                o.facts.assume(&f.predicate, plan.schema());
                 o
             }
             LogicalPlan::Distinct(Distinct::All(input)) => {
                 let l = self.visit(input);
-                let o = self.fresh("Distinct", plan);
+                let mut o = self.fresh("Distinct", plan);
+                o.facts = l.facts.clone();
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
                 // DISTINCT keeps every value that occurs.
@@ -313,7 +343,8 @@ impl<'a> Analyzer<'a> {
             }
             LogicalPlan::Distinct(Distinct::On(on)) => {
                 let l = self.visit(&on.input);
-                let o = self.fresh("DistinctOn", plan);
+                let mut o = self.fresh("DistinctOn", plan);
+                o.facts = computed_facts(plan, &on.select_expr, &on.input, &l.facts);
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
                 let bounds: Option<Vec<Int>> = on
@@ -330,7 +361,8 @@ impl<'a> Analyzer<'a> {
             }
             LogicalPlan::Sort(s) => {
                 let l = self.visit(&s.input);
-                let o = self.fresh("Sort", plan);
+                let mut o = self.fresh("Sort", plan);
+                o.facts = l.facts.clone();
                 match s.fetch {
                     None => {
                         self.assert(o.card.eq(&l.card));
@@ -346,7 +378,8 @@ impl<'a> Analyzer<'a> {
             }
             LogicalPlan::Limit(lim) => {
                 let l = self.visit(&lim.input);
-                let o = self.fresh("Limit", plan);
+                let mut o = self.fresh("Limit", plan);
+                o.facts = l.facts.clone();
                 self.subset_ndv(&o, &l);
                 let skip = match lim.get_skip_type() {
                     Ok(SkipType::Literal(k)) => Some(k as u64),
@@ -379,7 +412,18 @@ impl<'a> Analyzer<'a> {
             LogicalPlan::Join(join) => self.join(plan, join),
             LogicalPlan::Union(u) => {
                 let inputs: Vec<Rel> = u.inputs.iter().map(|i| self.visit(i)).collect();
-                let o = self.fresh("Union", plan);
+                let mut o = self.fresh("Union", plan);
+                for j in 0..plan.schema().fields().len() {
+                    let dom = u.inputs.iter().zip(&inputs).fold(
+                        Dom::nothing(),
+                        |acc, (input, rel)| {
+                            let col = Expr::Column(Column::from(input.schema().qualified_field(j)));
+                            acc.union(&rel.facts.dom(&col, input.schema()))
+                        },
+                    );
+                    let col = Expr::Column(Column::from(plan.schema().qualified_field(j)));
+                    o.facts.add(&col, dom, plan.schema());
+                }
                 let cards: Vec<&Int> = inputs.iter().map(|r| &r.card).collect();
                 self.assert(o.card.eq(Int::add(&cards)));
                 for (j, v) in o.ndv.iter().enumerate() {
@@ -392,24 +436,14 @@ impl<'a> Analyzer<'a> {
                 o
             }
             LogicalPlan::Values(v) => {
-                let o = self.fresh("Values", plan);
+                let mut o = self.fresh("Values", plan);
                 self.assert(o.card.eq(int(v.values.len() as u64)));
-                for (j, ndv) in o.ndv.iter().enumerate() {
-                    // Literal equality and bit-distinctness can disagree for floats.
-                    if plan.schema().field(j).data_type().is_floating() {
-                        continue;
-                    }
-                    let literals: Option<HashSet<_>> = v
-                        .values
-                        .iter()
-                        .map(|row| match &row[j] {
-                            Expr::Literal(s, _) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    if let Some(literals) = literals {
-                        self.assert(ndv.le(int(literals.len() as u64)));
-                    }
+                for j in 0..plan.schema().fields().len() {
+                    let dom = v.values.iter().fold(Dom::nothing(), |acc, row| {
+                        acc.union(&Facts::default().dom(&row[j], plan.schema()))
+                    });
+                    let col = Expr::Column(Column::from(plan.schema().qualified_field(j)));
+                    o.facts.add(&col, dom, plan.schema());
                 }
                 o
             }
@@ -440,8 +474,16 @@ impl<'a> Analyzer<'a> {
         let mut out = match (self.resolve)(scan) {
             ScanKind::Base { key, display } => {
                 let t = self.table(&key, &display);
-                let s = self.fresh(&format!("Scan_{display}"), plan);
+                let mut s = self.fresh(&format!("Scan_{display}"), plan);
                 self.assert(s.card.eq(&t));
+                // Stored tables enforce their columns' nullability.
+                let schema = plan.schema();
+                for (j, field) in schema.fields().iter().enumerate() {
+                    if !field.is_nullable() {
+                        let col = Expr::Column(Column::from(schema.qualified_field(j)));
+                        s.facts.add(&col, Dom::non_null(), schema);
+                    }
+                }
                 self.composite_key(scan, &s);
                 let name = self.name_of(&s.card);
                 self.scans.push((name.clone(), display, s.card.clone()));
@@ -462,9 +504,13 @@ impl<'a> Analyzer<'a> {
         // and may return more (DataFusion keeps the Limit above), so it bounds
         // nothing.
         if !scan.filters.is_empty() {
-            let f = self.fresh("ScanFilter", plan);
+            let mut f = self.fresh("ScanFilter", plan);
             self.assert(f.card.le(&out.card));
             self.subset_ndv(&f, &out);
+            f.facts = out.facts.clone();
+            for filter in &scan.filters {
+                f.facts.assume(filter, plan.schema());
+            }
             out = f;
         }
         (out, raw_scan)
@@ -502,9 +548,10 @@ impl<'a> Analyzer<'a> {
     /// Same rows as the input, whose columns come first and unchanged.
     fn same_rows(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
-        let o = self.fresh(kind, plan);
+        let mut o = self.fresh(kind, plan);
         self.assert(o.card.eq(&l.card));
         self.equal_ndv(&o, &l);
+        o.facts = l.facts.by_position(input.schema(), plan.schema());
         o
     }
 
@@ -567,8 +614,6 @@ impl<'a> Analyzer<'a> {
                 self.assert(o.ndv[a].eq(&o.ndv[b]));
                 self.assert(o.ndv[a].le(&l.ndv[b]));
                 self.assert(o.ndv[b].le(&l.ndv[a]));
-            } else if let Some((a, k)) = literal_set(conj, &index) {
-                self.assert(o.ndv[a].le(int(k)));
             }
         }
     }
@@ -584,11 +629,13 @@ impl<'a> Analyzer<'a> {
             return self.fresh("GroupingSets", plan);
         }
         if agg.group_expr.is_empty() {
-            let o = self.fresh("ScalarAggregate", plan);
+            let mut o = self.fresh("ScalarAggregate", plan);
             self.assert(o.card.eq(int(1)));
+            o.facts = aggregate_facts(plan, agg, &l.facts);
             return o;
         }
-        let o = self.fresh("GroupBy", plan);
+        let mut o = self.fresh("GroupBy", plan);
+        o.facts = aggregate_facts(plan, agg, &l.facts);
         self.assert(o.card.le(&l.card));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
         // One group per distinct combination of group values; every value of a
@@ -642,7 +689,7 @@ impl<'a> Analyzer<'a> {
                 "Theta"
             }
         );
-        let o = self.fresh(&kind, plan);
+        let mut o = self.fresh(&kind, plan);
         let lr = Int::mul(&[&l.card, &r.card]);
         // Bound on the rows the join's matching produces.
         let mut inner = lr.clone();
@@ -690,6 +737,7 @@ impl<'a> Analyzer<'a> {
             JoinType::RightMark => self.assert(o.card.eq(&r.card)),
         }
         self.join_ndv(join, &o, &l, &r);
+        o.facts = join_facts(plan, join, &l.facts, &r.facts);
         o
     }
 
@@ -765,43 +813,108 @@ impl<'a> Analyzer<'a> {
     }
 }
 
-fn is_literal(e: &Expr) -> bool {
-    matches!(e, Expr::Literal(..))
+/// Output column `j` of `plan`, as an expression.
+fn col(plan: &LogicalPlan, j: usize) -> Expr {
+    Expr::Column(Column::from(plan.schema().qualified_field(j)))
 }
 
-/// If `e` only passes rows whose column `index(..)` holds one of at most `k`
-/// literal values (`c = v`, `c IS NULL`, `c IN (..)`, or an OR of these on the
-/// same column), returns that column's index and `k`.
-fn literal_set(e: &Expr, index: &dyn Fn(&Expr) -> Option<usize>) -> Option<(usize, u64)> {
+/// Facts on the output of an operator computing `exprs` over the rows of
+/// `input`: each output column takes its expression's values, and facts on
+/// input columns passed through unchanged still hold.
+fn computed_facts(plan: &LogicalPlan, exprs: &[Expr], input: &LogicalPlan, facts: &Facts) -> Facts {
+    let passed = |c: &Column| {
+        let j = exprs
+            .iter()
+            .position(|e| matches!(strip_alias(e), Expr::Column(x) if x == c))?;
+        Some(Column::from(plan.schema().qualified_field(j)))
+    };
+    let mut out = facts.rename(&passed);
+    for (j, e) in exprs.iter().enumerate() {
+        if let Some(e) = domain::rename(e, &passed) {
+            out.define(&col(plan, j), &e, plan.schema());
+        }
+        out.add(&col(plan, j), facts.dom(e, input.schema()), plan.schema());
+    }
+    out
+}
+
+fn strip_alias(e: &Expr) -> &Expr {
     match e {
-        Expr::BinaryExpr(BinaryExpr {
-            left,
-            op: Operator::Eq,
-            right,
-        }) => {
-            if is_literal(right) {
-                Some((index(left)?, 1))
-            } else if is_literal(left) {
-                Some((index(right)?, 1))
-            } else {
-                None
+        Expr::Alias(a) => strip_alias(&a.expr),
+        e => e,
+    }
+}
+
+/// Facts on an aggregate's output: each group key takes its expression's
+/// values, and MIN or MAX takes one of its argument's values, or NULL.
+fn aggregate_facts(plan: &LogicalPlan, agg: &Aggregate, input: &Facts) -> Facts {
+    let in_schema = agg.input.schema();
+    let groups = agg.group_expr.len();
+    let mut out = Facts::default();
+    for (j, e) in agg.group_expr.iter().chain(&agg.aggr_expr).enumerate() {
+        let dom = if j < groups {
+            input.dom(e, in_schema)
+        } else {
+            match strip_alias(e) {
+                Expr::AggregateFunction(f)
+                    if matches!(f.func.name(), "min" | "max") && f.params.args.len() == 1 =>
+                {
+                    input.dom(&f.params.args[0], in_schema).with_null()
+                }
+                _ => continue,
+            }
+        };
+        out.add(&col(plan, j), dom, plan.schema());
+    }
+    out
+}
+
+/// Facts on a join's output: each side's facts, NULL on a padded side, and
+/// matched equi-keys take values both sides have.
+fn join_facts(plan: &LogicalPlan, join: &Join, l: &Facts, r: &Facts) -> Facts {
+    let schema = plan.schema();
+    let nulls_match = join.null_equality == NullEquality::NullEqualsNull;
+    // The values a matched pair of keys takes.
+    let matched = |a: &Expr, b: &Expr| {
+        let d = l
+            .dom(a, join.left.schema())
+            .intersect(&r.dom(b, join.right.schema()));
+        if nulls_match { d } else { d.without_null() }
+    };
+    let mut out = match join.join_type {
+        JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
+            let pad_left = matches!(join.join_type, JoinType::Right | JoinType::Full);
+            let pad_right = matches!(join.join_type, JoinType::Left | JoinType::Full);
+            let mut out = if pad_left { l.nullable() } else { l.clone() };
+            out.extend(&if pad_right { r.nullable() } else { r.clone() });
+            out
+        }
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.clone(),
+        JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.clone(),
+    };
+    match join.join_type {
+        JoinType::Inner => {
+            for (a, b) in &join.on {
+                out.add(a, matched(a, b), schema);
+                out.add(b, matched(a, b), schema);
+            }
+            if let Some(f) = &join.filter {
+                out.assume(f, schema);
             }
         }
-        Expr::IsNull(c) => Some((index(c)?, 1)),
-        Expr::InList(list) if !list.negated && list.list.iter().all(is_literal) => {
-            Some((index(&list.expr)?, list.list.len() as u64))
+        JoinType::LeftSemi => {
+            for (a, b) in &join.on {
+                out.add(a, matched(a, b), schema);
+            }
         }
-        Expr::BinaryExpr(BinaryExpr {
-            left,
-            op: Operator::Or,
-            right,
-        }) => {
-            let (a, x) = literal_set(left, index)?;
-            let (b, y) = literal_set(right, index)?;
-            (a == b).then_some((a, x + y))
+        JoinType::RightSemi => {
+            for (a, b) in &join.on {
+                out.add(b, matched(a, b), schema);
+            }
         }
-        _ => None,
+        _ => {}
     }
+    out
 }
 
 /// An upper bound on the number of distinct values `e` takes over the rows of

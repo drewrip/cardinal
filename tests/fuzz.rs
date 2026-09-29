@@ -37,7 +37,7 @@ impl Gen {
     }
 
     fn leaf(&mut self) -> String {
-        match self.r.below(11) {
+        match self.r.below(12) {
             0 | 1 => "SELECT id AS c0, age AS c1 FROM users".into(),
             2 | 3 => "SELECT id AS c0, user_id AS c1 FROM orders".into(),
             4 => "SELECT user_id AS c0, id AS c1 FROM orders".into(),
@@ -49,14 +49,33 @@ impl Gen {
             8 => "SELECT value AS c0, value AS c1 FROM generate_series(0, 3)".into(),
             // Float columns: -0.0, 0.0 and NaN in the skewed data.
             9 => "SELECT id AS c0, amount AS c1 FROM orders".into(),
+            10 => "SELECT id AS c0, TRY_CAST(date_part('year', d) AS BIGINT) AS c1 \
+                   FROM (SELECT id, make_date(1990 + age % 10, 1 + id % 12, 1) AS d FROM users) \
+                   WHERE d BETWEEN DATE '1992-03-01' AND DATE '1994-06-30'"
+                .into(),
             _ => "SELECT amount AS c0, user_id AS c1 FROM orders".into(),
         }
     }
 
     fn pred(&mut self, t: &str) -> String {
         let c = self.col();
-        match self.r.below(7) {
+        match self.r.below(13) {
             0 => format!("{t}.{c} > {}", self.r.range(0, 40)),
+            7 => format!(
+                "{t}.{c} = {} OR {t}.{c} = {}",
+                self.r.range(0, 5),
+                self.r.range(0, 40)
+            ),
+            // Often contradictory.
+            8 => format!(
+                "{t}.{c} > {} AND {t}.{c} < {}",
+                self.r.range(0, 30),
+                self.r.range(0, 30)
+            ),
+            9 => format!("{t}.{c} <> {}", self.r.range(0, 5)),
+            10 => format!("{t}.{c} IS NULL"),
+            11 => format!("NOT ({t}.{c} > {})", self.r.range(0, 40)),
+            12 => format!("({t}.{c} IN (1, 2) OR {t}.{c} BETWEEN 18 AND 20) AND {t}.{c} <> 2"),
             1 => format!("{t}.{c} IS NOT NULL"),
             2 => format!("{t}.{c} % 2 = 0"),
             3 => format!("{t}.c0 <> {t}.c1"),
@@ -84,8 +103,14 @@ impl Gen {
             }
             2 => {
                 let a = self.rel(d);
-                if self.r.chance(50) {
+                if self.r.chance(40) {
                     format!("SELECT {t}.c1 AS c0, {t}.c0 AS c1 FROM ({a}) {t}")
+                } else if self.r.chance(30) {
+                    let c = self.col();
+                    format!(
+                        "SELECT {t}.c0, CASE WHEN {t}.{c} > 20 THEN 1 WHEN {t}.{c} < 3 THEN {t}.c1 \
+                         END AS c1 FROM ({a}) {t}"
+                    )
                 } else {
                     format!("SELECT {t}.c0, {t}.c0 + {t}.c1 AS c1 FROM ({a}) {t}")
                 }

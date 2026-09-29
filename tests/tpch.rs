@@ -45,10 +45,11 @@ const CASES: &[Case] = &[
         no_keys: MightGrow,
     },
     Case {
+        // grouped by two filtered nations and two ship years: at most 8 rows
         name: "tpch_q07",
         sql: include_str!("tpch/q07.sql"),
         keys: Reduces,
-        no_keys: MightGrow,
+        no_keys: Reduces,
     },
     Case {
         name: "tpch_q08",

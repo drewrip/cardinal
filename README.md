@@ -47,7 +47,7 @@ Every relation also gets:
 | Table scan of `T` | `X = \|T\|`. Composite PK: `X <= Π ndv(pk)` | `<= X` |
 | Pushed-down scan filters | `X <= scan` (a scan's `fetch` is a hint: no bound) | `<=` input |
 | Projection | `X = l` | Column or injective cast: `=`. Deterministic expression: `<= Π ndv(referenced columns)`. Literal: `<= 1` |
-| Filter | `X <= l` | `<=` input. `a = b`: equal, `<=` the other's input. `c = v`, `IS NULL`, `IN (k)`, OR of these: `<= k` |
+| Filter | `X <= l` | `<=` input. `a = b`: equal, `<=` the other's input. See value domains below |
 | Alias, Repartition, Window, Subquery | `X = l` | `=` input (window columns `<= X`) |
 | Sort | `X = l`. With fetch `n`: `X = min(n, l)` | `=` / `<=` |
 | Limit (skip `k`, fetch `n`) | `X = min(n, max(l − k, 0))` | `<=` |
@@ -63,7 +63,7 @@ Every relation also gets:
 | Semi / anti join | `X <=` kept side | `<=`. Semi: equi-key `<=` other side |
 | Mark join | `X =` kept side | `=` |
 | Union | `X = Σ inputs` | `<= Σ`, `>=` each input |
-| Values | `X = rows` | `<=` distinct literals |
+| Values | `X = rows` | Domain: the literals |
 | Empty relation | `X = 0`, or `1` if it produces a row | |
 | Anything else (Unnest, recursive CTE, …) | none | |
 
@@ -87,6 +87,30 @@ A key stays unique:
 
 `UNIQUE` constraints are not trusted (DataFusion doesn't enforce them), and
 ROLLUP / CUBE / GROUPING SETS outputs are not keys, since they repeat key values.
+
+**Value domains.** Rows above a filter or join condition all satisfy it, so
+every relation also carries, per expression, a *domain*: an integer range or a
+finite set of values, plus whether NULL can occur. An expression whose values
+lie in a domain of `k` values has NDV `<= k`, and an empty domain means `X = 0`.
+
+- Facts come from predicates evaluated TRUE: comparisons with literals (`<`,
+  `<=`, `=`, `<>`, `>=`, `>`, `BETWEEN`, `IN`), `IS [NOT] NULL`, boolean
+  columns, `AND` (intersect) and `OR` (union). Any comparison makes its
+  operands non-NULL. Ranges are over integers, dates and decimals of one scale,
+  and sets over those, strings and booleans; floats get no domain.
+- `a = b` in a filter or inner/semi equi-join gives both sides the intersection
+  of their domains.
+- Domains flow through projection (a computed column keeps its expression's
+  facts, both ways), filter, sort, limit, alias, window, distinct, joins (NULL
+  added on a padded side), union (union of domains), and aggregates (group keys,
+  and `MIN` / `MAX` take their argument's domain plus NULL).
+- Some expressions have a domain from their shape: literals, `CASE` (union of
+  its branches), `date_part` (`year` of a date range, and fixed ranges for
+  `month`, `quarter`, `day`, `dow`, ...), and small types (`BOOLEAN`, 8- and
+  16-bit integers). Stored tables' non-nullable columns are never NULL.
+
+So `WHERE id BETWEEN 1 AND 10` on a key gives `X <= 10`, TPC-H Q7 (two
+nations each, two ship years) gives `X <= 8`, and `x > 5 AND x < 3` gives `X = 0`.
 
 **Caveats.**
 
