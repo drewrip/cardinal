@@ -935,7 +935,9 @@ impl<'a> Analyzer<'a> {
         // On an outer join, a padded-side column that is never NULL on matched
         // rows is NULL exactly on the padded rows: at most the other side's
         // rows. It is non-NULL on the matched rows (and, for a full join, the
-        // side's own unmatched rows).
+        // side's own unmatched rows). A full join also keeps each side's own
+        // unmatched rows, whose equi-keys may be NULL, so there only columns
+        // never NULL on their side qualify.
         let nl = join.left.schema().fields().len();
         let (pad_left, pad_right) = match join.join_type {
             JoinType::Left => (false, true),
@@ -946,13 +948,15 @@ impl<'a> Analyzer<'a> {
         let full = join.join_type == JoinType::Full;
         if pad_right {
             let values = if full { Int::add(&[&inner, &r.card]) } else { inner.clone() };
-            for c in never_null_when_matched(join, &join.right, &r.facts, &rk) {
+            let keys = if full { &[][..] } else { &rk[..] };
+            for c in never_null_when_matched(join, &join.right, &r.facts, keys) {
                 o.rows.nulls.push((col(plan, nl + c), l.card.clone(), values.clone()));
             }
         }
         if pad_left {
             let values = if full { Int::add(&[&inner, &l.card]) } else { inner.clone() };
-            for c in never_null_when_matched(join, &join.left, &l.facts, &lk) {
+            let keys = if full { &[][..] } else { &lk[..] };
+            for c in never_null_when_matched(join, &join.left, &l.facts, keys) {
                 o.rows.nulls.push((col(plan, c), r.card.clone(), values.clone()));
             }
         }

@@ -442,3 +442,18 @@ async fn date_trunc_of_a_range() {
     // March 2024 meets the weeks of Feb 26, Mar 4, 11, 18, 25.
     assert_eq!(b.constant, Some(5));
 }
+
+#[tokio::test]
+async fn full_join_keeps_rows_with_null_keys() {
+    // Every left row has a NULL key, so all of them are unmatched and kept:
+    // NULL keys are not only padding.
+    let sql = "SELECT * FROM (SELECT id, user_id FROM orders WHERE user_id IS NULL) a
+               FULL JOIN orders b ON a.user_id = b.user_id WHERE a.user_id IS NULL";
+    for data in common::shop_datasets() {
+        let name = data.name.clone();
+        let ctx = data.context(false);
+        let a = analyze_sql(&ctx, sql).await.unwrap();
+        let v = a.validate(&ctx).await.unwrap();
+        assert_eq!(v.violation, None, "{name}");
+    }
+}

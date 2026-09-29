@@ -150,12 +150,15 @@ leaves NULL (an equi-key, or a column never NULL on the right) is NULL exactly
 on the padded rows. So rows where it is NULL number at most `l`, and rows where
 it is not at most `inner`; both survive operators that keep a subset of rows.
 The anti-join idiom `a LEFT JOIN b ON ... WHERE b.key IS NULL` gives
-`X <= |a|`. Right and full joins are symmetric.
+`X <= |a|`. Right joins are symmetric. A full join also keeps each side's own
+unmatched rows, whose keys may be NULL, so there only columns never NULL on
+their own side qualify.
 
 **Solving.** Every check runs in Z3's incremental mode (after a `push`), which
 uses its SMT core. Its one-shot strategy portfolio first tries bit-blasting the
 nonlinear products (`l·r`, NDV products) once domains bound many variables,
-which is an order of magnitude slower.
+which is an order of magnitude slower. If the SMT core gives up on the
+verdict, the portfolio gets a turn on a fresh solver.
 
 **Caveats.**
 

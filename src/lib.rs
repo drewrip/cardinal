@@ -319,15 +319,39 @@ fn analyze_with(
     a.solver.assert(root.le(&total).not());
     let smtlib = a.solver.to_string();
 
-    let verdict = match a.solver.check() {
+    // If the incremental core gives up, fall back to the one-shot portfolio.
+    let mut result = a.solver.check();
+    let portfolio = analyzer::new_solver();
+    let solver = if result == SatResult::Unknown {
+        portfolio.from_string(smtlib.as_str());
+        result = portfolio.check();
+        &portfolio
+    } else {
+        &a.solver
+    };
+    let verdict = match result {
         SatResult::Unsat => Verdict::Reduces,
         SatResult::Unknown => Verdict::Unknown(
-            a.solver
+            solver
                 .get_reason_unknown()
                 .unwrap_or_else(|| "unknown".to_string()),
         ),
         SatResult::Sat => {
-            let model = a.solver.get_model().expect("sat result has a model");
+            // Z3's SMT core may pick values too large to report; look for a
+            // counterexample with small ones first.
+            let cap = Int::from_i64(1 << 40);
+            solver.push();
+            for (_, v) in &a.vars {
+                solver.assert(v.le(&cap));
+            }
+            for t in a.tables.values() {
+                solver.assert(t.var.le(&cap));
+            }
+            if solver.check() != SatResult::Sat {
+                solver.pop(1);
+                solver.check();
+            }
+            let model = solver.get_model().expect("sat result has a model");
             let value = |v: &Int| model.eval(v, true).and_then(|x| x.as_i64());
             Verdict::MightGrow(Counterexample {
                 tables: a
