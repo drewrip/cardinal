@@ -338,3 +338,52 @@ async fn disjoint_filters_of_one_table_partition_it() {
     .await;
     assert_eq!(table(&b, "users"), Some((exactly(2, 1), false)));
 }
+
+#[tokio::test]
+async fn top_n_per_group() {
+    // row_number() numbers each partition's rows, so rn <= 3 keeps at most
+    // three rows per user.
+    let b = bounds(
+        "SELECT * FROM (SELECT o.user_id, o.amount, row_number() OVER
+           (PARTITION BY o.user_id ORDER BY o.amount DESC) AS rn
+         FROM orders o JOIN users u ON o.user_id = u.id) WHERE rn <= 3",
+    )
+    .await;
+    assert_eq!(table(&b, "users"), Some((exactly(3, 1), false)));
+    // Without a partition, a page of rows.
+    let b = bounds(
+        "SELECT id FROM (SELECT id, row_number() OVER (ORDER BY age) AS rn FROM users) t
+         WHERE t.rn BETWEEN 11 AND 20",
+    )
+    .await;
+    assert_eq!(b.constant, Some(10));
+    // rank() repeats on ties, so it bounds nothing.
+    let b = bounds(
+        "SELECT id FROM (SELECT id, rank() OVER (ORDER BY age) AS r FROM users) t WHERE t.r = 1",
+    )
+    .await;
+    assert_eq!(b.constant, None);
+}
+
+#[tokio::test]
+async fn left_join_rows_without_a_match() {
+    // The anti-join pattern: rows padded with NULL are unmatched users.
+    let b = bounds(
+        "SELECT u.* FROM users u LEFT JOIN orders o ON o.user_id = u.id WHERE o.user_id IS NULL",
+    )
+    .await;
+    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    // Without a key on either side, the matched rows are the inner join's.
+    let b = bounds(
+        "SELECT * FROM order_items i LEFT JOIN orders o ON i.qty = o.user_id
+         WHERE o.user_id IS NULL",
+    )
+    .await;
+    assert_eq!(table(&b, "order_items"), Some((exactly(1, 1), false)));
+    let b = bounds(
+        "SELECT * FROM order_items i FULL JOIN orders o ON i.qty = o.user_id
+         WHERE i.qty IS NULL AND o.user_id > 3",
+    )
+    .await;
+    assert_eq!(table(&b, "orders"), Some((exactly(1, 1), false)));
+}

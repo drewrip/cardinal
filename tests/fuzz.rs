@@ -126,8 +126,15 @@ impl Gen {
                     1 => format!("{t}.{p} = {u}.{q} AND {t}.{x} <> {u}.{y}"),
                     _ => format!("{t}.{p} = {u}.{q}"),
                 };
+                // Outer-join rows by whether they matched.
+                let pad = match self.r.below(6) {
+                    0 => format!(" WHERE {u}.{q} IS NULL"),
+                    1 => format!(" WHERE {t}.{p} IS NULL"),
+                    2 => format!(" WHERE {u}.{q} IS NOT NULL"),
+                    _ => String::new(),
+                };
                 format!(
-                    "SELECT {t}.{x} AS c0, {u}.{y} AS c1 FROM ({a}) {t} {kind} ({b}) {u} ON {on}"
+                    "SELECT {t}.{x} AS c0, {u}.{y} AS c1 FROM ({a}) {t} {kind} ({b}) {u} ON {on}{pad}"
                 )
             }
             6 => {
@@ -187,6 +194,22 @@ impl Gen {
                     _ => format!("NOT EXISTS (SELECT 1 FROM ({b}) {u} WHERE {u}.{q} = {t}.{p})"),
                 };
                 format!("SELECT {t}.c0, {t}.c1 FROM ({a}) {t} WHERE {cond}")
+            }
+            14 if self.r.chance(50) => {
+                // Top-k per partition.
+                let a = self.rel(d);
+                let u = self.alias();
+                let c = self.col();
+                let part = if self.r.chance(70) {
+                    format!("PARTITION BY {t}.{c}")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "SELECT {u}.c0, {u}.c1 FROM (SELECT {t}.c0, {t}.c1, row_number() OVER \
+                     ({part} ORDER BY {t}.c0) AS rn FROM ({a}) {t}) {u} WHERE {u}.rn <= {}",
+                    self.r.range(0, 4)
+                )
             }
             14 => {
                 let a = self.rel(d);

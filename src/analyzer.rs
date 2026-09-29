@@ -47,11 +47,49 @@ pub(crate) struct Rel {
     pub(crate) ndv: Vec<Int>,
     /// What every row's values satisfy, whatever the data.
     pub(crate) facts: Facts,
-    /// `(column, bound)`: the column holds non-negative integers summing to at
-    /// most `bound` over all rows, like the counts of a GROUP BY.
-    pub(crate) sums: Vec<(Expr, Int)>,
+    /// Facts that also hold for any subset of the rows.
+    pub(crate) rows: Rows,
     /// The stored table this relation's rows are distinct rows of, if any.
     pub(crate) origin: Option<Origin>,
+}
+
+/// Facts about a relation's rows that also hold for any subset of them, so
+/// they survive operators that keep some rows as they are.
+#[derive(Clone, Default)]
+pub(crate) struct Rows {
+    /// `(column, bound)`: the column holds non-negative integers summing to at
+    /// most `bound` over all rows, like the counts of a GROUP BY.
+    sums: Vec<(Expr, Int)>,
+    /// Sets of columns that are unique together, beyond declared keys.
+    keys: Vec<Vec<Expr>>,
+    /// `(column, nulls, values)`: at most `nulls` rows have the column NULL,
+    /// and at most `values` rows have it non-NULL, like the padded and
+    /// matched rows of an outer join.
+    nulls: Vec<(Expr, Int, Int)>,
+}
+
+impl Rows {
+    /// The facts whose columns all map through `map`, over the new columns.
+    fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> Rows {
+        let r = |c: &Expr| domain::rename(c, map);
+        Rows {
+            sums: self
+                .sums
+                .iter()
+                .filter_map(|(c, b)| Some((r(c)?, b.clone())))
+                .collect(),
+            keys: self
+                .keys
+                .iter()
+                .filter_map(|k| k.iter().map(r).collect())
+                .collect(),
+            nulls: self
+                .nulls
+                .iter()
+                .filter_map(|(c, a, b)| Some((r(c)?, a.clone(), b.clone())))
+                .collect(),
+        }
+    }
 }
 
 pub(crate) struct Analyzer<'a> {
@@ -195,7 +233,7 @@ impl<'a> Analyzer<'a> {
             card,
             ndv,
             facts: Facts::default(),
-            sums: vec![],
+            rows: Rows::default(),
             origin: None,
         };
         self.unique_columns(plan, &rel);
@@ -300,14 +338,43 @@ impl<'a> Analyzer<'a> {
                 _ => {}
             }
         }
+        // A unique set of columns has a distinct combination on every row.
+        // Columns with few possible values count as constants, which keeps
+        // the product linear where possible.
+        'keys: for key in &rel.rows.keys {
+            let mut constant: u128 = 1;
+            let mut factors: Vec<&Int> = vec![];
+            for e in key {
+                let Expr::Column(c) = e else { continue 'keys };
+                let Ok(i) = schema.index_of_column(c) else { continue 'keys };
+                match rel.facts.dom(e, schema).size() {
+                    Some(k) => constant = constant.saturating_mul(k),
+                    None => factors.push(&rel.ndv[i]),
+                }
+            }
+            if constant > u64::MAX as u128 {
+                continue;
+            }
+            if let Some(p) = product(&factors, self.max_product) {
+                self.assert(rel.card.le(p * int(constant as u64)));
+            }
+        }
         // Rows whose values are each at least `k` and sum to at most `bound`
         // number at most `bound / k`.
-        for (c, bound) in &rel.sums {
+        for (c, bound) in &rel.rows.sums {
             if let Some(k) = rel.facts.dom(c, schema).min()
                 && k >= 1
                 && k <= u64::MAX as i128
             {
                 self.assert((&rel.card * int(k as u64)).le(bound));
+            }
+        }
+        for (c, nulls, values) in &rel.rows.nulls {
+            let d = rel.facts.dom(c, schema);
+            if d.is_null_only() {
+                self.assert(rel.card.le(nulls));
+            } else if d.never_null() {
+                self.assert(rel.card.le(values));
             }
         }
     }
@@ -355,7 +422,7 @@ impl<'a> Analyzer<'a> {
                     self.expr_ndv(&o.ndv[j], e, &p.input, &l);
                 }
                 o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
-                o.sums = rename_sums(&l.sums, &|c| passed_column(plan, &p.expr, c));
+                o.rows = l.rows.rename(&|c| passed_column(plan, &p.expr, c));
                 o.origin = l.origin.as_ref().map(|origin| {
                     origin.project(p.expr.iter().map(|e| match strip_alias(e) {
                         Expr::Column(c) => p.input.schema().index_of_column(c).ok(),
@@ -369,7 +436,11 @@ impl<'a> Analyzer<'a> {
             LogicalPlan::Repartition(p) => self.same_rows("Repartition", plan, &p.input),
             // Window output is the input's columns, then one column per window
             // function, over the same rows.
-            LogicalPlan::Window(p) => self.same_rows("Window", plan, &p.input),
+            LogicalPlan::Window(p) => {
+                let mut o = self.same_rows("Window", plan, &p.input);
+                self.window_functions(plan, &p.input, &p.window_expr, &mut o);
+                o
+            }
             LogicalPlan::Filter(f) => {
                 let l = self.visit(&f.input);
                 let mut o = self.fresh("Filter", plan);
@@ -377,7 +448,7 @@ impl<'a> Analyzer<'a> {
                 self.subset_ndv(&o, &l);
                 self.filter_ndv(&f.predicate, &f.input, &o, &l);
                 o.facts = l.facts.clone();
-                o.sums = l.sums.clone();
+                o.rows = l.rows.clone();
                 o.facts.assume(&f.predicate, plan.schema());
                 o.origin = l.origin.clone().map(|x| x.narrow(&o.facts, plan.schema()));
                 o
@@ -386,7 +457,7 @@ impl<'a> Analyzer<'a> {
                 let l = self.visit(input);
                 let mut o = self.fresh("Distinct", plan);
                 o.facts = l.facts.clone();
-                o.sums = l.sums.clone();
+                o.rows = l.rows.clone();
                 o.origin = l.origin.clone();
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
@@ -426,7 +497,7 @@ impl<'a> Analyzer<'a> {
                 let l = self.visit(&s.input);
                 let mut o = self.fresh("Sort", plan);
                 o.facts = l.facts.clone();
-                o.sums = l.sums.clone();
+                o.rows = l.rows.clone();
                 o.origin = l.origin.clone();
                 match s.fetch {
                     None => {
@@ -445,7 +516,7 @@ impl<'a> Analyzer<'a> {
                 let l = self.visit(&lim.input);
                 let mut o = self.fresh("Limit", plan);
                 o.facts = l.facts.clone();
-                o.sums = l.sums.clone();
+                o.rows = l.rows.clone();
                 o.origin = l.origin.clone();
                 self.subset_ndv(&o, &l);
                 let skip = match lim.get_skip_type() {
@@ -614,6 +685,39 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Ranking functions number rows from 1, and `row_number()` numbers each
+    /// partition's rows 1, 2, 3, ...: with the partition keys, it is unique.
+    fn window_functions(&self, plan: &LogicalPlan, input: &LogicalPlan, exprs: &[Expr], o: &mut Rel) {
+        let n = input.schema().fields().len();
+        for (i, e) in exprs.iter().enumerate() {
+            let Expr::WindowFunction(w) = strip_alias(e) else {
+                continue;
+            };
+            let name = w.fun.name();
+            if !matches!(name, "row_number" | "rank" | "dense_rank") || w.params.filter.is_some() {
+                continue;
+            }
+            let c = col(plan, n + i);
+            o.facts.add(&c, Dom::at_least(1), plan.schema());
+            if name != "row_number" {
+                continue;
+            }
+            let partition: Option<Vec<Expr>> = w
+                .params
+                .partition_by
+                .iter()
+                .map(|p| match strip_alias(p) {
+                    Expr::Column(_) => Some(strip_alias(p).clone()),
+                    _ => None,
+                })
+                .collect();
+            if let Some(mut key) = partition {
+                key.push(c);
+                o.rows.keys.push(key);
+            }
+        }
+    }
+
     /// Same rows as the input, whose columns come first and unchanged.
     fn same_rows(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
@@ -621,10 +725,11 @@ impl<'a> Analyzer<'a> {
         self.assert(o.card.eq(&l.card));
         self.equal_ndv(&o, &l);
         o.facts = l.facts.by_position(input.schema(), plan.schema());
-        o.sums = rename_sums(&l.sums, &|c| {
+        let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;
             child_column(plan, i)
-        });
+        };
+        o.rows = l.rows.rename(&by_position);
         o.origin = l.origin.as_ref().map(|x| x.with_width(plan.schema().fields().len()));
         o
     }
@@ -716,7 +821,7 @@ impl<'a> Analyzer<'a> {
             if let Expr::AggregateFunction(f) = strip_alias(e)
                 && f.func.name() == "count"
             {
-                o.sums.push((col(plan, agg.group_expr.len() + i), l.card.clone()));
+                o.rows.sums.push((col(plan, agg.group_expr.len() + i), l.card.clone()));
             }
         }
         self.assert(o.card.le(&l.card));
@@ -822,11 +927,35 @@ impl<'a> Analyzer<'a> {
         self.join_ndv(join, &o, &l, &r);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
-        o.sums = match join.join_type {
-            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.sums.clone(),
-            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.sums.clone(),
-            _ => vec![],
+        o.rows = match join.join_type {
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.rows.clone(),
+            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.rows.clone(),
+            _ => Rows::default(),
         };
+        // On an outer join, a padded-side column that is never NULL on matched
+        // rows is NULL exactly on the padded rows: at most the other side's
+        // rows. It is non-NULL on the matched rows (and, for a full join, the
+        // side's own unmatched rows).
+        let nl = join.left.schema().fields().len();
+        let (pad_left, pad_right) = match join.join_type {
+            JoinType::Left => (false, true),
+            JoinType::Right => (true, false),
+            JoinType::Full => (true, true),
+            _ => (false, false),
+        };
+        let full = join.join_type == JoinType::Full;
+        if pad_right {
+            let values = if full { Int::add(&[&inner, &r.card]) } else { inner.clone() };
+            for c in never_null_when_matched(join, &join.right, &r.facts, &rk) {
+                o.rows.nulls.push((col(plan, nl + c), l.card.clone(), values.clone()));
+            }
+        }
+        if pad_left {
+            let values = if full { Int::add(&[&inner, &l.card]) } else { inner.clone() };
+            for c in never_null_when_matched(join, &join.left, &l.facts, &lk) {
+                o.rows.nulls.push((col(plan, c), r.card.clone(), values.clone()));
+            }
+        }
         let width = plan.schema().fields().len();
         o.origin = match join.join_type {
             JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.origin.as_ref(),
@@ -938,9 +1067,18 @@ fn passed_column(plan: &LogicalPlan, exprs: &[Expr], c: &Column) -> Option<Colum
     Some(Column::from(plan.schema().qualified_field(j)))
 }
 
-fn rename_sums(sums: &[(Expr, Int)], map: &dyn Fn(&Column) -> Option<Column>) -> Vec<(Expr, Int)> {
-    sums.iter()
-        .filter_map(|(c, b)| Some((domain::rename(c, map)?, b.clone())))
+/// Positions of `side`'s columns that are never NULL on a row matched by
+/// `join`: those never NULL on `side`, and its equi-key columns `keys`
+/// (unless NULL keys match).
+fn never_null_when_matched(join: &Join, side: &LogicalPlan, facts: &Facts, keys: &[&Expr]) -> Vec<usize> {
+    let schema = side.schema();
+    let keys_non_null = join.null_equality != NullEquality::NullEqualsNull;
+    (0..schema.fields().len())
+        .filter(|&i| {
+            let c = Expr::Column(Column::from(schema.qualified_field(i)));
+            let key = keys_non_null && keys.iter().any(|k| strip_alias(k) == &c);
+            key || facts.dom(&c, schema).never_null()
+        })
         .collect()
 }
 

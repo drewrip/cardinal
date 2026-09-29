@@ -130,6 +130,19 @@ disjoint (some column's domains don't meet), `Σ part <= |T|`. So
 `... WHERE age < 18 UNION ALL ... WHERE age >= 18` gives `X <= |users|`, not
 `2·|users|`.
 
+**Window functions.** `row_number()`, `rank()` and `dense_rank()` are at
+least 1. `row_number() OVER (PARTITION BY P)` numbers each partition's rows
+1, 2, 3, ..., so `(P, rn)` is unique: `X <= Π ndv(P) · ndv(rn)`, where columns
+with a finite domain count as the domain's size. So a top-k-per-group filter
+`WHERE rn <= 3` gives `X <= 3·ndv(P)`, and `X <= 3` with no partition.
+
+**Outer-join padding.** On a left join, a right column that no matched row
+leaves NULL (an equi-key, or a column never NULL on the right) is NULL exactly
+on the padded rows. So rows where it is NULL number at most `l`, and rows where
+it is not at most `inner`; both survive operators that keep a subset of rows.
+The anti-join idiom `a LEFT JOIN b ON ... WHERE b.key IS NULL` gives
+`X <= |a|`. Right and full joins are symmetric.
+
 **Caveats.**
 
 - Equality-based NDV rules skip floats: `-0.0 = 0.0` in SQL, but the two differ as bits.

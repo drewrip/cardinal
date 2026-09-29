@@ -166,6 +166,11 @@ impl Dom {
         }
     }
 
+    /// True if the only possible value is NULL.
+    pub(crate) fn is_null_only(&self) -> bool {
+        self.null && self.vals == Vals::Set(BTreeSet::new())
+    }
+
     pub(crate) fn never_null(&self) -> bool {
         !self.null
     }
