@@ -1,5 +1,5 @@
 //! Test suite of simple to complex queries, each checked against the claim
-//! `O_root <= Σ scans`. Tables may be empty. Refuted queries also check the
+//! `O_root <= Σ scans`. Tables may be empty. `MightGrow` queries also check the
 //! structure of the counterexample.
 
 use std::sync::Arc;
@@ -61,24 +61,24 @@ async fn run(sql: &str) -> Analysis {
     a
 }
 
-/// Asserts the claim is Proven.
-async fn proven(sql: &str) -> Analysis {
+/// Asserts the verdict is `Reduces`.
+async fn reduces(sql: &str) -> Analysis {
     let a = run(sql).await;
-    assert_eq!(a.verdict, Verdict::Proven, "expected Proven for {sql}");
+    assert_eq!(a.verdict, Verdict::Reduces, "expected Reduces for {sql}");
     a
 }
 
-/// Asserts the verdict is Refuted and returns the counterexample model.
-async fn refuted(sql: &str) -> (Analysis, Counterexample) {
+/// Asserts the verdict is `MightGrow` and returns the counterexample model.
+async fn might_grow(sql: &str) -> (Analysis, Counterexample) {
     let a = run(sql).await;
     match a.verdict.clone() {
-        Verdict::Refuted(m) => {
+        Verdict::MightGrow(m) => {
             // Sanity-check the counterexample actually violates the claim.
             let total: i64 = a.scans.iter().map(|(s, _)| m.var(s)).sum();
             assert!(m.var(&a.root) > total, "model does not refute the claim");
             (a, m)
         }
-        v => panic!("expected Refuted for {sql}, got {v:?}"),
+        v => panic!("expected MightGrow for {sql}, got {v:?}"),
     }
 }
 
@@ -88,25 +88,25 @@ fn has_op(a: &Analysis, kind: &str) -> bool {
 
 #[tokio::test]
 async fn select_star() {
-    let a = proven("SELECT * FROM users").await;
+    let a = reduces("SELECT * FROM users").await;
     assert_eq!(a.scans.len(), 1);
     assert_eq!(a.scans.len(), 1);
 }
 
 #[tokio::test]
 async fn projection() {
-    proven("SELECT name, age + 1 FROM users").await;
+    reduces("SELECT name, age + 1 FROM users").await;
 }
 
 #[tokio::test]
 async fn filter() {
-    let a = proven("SELECT * FROM users WHERE age > 30").await;
+    let a = reduces("SELECT * FROM users WHERE age > 30").await;
     assert!(has_op(&a, "Filter"));
 }
 
 #[tokio::test]
 async fn scalar_count() {
-    let (a, m) = refuted("SELECT count(*) FROM users").await;
+    let (a, m) = might_grow("SELECT count(*) FROM users").await;
     assert_eq!(m.var(&a.root), 1);
     // 1 > users forces the table to be empty.
     assert_eq!(m.table("users"), 0);
@@ -114,46 +114,47 @@ async fn scalar_count() {
 
 #[tokio::test]
 async fn group_by() {
-    let a = proven("SELECT age, count(*) FROM users GROUP BY age").await;
+    let a = reduces("SELECT age, count(*) FROM users GROUP BY age").await;
     assert!(has_op(&a, "GroupBy"));
 }
 
 #[tokio::test]
 async fn group_by_having() {
-    let a =
-        proven("SELECT user_id, sum(amount) FROM orders GROUP BY user_id HAVING sum(amount) > 100")
-            .await;
+    let a = reduces(
+        "SELECT user_id, sum(amount) FROM orders GROUP BY user_id HAVING sum(amount) > 100",
+    )
+    .await;
     assert!(has_op(&a, "GroupBy") && has_op(&a, "Filter"));
 }
 
 #[tokio::test]
 async fn distinct() {
-    proven("SELECT DISTINCT age FROM users").await;
+    reduces("SELECT DISTINCT age FROM users").await;
 }
 
 #[tokio::test]
 async fn order_by_limit() {
-    let a = proven("SELECT * FROM users ORDER BY age LIMIT 10").await;
+    let a = reduces("SELECT * FROM users ORDER BY age LIMIT 10").await;
     // Exactly min(10, |users|) rows.
     assert_eq!(a.bounds().unwrap().constant, Some(10));
 }
 
 #[tokio::test]
 async fn limit_offset() {
-    let a = proven("SELECT * FROM users LIMIT 5 OFFSET 20").await;
+    let a = reduces("SELECT * FROM users LIMIT 5 OFFSET 20").await;
     assert_eq!(a.bounds().unwrap().constant, Some(5));
 }
 
 #[tokio::test]
 async fn equijoin_two_tables() {
-    let a = proven("SELECT * FROM users u JOIN orders o ON u.id = o.user_id").await;
+    let a = reduces("SELECT * FROM users u JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "InnerKeyJoin"));
     assert_eq!(a.scans.len(), 2);
 }
 
 #[tokio::test]
 async fn equijoin_three_tables() {
-    let a = proven(
+    let a = reduces(
         "SELECT * FROM orders o
          JOIN order_items oi ON o.id = oi.order_id
          JOIN products p ON oi.product_id = p.id",
@@ -164,26 +165,26 @@ async fn equijoin_three_tables() {
 
 #[tokio::test]
 async fn implicit_join_becomes_equijoin() {
-    let a = proven("SELECT * FROM users u, orders o WHERE u.id = o.user_id").await;
+    let a = reduces("SELECT * FROM users u, orders o WHERE u.id = o.user_id").await;
     assert!(has_op(&a, "InnerKeyJoin"));
 }
 
 #[tokio::test]
 async fn self_join_counts_each_scan() {
-    let a = proven("SELECT * FROM users a JOIN users b ON a.id = b.id").await;
+    let a = reduces("SELECT * FROM users a JOIN users b ON a.id = b.id").await;
     assert_eq!(a.scans.len(), 2);
     assert!(a.scans.iter().all(|(_, t)| t == "users"));
 }
 
 #[tokio::test]
 async fn non_equijoin() {
-    let (a, _) = refuted("SELECT * FROM users u JOIN orders o ON u.age < o.amount").await;
+    let (a, _) = might_grow("SELECT * FROM users u JOIN orders o ON u.age < o.amount").await;
     assert!(has_op(&a, "InnerThetaJoin"));
 }
 
 #[tokio::test]
 async fn cross_join() {
-    let (a, m) = refuted("SELECT * FROM users CROSS JOIN products").await;
+    let (a, m) = might_grow("SELECT * FROM users CROSS JOIN products").await;
     assert!(has_op(&a, "InnerCrossJoin"));
     assert_eq!(m.var(&a.root), m.table("users") * m.table("products"));
 }
@@ -192,49 +193,49 @@ async fn cross_join() {
 async fn left_join() {
     // users.id is the left side's key, so each order matches at most one user:
     // the matches number at most |orders|, plus at most |users| unmatched rows.
-    let a = proven("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
+    let a = reduces("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "LeftKeyJoin"));
 }
 
 #[tokio::test]
 async fn full_join() {
-    let a = proven("SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id").await;
+    let a = reduces("SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "FullKeyJoin"));
 }
 
 #[tokio::test]
 async fn union_all() {
-    let a = proven("SELECT id FROM users UNION ALL SELECT id FROM products").await;
+    let a = reduces("SELECT id FROM users UNION ALL SELECT id FROM products").await;
     assert!(has_op(&a, "Union"));
 }
 
 #[tokio::test]
 async fn union_distinct() {
-    let a = proven("SELECT id FROM users UNION SELECT id FROM products").await;
+    let a = reduces("SELECT id FROM users UNION SELECT id FROM products").await;
     assert!(has_op(&a, "Union"));
 }
 
 #[tokio::test]
 async fn intersect() {
-    let a = proven("SELECT id FROM users INTERSECT SELECT user_id FROM orders").await;
+    let a = reduces("SELECT id FROM users INTERSECT SELECT user_id FROM orders").await;
     assert!(has_op(&a, "LeftSemi"));
 }
 
 #[tokio::test]
 async fn except() {
-    let a = proven("SELECT id FROM users EXCEPT SELECT user_id FROM orders").await;
+    let a = reduces("SELECT id FROM users EXCEPT SELECT user_id FROM orders").await;
     assert!(has_op(&a, "LeftAnti"));
 }
 
 #[tokio::test]
 async fn in_subquery() {
-    let a = proven("SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)").await;
+    let a = reduces("SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)").await;
     assert!(has_op(&a, "LeftSemi"));
 }
 
 #[tokio::test]
 async fn not_exists() {
-    let a = proven(
+    let a = reduces(
         "SELECT * FROM users u WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)",
     )
     .await;
@@ -243,13 +244,13 @@ async fn not_exists() {
 
 #[tokio::test]
 async fn scalar_subquery() {
-    let a = proven("SELECT * FROM orders WHERE amount > (SELECT avg(amount) FROM orders)").await;
+    let a = reduces("SELECT * FROM orders WHERE amount > (SELECT avg(amount) FROM orders)").await;
     assert_eq!(a.scans.len(), 2);
 }
 
 #[tokio::test]
 async fn cte() {
-    proven(
+    reduces(
         "WITH big AS (SELECT * FROM orders WHERE amount > 100)
          SELECT user_id, count(*) FROM big GROUP BY user_id",
     )
@@ -258,20 +259,20 @@ async fn cte() {
 
 #[tokio::test]
 async fn values() {
-    let (a, m) = refuted("SELECT * FROM (VALUES (1), (2), (3)) AS t(x)").await;
+    let (a, m) = might_grow("SELECT * FROM (VALUES (1), (2), (3)) AS t(x)").await;
     assert!(a.scans.is_empty());
     assert_eq!(m.var(&a.root), 3);
 }
 
 #[tokio::test]
 async fn window_function() {
-    let a = proven("SELECT id, row_number() OVER (ORDER BY age) FROM users").await;
+    let a = reduces("SELECT id, row_number() OVER (ORDER BY age) FROM users").await;
     assert!(has_op(&a, "Window"));
 }
 
 #[tokio::test]
 async fn tpch_style() {
-    let a = proven(
+    let a = reduces(
         "SELECT u.name, sum(oi.qty * p.price) AS revenue
          FROM users u
          JOIN orders o ON u.id = o.user_id
@@ -291,7 +292,7 @@ async fn tpch_style() {
 #[tokio::test]
 async fn qualified_and_bare_names_are_one_table() {
     // Previously `users` and `datafusion.public.users` got separate variables.
-    let a = proven("SELECT * FROM users a JOIN datafusion.public.users b ON a.id = b.id").await;
+    let a = reduces("SELECT * FROM users a JOIN datafusion.public.users b ON a.id = b.id").await;
     assert_eq!(a.scans.len(), 2);
     assert!(a.scans.iter().all(|(_, t)| t == "users"));
     assert_eq!(a.smtlib.matches("(declare-fun T").count(), 1);
@@ -300,7 +301,7 @@ async fn qualified_and_bare_names_are_one_table() {
 #[tokio::test]
 async fn recursive_work_table_is_not_input() {
     // Previously the work table `r` was counted as a base table scan.
-    let (a, _) = refuted(
+    let (a, _) = might_grow(
         "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5)
          SELECT * FROM r",
     )
@@ -313,7 +314,7 @@ async fn recursive_work_table_is_not_input() {
 async fn table_function_is_not_input() {
     // Previously generate_series was a "table" whose rows counted as input,
     // which made `SELECT * FROM generate_series(..)` provable.
-    let (a, _) = refuted("SELECT * FROM generate_series(1, 5)").await;
+    let (a, _) = might_grow("SELECT * FROM generate_series(1, 5)").await;
     assert!(a.scans.is_empty());
 }
 
@@ -324,14 +325,14 @@ async fn table_named_like_an_operator_variable() {
     let ctx = setup();
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
     let mem = MemTable::try_new(schema, vec![vec![]]).unwrap();
-    ctx.register_table(TableReference::bare("O1_Filter"), Arc::new(mem))
+    ctx.register_table(TableReference::bare("op1_Filter"), Arc::new(mem))
         .unwrap();
-    let a = analyze_sql(&ctx, r#"SELECT * FROM "O1_Filter" WHERE x > 1"#)
+    let a = analyze_sql(&ctx, r#"SELECT * FROM "op1_Filter" WHERE x > 1"#)
         .await
         .unwrap();
-    assert_eq!(a.verdict, Verdict::Proven);
-    assert!(a.smtlib.contains("(declare-fun T0_O1_Filter () Int)"));
-    assert!(a.smtlib.contains("(declare-fun O1_Filter () Int)"));
+    assert_eq!(a.verdict, Verdict::Reduces);
+    assert!(a.smtlib.contains("(declare-fun T0_op1_Filter () Int)"));
+    assert!(a.smtlib.contains("(declare-fun op1_Filter () Int)"));
 }
 
 #[tokio::test]
@@ -352,14 +353,14 @@ async fn pushed_down_scan_filters_and_fetch() {
     .build()
     .unwrap();
     let a = cardinal::analyze_plan(&plan);
-    assert_eq!(a.verdict, Verdict::Proven);
+    assert_eq!(a.verdict, Verdict::Reduces);
     assert!(has_op(&a, "ScanFilter"));
     // A scan's fetch is a hint (providers may return more rows), so it must not
     // bound the output. Previously this asserted `root <= 7`.
     assert!(!a.smtlib.contains(" 7)"));
     assert_eq!(
         a.scans,
-        vec![("O0_Scan_people".to_string(), "people".to_string())]
+        vec![("op0_Scan_people".to_string(), "people".to_string())]
     );
 }
 
@@ -390,11 +391,11 @@ async fn validate_catches_a_false_primary_key() {
     )
     .await
     .unwrap();
-    assert_eq!(a.verdict, Verdict::Proven);
+    assert_eq!(a.verdict, Verdict::Reduces);
     let v = a.validate(&ctx).await.unwrap();
-    assert_eq!(v.violation.as_deref(), Some("O0_Scan_people_c0"));
-    assert_eq!(v.rows["O0_Scan_people"], 3);
-    assert_eq!(v.rows["O0_Scan_people_c0"], 1);
+    assert_eq!(v.violation.as_deref(), Some("op0_Scan_people_c0"));
+    assert_eq!(v.rows["op0_Scan_people"], 3);
+    assert_eq!(v.rows["op0_Scan_people_c0"], 1);
 }
 
 // --- Join keys: only declared primary keys count as unique ------------------
@@ -402,7 +403,7 @@ async fn validate_catches_a_false_primary_key() {
 #[tokio::test]
 async fn non_key_equijoin_is_bounded_by_product() {
     // `age` is not a key: the bound is l * r, which exceeds l + r.
-    let (a, m) = refuted("SELECT * FROM users a JOIN users b ON a.age = b.age").await;
+    let (a, m) = might_grow("SELECT * FROM users a JOIN users b ON a.age = b.age").await;
     assert!(has_op(&a, "InnerEquiJoin"));
     assert!(m.var(&a.root) > 2 * m.table("users"));
 }
@@ -424,13 +425,13 @@ async fn unique_constraint_is_not_trusted() {
     )
     .await
     .unwrap();
-    assert!(matches!(a.verdict, Verdict::Refuted(_)));
+    assert!(matches!(a.verdict, Verdict::MightGrow(_)));
     assert!(has_op(&a, "InnerEquiJoin"));
 }
 
 #[tokio::test]
 async fn group_by_output_is_not_a_key() {
-    let (a, _) = refuted(
+    let (a, _) = might_grow(
         "SELECT * FROM (SELECT user_id FROM orders GROUP BY user_id) g
          JOIN (SELECT user_id FROM orders GROUP BY user_id) h ON g.user_id = h.user_id",
     )
@@ -440,13 +441,13 @@ async fn group_by_output_is_not_a_key() {
 
 #[tokio::test]
 async fn expression_key_is_not_a_key() {
-    let (a, _) = refuted("SELECT * FROM users u JOIN orders o ON u.id + 0 = o.user_id").await;
+    let (a, _) = might_grow("SELECT * FROM users u JOIN orders o ON u.id + 0 = o.user_id").await;
     assert!(has_op(&a, "InnerEquiJoin"));
 }
 
 #[tokio::test]
 async fn key_survives_projection_alias_and_filter() {
-    let a = proven(
+    let a = reduces(
         "SELECT * FROM (SELECT id AS uid FROM users WHERE age > 20) t
          JOIN orders o ON t.uid = o.user_id",
     )
@@ -458,7 +459,7 @@ async fn key_survives_projection_alias_and_filter() {
 async fn key_survives_a_join_on_the_other_sides_key() {
     // Each order matches at most one user, so orders.id stays unique after the
     // first join and keys the second.
-    let a = proven(
+    let a = reduces(
         "SELECT * FROM orders o JOIN users u ON o.user_id = u.id
          JOIN order_items oi ON o.id = oi.order_id",
     )
@@ -471,7 +472,7 @@ async fn key_survives_a_join_on_the_other_sides_key() {
 async fn key_lost_after_a_non_key_join() {
     // Joining orders to order_items on a non-key column duplicates orders rows,
     // so orders.id is no longer unique on either side of the final join.
-    let (a, _) = refuted(
+    let (a, _) = might_grow(
         "WITH t AS (SELECT o.id AS oid FROM orders o JOIN order_items oi ON o.amount = oi.qty)
          SELECT * FROM t a JOIN t b ON a.oid = b.oid",
     )
@@ -520,7 +521,7 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 }
 
 fn operators(a: &Analysis) -> usize {
-    a.smtlib.matches("(declare-fun O").count()
+    a.smtlib.matches("(declare-fun op").count()
 }
 
 #[tokio::test]
@@ -600,7 +601,7 @@ async fn odd_table_names_round_trip() {
     )
     .await
     .unwrap();
-    assert_eq!(a.verdict, Verdict::Proven);
+    assert_eq!(a.verdict, Verdict::Reduces);
     assert_eq!(a.scans[0].1, name);
     let v = a.validate(&ctx).await.unwrap();
     assert_eq!(v.violation, None);
@@ -628,16 +629,16 @@ async fn cast_join_key_stays_unique() {
     .unwrap();
     assert!(a.plan.contains("CAST"), "{}", a.plan);
     assert!(has_op(&a, "InnerKeyJoin"), "{}", a.smtlib);
-    assert_eq!(a.verdict, Verdict::Proven);
+    assert_eq!(a.verdict, Verdict::Reduces);
 }
 
 #[tokio::test]
 async fn keyed_join_also_bounded_by_product() {
     // max(l, r) alone is looser than l * r when a side is empty.
-    let a = proven("SELECT * FROM users u JOIN orders o ON u.id = o.user_id").await;
+    let a = reduces("SELECT * FROM users u JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "InnerKeyJoin"));
     assert!(
-        a.smtlib.contains("(* O1_SubqueryAlias O3_SubqueryAlias)"),
+        a.smtlib.contains("(* op1_SubqueryAlias op3_SubqueryAlias)"),
         "{}",
         a.smtlib
     );
@@ -647,18 +648,18 @@ async fn keyed_join_also_bounded_by_product() {
 async fn counterexample_separates_tables_and_vars() {
     // A table named like an operator variable used to overwrite its value.
     let ctx = SessionContext::new();
-    data_table(&ctx, "O1_Filter", &[("x", vec![1])], &[]);
+    data_table(&ctx, "op1_Filter", &[("x", vec![1])], &[]);
     let a = analyze_sql(
         &ctx,
-        r#"SELECT count(*) FROM (SELECT * FROM "O1_Filter" WHERE x > 1) t"#,
+        r#"SELECT count(*) FROM (SELECT * FROM "op1_Filter" WHERE x > 1) t"#,
     )
     .await
     .unwrap();
-    let Verdict::Refuted(m) = &a.verdict else {
-        panic!("expected Refuted, got {:?}", a.verdict)
+    let Verdict::MightGrow(m) = &a.verdict else {
+        panic!("expected MightGrow, got {:?}", a.verdict)
     };
-    assert!(m.tables.contains_key("O1_Filter"));
-    assert!(m.vars.contains_key("O1_Filter"));
+    assert!(m.tables.contains_key("op1_Filter"));
+    assert!(m.vars.contains_key("op1_Filter"));
     assert_eq!(m.var(&a.root), 1);
 }
 

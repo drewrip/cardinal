@@ -1,8 +1,8 @@
 //! Bounds on a query's output cardinality relative to its source relations.
 //!
-//! Each bound has the form `O <= c·X + d`, where `X` is the size of one source
-//! table or the total rows scanned, `c` a small non-negative fraction and `d` a
-//! constant. The smallest `c` is found first, then the smallest `d` for it. A
+//! Each bound has the form `X <= c·S + d`, where `X` is the output cardinality,
+//! `S` the size of one source table or the total rows scanned, `c` a small
+//! non-negative fraction and `d` a constant. The smallest `c` is found first, then the smallest `d` for it. A
 //! bound is reported only when Z3 proves it; an undecided check never yields one.
 
 use std::cmp::Ordering;
@@ -13,7 +13,7 @@ use z3::{SatResult, Solver};
 
 use crate::analyzer::solver_with_timeout;
 
-/// `num/den · X + add` for some quantity `X`.
+/// `num/den · S + add` for some quantity `S`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Linear {
     pub num: u64,
@@ -58,14 +58,14 @@ pub struct TableBound {
     pub exact: bool,
 }
 
-/// Every bound proven for a query's output cardinality `O`.
+/// Every bound proven for a query's output cardinality `X`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bounds {
-    /// `O <= N` regardless of table sizes.
+    /// `X <= N` regardless of table sizes.
     pub constant: Option<u64>,
-    /// `O <= c·Σ + d`, where `Σ` is the total rows scanned (one term per scan).
+    /// `X <= c·Σ + d`, where `Σ` is the total rows scanned (one term per scan).
     pub sum: Option<Linear>,
-    /// `O <= c·|T| + d` for each table `T` that bounds the output.
+    /// `X <= c·|T| + d` for each table `T` that bounds the output.
     pub tables: Vec<TableBound>,
 }
 
@@ -75,12 +75,12 @@ impl fmt::Display for Bounds {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = vec![];
         if let Some(n) = self.constant {
-            parts.push(format!("O <= {n}"));
+            parts.push(format!("X <= {n}"));
         } else {
             for t in &self.tables {
                 let op = if t.exact { "=" } else { "<=" };
                 parts.push(format!(
-                    "O {op} {}",
+                    "X {op} {}",
                     t.bound.render(&format!("|{}|", t.table))
                 ));
             }
@@ -89,7 +89,7 @@ impl fmt::Display for Bounds {
             if let Some(s) = self.sum
                 && (s.num < s.den || self.tables.is_empty())
             {
-                parts.push(format!("O <= {}", s.render("Σ")));
+                parts.push(format!("X <= {}", s.render("Σ")));
             }
         }
         if parts.is_empty() {
@@ -137,14 +137,14 @@ impl Search {
         unsat
     }
 
-    /// `den·O <= num·x + den·add`
+    /// `den·X <= num·s + den·add`
     fn upper(&self, x: &Int, num: u64, den: u64, add: u64) -> Bool {
         let lhs = &self.output * Int::from_u64(den);
         let rhs = x * Int::from_u64(num) + Int::from_u64(den * add);
         lhs.le(rhs)
     }
 
-    /// The smallest `N` with `O <= N`.
+    /// The smallest `N` with `X <= N`.
     pub(crate) fn constant(&self) -> Option<u64> {
         if !self.proves(self.output.le(Int::from_u64(CAP))) {
             return None;
@@ -154,7 +154,7 @@ impl Search {
         }))
     }
 
-    /// The smallest `c`, then smallest `d`, with `O <= c·x + d`.
+    /// The smallest `c`, then smallest `d`, with `X <= c·s + d`.
     pub(crate) fn linear(&self, x: &Int) -> Option<(Linear, bool)> {
         let candidates = coefficients();
         let feasible = |i: usize| {

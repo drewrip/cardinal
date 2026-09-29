@@ -38,13 +38,18 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Outcome of checking `O_root <= Σ scans`.
+/// Outcome of checking `O_root <= Σ scans`: can the query output more rows
+/// than it reads?
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// The claim holds for every assignment satisfying the constraints.
-    Proven,
-    /// A counterexample to the claim.
-    Refuted(Counterexample),
+    /// Proven: the output never has more rows than the scans read, for every
+    /// assignment satisfying the constraints.
+    Reduces,
+    /// Not provable: a counterexample satisfies every constraint yet outputs
+    /// more rows than the scans read. Either the query really can grow its
+    /// input (e.g. a cross join, or `count(*)` on an empty table), or the
+    /// constraints are too weak to rule it out.
+    MightGrow(Counterexample),
     /// Z3 could not decide (e.g. nonlinear `l * r` terms, or the solver timed
     /// out); holds its reason.
     Unknown(String),
@@ -308,7 +313,7 @@ fn analyze_with(
     let smtlib = a.solver.to_string();
 
     let verdict = match a.solver.check() {
-        SatResult::Unsat => Verdict::Proven,
+        SatResult::Unsat => Verdict::Reduces,
         SatResult::Unknown => Verdict::Unknown(
             a.solver
                 .get_reason_unknown()
@@ -317,7 +322,7 @@ fn analyze_with(
         SatResult::Sat => {
             let model = a.solver.get_model().expect("sat result has a model");
             let value = |v: &Int| model.eval(v, true).and_then(|x| x.as_i64());
-            Verdict::Refuted(Counterexample {
+            Verdict::MightGrow(Counterexample {
                 tables: a
                     .tables
                     .values()

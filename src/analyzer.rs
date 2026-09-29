@@ -152,10 +152,10 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Creates a fresh relation for `plan`'s output: a cardinality variable
-    /// `O{n}_{kind}` and NDV variables `O{n}_{kind}_c{j}`, with the constraints
+    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, with the constraints
     /// every relation satisfies.
     fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> Rel {
-        let base = format!("O{}_{}", self.counter, symbol(kind));
+        let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;
         let card = self.new_var(base.clone());
         let fields: Vec<DataType> = plan
@@ -217,7 +217,7 @@ impl<'a> Analyzer<'a> {
             return t.var.clone();
         }
         // Tables are numbered so their symbols cannot collide with each other or
-        // with operator variables (which start with `O`).
+        // with operator variables (which start with `op`).
         let symbol = format!("T{}_{}", self.tables.len(), symbol(display));
         let var = Int::new_const(symbol.as_str());
         self.solver.assert(var.ge(int(0)));

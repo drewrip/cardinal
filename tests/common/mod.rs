@@ -674,8 +674,8 @@ pub fn tpch_datasets() -> Vec<Dataset> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
-    Proven,
-    Refuted,
+    Reduces,
+    MightGrow,
     Unknown,
 }
 
@@ -690,14 +690,14 @@ pub struct Case {
 
 fn verdict_kind(v: &Verdict) -> Expect {
     match v {
-        Verdict::Proven => Expect::Proven,
-        Verdict::Refuted(_) => Expect::Refuted,
+        Verdict::Reduces => Expect::Reduces,
+        Verdict::MightGrow(_) => Expect::MightGrow,
         Verdict::Unknown(_) => Expect::Unknown,
     }
 }
 
 /// Runs every case: analyzes it on each dataset, checks the verdict, validates
-/// the constraints against real execution, and for Proven queries checks the
+/// the constraints against real execution, and for `Reduces` queries checks the
 /// claim directly (actual output rows <= total rows scanned). Any violated
 /// constraint is a failure. Prints a summary table and panics with every
 /// mismatch at the end.
@@ -720,7 +720,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             .join(", ")
     );
     println!(
-        "{:<34} {:<8} {:<9} {:>7}  {:<24} {:<11} bounds",
+        "{:<34} {:<9} {:<9} {:>7}  {:<24} {:<11} bounds",
         "query", "verdict", "expected", "pinned", "root rows per dataset", "violations"
     );
     for case in cases {
@@ -752,7 +752,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                 failures.push(format!("{}: verdict changed on {dname}", case.name));
             }
             let v = a.validate(ctx).await.unwrap();
-            let declared = a.smtlib.matches("(declare-fun O").count();
+            let declared = a.smtlib.matches("(declare-fun op").count();
             nodes = format!("{}/{declared}", v.rows.len());
             // Every operator must be checked against real data; only a recursive
             // CTE's recursive branch (which reads its work table) cannot run alone.
@@ -779,7 +779,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
                 failures.push(format!("{}: on {dname}, {f}", case.name));
             }
-            if kind == Expect::Proven {
+            if kind == Expect::Reduces {
                 let root = v.rows.get(&a.root).copied();
                 let scanned: Option<u64> =
                     a.scans.iter().map(|(s, _)| v.rows.get(s).copied()).sum();
@@ -788,7 +788,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                     && v.violation.is_none()
                 {
                     failures.push(format!(
-                        "{}: Proven but {dname} returned {root} rows from {scanned} scanned, \
+                        "{}: verdict Reduces, but {dname} returned {root} rows from {scanned} scanned, \
                          and validation found no violated constraint",
                         case.name
                     ));
@@ -797,7 +797,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         }
         let Some(verdict) = verdict else { continue };
         println!(
-            "{:<34} {:<8} {:<9} {:>7}  {:<24} {:<11} {}",
+            "{:<34} {:<9} {:<9} {:>7}  {:<24} {:<11} {}",
             case.name,
             format!("{verdict:?}"),
             format!("{expect:?}"),

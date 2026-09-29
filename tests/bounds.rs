@@ -43,7 +43,7 @@ async fn self_join_on_key_halves_the_input() {
     assert_eq!(b.sum, Some(exactly(1, 2)));
     assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
     assert_eq!(b.constant, None);
-    assert_eq!(b.to_string(), "O <= |users|; O <= 1/2·Σ");
+    assert_eq!(b.to_string(), "X <= |users|; X <= 1/2·Σ");
 }
 
 #[tokio::test]
@@ -65,7 +65,7 @@ async fn foreign_key_join_is_bounded_by_the_referencing_table() {
 async fn left_join_to_a_key_keeps_exactly_every_row() {
     let b = bounds("SELECT * FROM orders o LEFT JOIN users u ON o.user_id = u.id").await;
     assert_eq!(table(&b, "orders"), Some((exactly(1, 1), true)));
-    assert_eq!(b.to_string(), "O = |orders|");
+    assert_eq!(b.to_string(), "X = |orders|");
 }
 
 #[tokio::test]
@@ -149,7 +149,7 @@ async fn ungrouped_aggregate_is_one_row() {
     let b =
         bounds("SELECT count(*), max(age) FROM users u JOIN orders o ON u.id = o.user_id").await;
     assert_eq!(b.constant, Some(1));
-    assert_eq!(b.to_string(), "O <= 1");
+    assert_eq!(b.to_string(), "X <= 1");
 }
 
 #[tokio::test]
@@ -165,7 +165,7 @@ async fn sum_bound_when_no_single_table_bounds() {
     let b = bounds("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
     assert!(b.tables.is_empty());
     assert_eq!(b.sum, Some(exactly(1, 1)));
-    assert_eq!(b.to_string(), "O <= Σ");
+    assert_eq!(b.to_string(), "X <= Σ");
 }
 
 #[tokio::test]

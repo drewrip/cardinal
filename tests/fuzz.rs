@@ -4,8 +4,8 @@
 //!
 //! - validation finds no violated constraint, Z3 never gives up, and every
 //!   operator is checked against real data;
-//! - a Proven query really returns at most the rows it scanned;
-//! - a Refuted counterexample really violates the claim;
+//! - a `Reduces` query really returns at most the rows it scanned;
+//! - a `MightGrow` counterexample really violates the claim;
 //! - every bound from `Analysis::bounds` holds on the real row counts;
 //! - the verdict does not depend on the data;
 //! - declaring keys never loses a proof.
@@ -286,8 +286,8 @@ async fn check_mode(
             bounds = Some(b);
         }
         let is_proven = match &a.verdict {
-            Verdict::Proven => true,
-            Verdict::Refuted(m) => {
+            Verdict::Reduces => true,
+            Verdict::MightGrow(m) => {
                 let total: i64 = a.scans.iter().map(|(s, _)| m.var(s)).sum();
                 if m.var(&a.root) <= total {
                     failures.push(format!("counterexample does not refute the claim: {sql}"));
@@ -309,7 +309,7 @@ async fn check_mode(
                 bounds.as_ref().unwrap()
             ));
         }
-        let declared = a.smtlib.matches("(declare-fun O").count();
+        let declared = a.smtlib.matches("(declare-fun op").count();
         stats.operators = stats.operators.max(declared);
         stats.executions += 1;
         if let Some(op) = &v.violation {
@@ -332,7 +332,7 @@ async fn check_mode(
             && root > scanned
         {
             failures.push(format!(
-                "{dname}: Proven but returned {root} rows from {scanned} scanned: {sql}"
+                "{dname}: verdict Reduces, but returned {root} rows from {scanned} scanned: {sql}"
             ));
         }
     }
@@ -384,8 +384,8 @@ async fn fuzz() {
         }
     }
     println!(
-        "fuzz: {} queries (seed {seed}), {} skipped (DataFusion cannot plan or run them); with keys {} proven / {} \
-         refuted; without keys {} proven / {} refuted; {} validated executions; largest plan {} \
+        "fuzz: {} queries (seed {seed}), {} skipped (DataFusion cannot plan or run them); with keys {} reduce / {} \
+         might grow; without keys {} reduce / {} might grow; {} validated executions; largest plan {} \
          variables; {} bounds computed with a reduction claim",
         stats.queries,
         stats.skipped,
