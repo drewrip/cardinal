@@ -134,13 +134,14 @@ async fn distinct() {
 #[tokio::test]
 async fn order_by_limit() {
     let a = proven("SELECT * FROM users ORDER BY age LIMIT 10").await;
-    assert!(a.smtlib.contains(&format!("(<= {} 10)", a.root)));
+    // Exactly min(10, |users|) rows.
+    assert_eq!(a.bounds().unwrap().constant, Some(10));
 }
 
 #[tokio::test]
 async fn limit_offset() {
     let a = proven("SELECT * FROM users LIMIT 5 OFFSET 20").await;
-    assert!(a.smtlib.contains(&format!("(<= {} 5)", a.root)));
+    assert_eq!(a.bounds().unwrap().constant, Some(5));
 }
 
 #[tokio::test]
@@ -189,18 +190,16 @@ async fn cross_join() {
 
 #[tokio::test]
 async fn left_join() {
-    // Bound is max(l, r) + l: inner matches plus unmatched users, which can
-    // exceed l + r when users outnumber orders.
-    let (a, m) = refuted("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
+    // users.id is the left side's key, so each order matches at most one user:
+    // the matches number at most |orders|, plus at most |users| unmatched rows.
+    let a = proven("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "LeftKeyJoin"));
-    assert!(m.var(&a.root) >= m.table("users"));
 }
 
 #[tokio::test]
 async fn full_join() {
-    let (a, m) = refuted("SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id").await;
+    let a = proven("SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "FullKeyJoin"));
-    assert!(m.var(&a.root) >= m.table("users") && m.var(&a.root) >= m.table("orders"));
 }
 
 #[tokio::test]
@@ -369,8 +368,9 @@ async fn validate_catches_a_false_primary_key() {
     use datafusion::arrow::array::Int64Array;
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::common::{Constraint, Constraints};
-    // `age` is declared the primary key, but three rows share age 30. The
-    // self-join then returns 9 rows, more than the max(3, 3) the key allows.
+    // `age` is declared the primary key, but three rows share age 30. A key's
+    // column takes a distinct value on every row, so the scan's NDV (1) must
+    // equal its row count (3): the false key is caught at the scan itself.
     let ctx = SessionContext::new();
     let schema = Arc::new(Schema::new(vec![Field::new("age", DataType::Int64, true)]));
     let batch = RecordBatch::try_new(
@@ -392,8 +392,9 @@ async fn validate_catches_a_false_primary_key() {
     .unwrap();
     assert_eq!(a.verdict, Verdict::Proven);
     let v = a.validate(&ctx).await.unwrap();
-    assert_eq!(v.violation.as_deref(), Some("O4_InnerKeyJoin"));
-    assert_eq!(v.rows["O4_InnerKeyJoin"], 9);
+    assert_eq!(v.violation.as_deref(), Some("O0_Scan_people_c0"));
+    assert_eq!(v.rows["O0_Scan_people"], 3);
+    assert_eq!(v.rows["O0_Scan_people_c0"], 1);
 }
 
 // --- Join keys: only declared primary keys count as unique ------------------

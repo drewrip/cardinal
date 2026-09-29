@@ -1,10 +1,11 @@
 //! Checks a real execution of an analyzed plan against its constraints.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{Field, Schema};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use datafusion::arrow::row::{RowConverter, SortField};
 use datafusion::common::TableReference;
 use datafusion::common::tree_node::TreeNode;
 use datafusion::datasource::{MemTable, provider_as_source};
@@ -20,8 +21,9 @@ use z3::ast::Int;
 use crate::analyzer::{Node, new_solver};
 use crate::{Error, Result, Validation};
 
-/// Evaluates `nodes` bottom-up and returns the actual row count of every node
-/// that could be evaluated, as (variable, rows), children before parents.
+/// Evaluates `nodes` bottom-up and returns the actual value of every variable
+/// of every node that could be evaluated, as (variable, value), children before
+/// parents: each node's row count, then each output column's distinct count.
 ///
 /// Each node runs over scans of its children's materialized output rather than
 /// over its original subtree, so a parent sees exactly the rows its children's
@@ -31,28 +33,33 @@ pub(crate) async fn evaluate(nodes: &[Node], ctx: &SessionContext) -> Vec<(Strin
     let mut counts = vec![];
     // For each node, a scan over its materialized output, if it was evaluated.
     let mut outputs: Vec<Option<LogicalPlan>> = Vec::with_capacity(nodes.len());
-    // Whether each node's count was recorded.
-    let mut counted = vec![false; nodes.len()];
+    // For each node, its measured values (row count, then NDVs), if evaluated.
+    let mut measured: Vec<Option<Vec<Option<u64>>>> = Vec::with_capacity(nodes.len());
     for (id, node) in nodes.iter().enumerate() {
         if has_side_effects(&node.plan) {
             outputs.push(None);
+            measured.push(None);
             continue;
         }
-        if let Some((var, raw)) = &node.raw_scan
+        if let Some((var, ndv_vars, raw)) = &node.raw_scan
             && let Some(batches) = run(&state, raw).await
         {
-            counts.push((var.clone(), rows(&batches)));
+            record(
+                &mut counts,
+                var,
+                ndv_vars,
+                &measure(&batches, ndv_vars.len()),
+            );
         }
         // A subquery's result is its plan's result; the wrapper has no physical
         // form of its own.
         if let LogicalPlan::Subquery(_) = node.plan
             && let [input] = node.inputs[..]
-            && counted[input]
-            && let Some(inner) = counts.iter().rev().find(|(v, _)| *v == nodes[input].var)
+            && let Some(values) = measured[input].clone()
         {
-            counts.push((node.var.clone(), inner.1));
-            counted[id] = true;
+            record(&mut counts, &node.var, &node.ndv_vars, &values);
             outputs.push(outputs[input].clone());
+            measured.push(Some(values));
             continue;
         }
         let inputs: Option<Vec<LogicalPlan>> =
@@ -69,20 +76,58 @@ pub(crate) async fn evaluate(nodes: &[Node], ctx: &SessionContext) -> Vec<(Strin
             None if node
                 .inputs
                 .iter()
-                .all(|i| outputs[*i].is_some() || !counted[*i]) =>
+                .all(|i| outputs[*i].is_some() || measured[*i].is_none()) =>
             {
                 run(&state, &node.plan).await
             }
             None => None,
         };
-        let output = batches.and_then(|batches| {
-            counts.push((node.var.clone(), rows(&batches)));
-            counted[id] = true;
-            materialize(id, &node.plan, batches)
-        });
-        outputs.push(output);
+        let Some(batches) = batches else {
+            outputs.push(None);
+            measured.push(None);
+            continue;
+        };
+        let values = measure(&batches, node.ndv_vars.len());
+        record(&mut counts, &node.var, &node.ndv_vars, &values);
+        measured.push(Some(values));
+        outputs.push(materialize(id, &node.plan, batches));
     }
     counts
+}
+
+/// Row count, then each column's distinct count (NULL counted as one value);
+/// `None` for a column whose type the row format cannot encode.
+fn measure(batches: &[RecordBatch], columns: usize) -> Vec<Option<u64>> {
+    let mut values = vec![Some(rows(batches))];
+    values.extend((0..columns).map(|j| distinct(batches, j)));
+    values
+}
+
+fn distinct(batches: &[RecordBatch], j: usize) -> Option<u64> {
+    let Some(first) = batches.first() else {
+        return Some(0);
+    };
+    let data_type = first.schema().field(j).data_type().clone();
+    let converter = RowConverter::new(vec![SortField::new(data_type)]).ok()?;
+    let mut seen = HashSet::new();
+    for b in batches {
+        let rows = converter.convert_columns(&[Arc::clone(b.column(j))]).ok()?;
+        for row in rows.iter() {
+            seen.insert(row.as_ref().to_vec());
+        }
+    }
+    Some(seen.len() as u64)
+}
+
+fn record(counts: &mut Vec<(String, u64)>, var: &str, ndv_vars: &[String], values: &[Option<u64>]) {
+    for (name, value) in std::iter::once(var)
+        .chain(ndv_vars.iter().map(String::as_str))
+        .zip(values)
+    {
+        if let Some(v) = value {
+            counts.push((name.to_string(), *v));
+        }
+    }
 }
 
 /// Pins each count, in order, onto the constraints and reports the first one

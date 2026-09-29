@@ -6,6 +6,7 @@
 //!   operator is checked against real data;
 //! - a Proven query really returns at most the rows it scanned;
 //! - a Refuted counterexample really violates the claim;
+//! - every bound from `Analysis::bounds` holds on the real row counts;
 //! - the verdict does not depend on the data;
 //! - declaring keys never loses a proof.
 //!
@@ -15,7 +16,7 @@
 mod common;
 
 use cardinal::{Verdict, analyze_sql};
-use common::{Rng, shop_datasets};
+use common::{Rng, check_bounds, shop_datasets};
 use datafusion::prelude::SessionContext;
 
 /// Generates queries whose output columns are always exactly `c0, c1`.
@@ -35,16 +36,19 @@ impl Gen {
     }
 
     fn leaf(&mut self) -> String {
-        match self.r.below(9) {
+        match self.r.below(11) {
             0 | 1 => "SELECT id AS c0, age AS c1 FROM users".into(),
             2 | 3 => "SELECT id AS c0, user_id AS c1 FROM orders".into(),
             4 => "SELECT user_id AS c0, id AS c1 FROM orders".into(),
-            5 => "SELECT id AS c0, CAST(price AS BIGINT) AS c1 FROM products".into(),
+            5 => "SELECT id AS c0, TRY_CAST(price AS BIGINT) AS c1 FROM products".into(),
             6 => "SELECT order_id AS c0, product_id AS c1 FROM order_items".into(),
             7 => {
                 "SELECT column1 AS c0, column2 AS c1 FROM (VALUES (0, 1), (1, 2), (2, 2)) v".into()
             }
-            _ => "SELECT value AS c0, value AS c1 FROM generate_series(0, 3)".into(),
+            8 => "SELECT value AS c0, value AS c1 FROM generate_series(0, 3)".into(),
+            // Float columns: -0.0, 0.0 and NaN in the skewed data.
+            9 => "SELECT id AS c0, amount AS c1 FROM orders".into(),
+            _ => "SELECT amount AS c0, user_id AS c1 FROM orders".into(),
         }
     }
 
@@ -112,7 +116,7 @@ impl Gen {
                     format!("SELECT {t}.{c} AS c0, count(*) AS c1 FROM ({a}) {t} GROUP BY {t}.{c}")
                 } else {
                     format!(
-                        "SELECT {t}.c0, CAST(sum({t}.c1) AS BIGINT) AS c1 FROM ({a}) {t} \
+                        "SELECT {t}.c0, TRY_CAST(sum({t}.c1) AS BIGINT) AS c1 FROM ({a}) {t} \
                          GROUP BY {t}.c0 HAVING count(*) > 1"
                     )
                 }
@@ -161,7 +165,7 @@ impl Gen {
             14 => {
                 let a = self.rel(d);
                 format!(
-                    "SELECT {t}.c0, CAST(row_number() OVER (PARTITION BY {t}.c1 ORDER BY {t}.c0) \
+                    "SELECT {t}.c0, TRY_CAST(row_number() OVER (PARTITION BY {t}.c1 ORDER BY {t}.c0) \
                      AS BIGINT) AS c1 FROM ({a}) {t}"
                 )
             }
@@ -170,7 +174,7 @@ impl Gen {
                 let u = self.alias();
                 format!(
                     "SELECT {t}.c0, {t}.c1 FROM ({a}) {t} \
-                     WHERE {t}.c0 >= (SELECT CAST(avg({u}.c0) AS BIGINT) FROM ({b}) {u})"
+                     WHERE {t}.c0 >= (SELECT TRY_CAST(avg({u}.c0) AS BIGINT) FROM ({b}) {u})"
                 )
             }
             16 => {
@@ -201,7 +205,7 @@ impl Gen {
                 let a = self.rel(d);
                 let g = ["ROLLUP", "CUBE"][self.r.below(2) as usize];
                 format!(
-                    "SELECT {t}.c0, CAST(count(*) AS BIGINT) AS c1 FROM ({a}) {t} \
+                    "SELECT {t}.c0, TRY_CAST(count(*) AS BIGINT) AS c1 FROM ({a}) {t} \
                      GROUP BY {g} ({t}.c0, {t}.c1)"
                 )
             }
@@ -245,6 +249,8 @@ struct Stats {
     refuted: [usize; 2],
     operators: usize,
     executions: usize,
+    /// Queries (per mode) with a constant, table-relative, or fractional bound.
+    bounded: usize,
 }
 
 /// Checks one query on every context of one mode; returns its verdict, or
@@ -256,11 +262,29 @@ async fn check_mode(
     stats: &mut Stats,
 ) -> Option<bool> {
     let mut proven = None;
+    let mut bounds = None;
     for (dname, ctx) in ctxs {
+        // Skip queries DataFusion itself cannot run, e.g. its mark joins on
+        // float keys fail with "Unsupported type for ArrayMap: Float64".
+        let Ok(df) = ctx.sql(sql).await else {
+            return None;
+        };
+        if df.collect().await.is_err() {
+            return None;
+        }
         let a = match analyze_sql(ctx, sql).await {
             Ok(a) => a,
             Err(_) => return None,
         };
+        // Bounds depend only on the query; compute them once per mode.
+        if bounds.is_none() {
+            let b = a.bounds().unwrap();
+            if b.constant.is_some() || !b.tables.is_empty() || b.sum.is_some_and(|s| s.num < s.den)
+            {
+                stats.bounded += 1;
+            }
+            bounds = Some(b);
+        }
         let is_proven = match &a.verdict {
             Verdict::Proven => true,
             Verdict::Refuted(m) => {
@@ -279,6 +303,12 @@ async fn check_mode(
             failures.push(format!("verdict changed on {dname}: {sql}"));
         }
         let v = a.validate(ctx).await.unwrap();
+        for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
+            failures.push(format!(
+                "{dname}: {f}: {sql}\n  bounds: {}",
+                bounds.as_ref().unwrap()
+            ));
+        }
         let declared = a.smtlib.matches("(declare-fun O").count();
         stats.operators = stats.operators.max(declared);
         stats.executions += 1;
@@ -354,9 +384,9 @@ async fn fuzz() {
         }
     }
     println!(
-        "fuzz: {} queries (seed {seed}), {} skipped as unplannable; with keys {} proven / {} \
+        "fuzz: {} queries (seed {seed}), {} skipped (DataFusion cannot plan or run them); with keys {} proven / {} \
          refuted; without keys {} proven / {} refuted; {} validated executions; largest plan {} \
-         operators",
+         variables; {} bounds computed with a reduction claim",
         stats.queries,
         stats.skipped,
         stats.proven[0],
@@ -364,7 +394,8 @@ async fn fuzz() {
         stats.proven[1],
         stats.refuted[1],
         stats.executions,
-        stats.operators
+        stats.operators,
+        stats.bounded
     );
     for s in &skipped_examples {
         println!("skipped: {s}");

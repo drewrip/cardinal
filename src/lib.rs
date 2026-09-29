@@ -6,7 +6,10 @@
 //! cardinality must be at most the sum of all base-table scan cardinalities.
 
 mod analyzer;
+mod bounds;
 mod validate;
+
+pub use bounds::{Bounds, Linear, TableBound};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,6 +88,8 @@ pub struct Analysis {
     assertions: usize,
     /// Every plan node, children before parents.
     nodes: Vec<Node>,
+    /// Each base table as (table name, Z3 symbol), sorted by name.
+    tables: Vec<(String, String)>,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -118,6 +123,51 @@ impl Analysis {
     pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
         let counts = validate::evaluate(&self.nodes, ctx).await;
         validate::check(&self.constraints, self.assertions, &counts)
+    }
+
+    /// Proves bounds on the output cardinality relative to the source relations:
+    /// a constant bound, a bound relative to the total rows scanned, and one
+    /// relative to each table. See [`Bounds`].
+    ///
+    /// This runs many solver checks (each limited to one second), so it is
+    /// separate from the analysis itself. It depends only on the query, not on
+    /// the data.
+    pub fn bounds(&self) -> Result<Bounds> {
+        let (search, parsed) = bounds::Search::new(&self.constraints, &self.root);
+        if parsed != self.assertions {
+            return Err(Error::Internal(format!(
+                "constraints parsed back to {parsed} assertions, expected {}",
+                self.assertions
+            )));
+        }
+        let constant = search.constant();
+        let scans: Vec<Int> = self
+            .scans
+            .iter()
+            .map(|(s, _)| Int::new_const(s.as_str()))
+            .collect();
+        let sum = if scans.is_empty() {
+            None
+        } else {
+            search.linear(&Int::add(&scans)).map(|(b, _)| b)
+        };
+        let tables = self
+            .tables
+            .iter()
+            .filter_map(|(name, symbol)| {
+                let (bound, exact) = search.linear(&Int::new_const(symbol.as_str()))?;
+                Some(TableBound {
+                    table: name.clone(),
+                    bound,
+                    exact,
+                })
+            })
+            .collect();
+        Ok(Bounds {
+            constant,
+            sum,
+            tables,
+        })
     }
 }
 
@@ -204,7 +254,7 @@ fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str)
 
 fn analyze_with(plan: &LogicalPlan, resolve: &dyn Fn(&TableScan) -> ScanKind) -> Analysis {
     let mut a = Analyzer::new(resolve);
-    let root = a.visit(plan);
+    let root = a.visit(plan).card;
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();
     let assertions = a.solver.get_assertions().len();
@@ -244,6 +294,13 @@ fn analyze_with(plan: &LogicalPlan, resolve: &dyn Fn(&TableScan) -> ScanKind) ->
         }
     };
 
+    let mut tables: Vec<(String, String)> = a
+        .tables
+        .values()
+        .map(|t| (t.display.clone(), t.symbol.clone()))
+        .collect();
+    tables.sort();
+
     Analysis {
         verdict,
         smtlib,
@@ -257,5 +314,6 @@ fn analyze_with(plan: &LogicalPlan, resolve: &dyn Fn(&TableScan) -> ScanKind) ->
         constraints,
         assertions,
         nodes: a.nodes,
+        tables,
     }
 }

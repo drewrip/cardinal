@@ -35,7 +35,7 @@ const CASES: &[Case] = &[
         name: "tpch_q05",
         sql: include_str!("tpch/q05.sql"),
         keys: Proven,
-        no_keys: Refuted,
+        no_keys: Proven,
     },
     Case {
         // ungrouped aggregate: 1 row even when lineitem is empty
@@ -54,7 +54,7 @@ const CASES: &[Case] = &[
         name: "tpch_q08",
         sql: include_str!("tpch/q08.sql"),
         keys: Proven,
-        no_keys: Refuted,
+        no_keys: Proven,
     },
     Case {
         name: "tpch_q09",
@@ -72,20 +72,20 @@ const CASES: &[Case] = &[
         name: "tpch_q11",
         sql: include_str!("tpch/q11.sql"),
         keys: Proven,
-        no_keys: Refuted,
+        no_keys: Proven,
     },
     Case {
         name: "tpch_q12",
         sql: include_str!("tpch/q12.sql"),
         keys: Proven,
-        no_keys: Refuted,
+        no_keys: Proven,
     },
     Case {
-        // customer LEFT JOIN orders: bound max(l, r) + l exceeds l + r when customers outnumber orders
+        // customer LEFT JOIN orders, grouped twice; bounded by |customer| via the group key
         name: "tpch_q13",
         sql: include_str!("tpch/q13.sql"),
-        keys: Refuted,
-        no_keys: Refuted,
+        keys: Proven,
+        no_keys: Proven,
     },
     Case {
         // ungrouped aggregate
@@ -136,7 +136,7 @@ const CASES: &[Case] = &[
         name: "tpch_q21",
         sql: include_str!("tpch/q21.sql"),
         keys: Proven,
-        no_keys: Refuted,
+        no_keys: Proven,
     },
     Case {
         name: "tpch_q22",

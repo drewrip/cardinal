@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cardinal::{Verdict, analyze_sql};
+use cardinal::{Analysis, Bounds, Validation, Verdict, analyze_sql};
 use datafusion::arrow::array::{ArrayRef, Date32Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -167,7 +167,15 @@ pub fn shop(name: &str, seed: u64, s: ShopShape) -> Dataset {
     for i in 0..s.orders {
         orders.0.push(Some(key(&mut r, i)));
         orders.1.push(fk(&mut r, s.users));
-        orders.2.push(Some(r.below(200) as f64));
+        // Skewed data also stresses float equality: -0.0 and 0.0 are equal in
+        // SQL but distinct as bits, and NaN is its own value.
+        orders
+            .2
+            .push(Some(if s.key_domain.is_some() && s.null_percent > 0 {
+                [-0.0, 0.0, f64::NAN, 1.5, 2.5][r.below(5) as usize]
+            } else {
+                r.below(200) as f64
+            }));
     }
     let mut products = (vec![], vec![]);
     for i in 0..s.products {
@@ -712,8 +720,8 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             .join(", ")
     );
     println!(
-        "{:<34} {:<8} {:<9} {:>7}  {:<24} violations",
-        "query", "verdict", "expected", "pinned", "root rows per dataset"
+        "{:<34} {:<8} {:<9} {:>7}  {:<24} {:<11} bounds",
+        "query", "verdict", "expected", "pinned", "root rows per dataset", "violations"
     );
     for case in cases {
         let expect = if declare_keys {
@@ -725,6 +733,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         let mut violations = vec![];
         let mut nodes = String::new();
         let mut root_rows = vec![];
+        let mut bounds: Option<Bounds> = None;
         for (dname, ctx) in &ctxs {
             let a = match analyze_sql(ctx, case.sql).await {
                 Ok(a) => a,
@@ -733,6 +742,10 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                     break;
                 }
             };
+            // Bounds depend only on the query; compute them once.
+            if bounds.is_none() {
+                bounds = Some(a.bounds().unwrap());
+            }
             // Constraints don't depend on data, so the verdict must be stable.
             let kind = verdict_kind(&a.verdict);
             if *verdict.get_or_insert(kind) != kind {
@@ -763,6 +776,9 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                     .get(&a.root)
                     .map_or("?".to_string(), |n| n.to_string()),
             );
+            for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
+                failures.push(format!("{}: on {dname}, {f}", case.name));
+            }
             if kind == Expect::Proven {
                 let root = v.rows.get(&a.root).copied();
                 let scanned: Option<u64> =
@@ -781,7 +797,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         }
         let Some(verdict) = verdict else { continue };
         println!(
-            "{:<34} {:<8} {:<9} {:>7}  {:<24} {}",
+            "{:<34} {:<8} {:<9} {:>7}  {:<24} {:<11} {}",
             case.name,
             format!("{verdict:?}"),
             format!("{expect:?}"),
@@ -791,7 +807,8 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                 "-".to_string()
             } else {
                 violations.join(" ")
-            }
+            },
+            bounds.as_ref().map_or(String::new(), |b| b.to_string())
         );
         if verdict != expect {
             failures.push(format!(
@@ -808,4 +825,53 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Checks every claimed bound against one real execution: the actual output
+/// rows against the actual table sizes and total rows scanned. This does not go
+/// through the constraints, so it independently tests the claims.
+pub fn check_bounds(b: &Bounds, a: &Analysis, v: &Validation) -> Vec<String> {
+    let mut failures = vec![];
+    let Some(&out) = v.rows.get(&a.root) else {
+        return failures;
+    };
+    if let Some(n) = b.constant
+        && out > n
+    {
+        failures.push(format!("output {out} exceeds constant bound {n}"));
+    }
+    let scanned: Option<u64> = a.scans.iter().map(|(s, _)| v.rows.get(s).copied()).sum();
+    if let (Some(s), Some(scanned)) = (b.sum, scanned)
+        && !s.holds(out, scanned)
+    {
+        failures.push(format!(
+            "output {out} exceeds {} with Σ = {scanned}",
+            s.render("Σ")
+        ));
+    }
+    for t in &b.tables {
+        let size = a
+            .scans
+            .iter()
+            .find(|(_, table)| *table == t.table)
+            .and_then(|(s, _)| v.rows.get(s).copied());
+        let Some(size) = size else { continue };
+        let x = format!("|{}|", t.table);
+        if !t.bound.holds(out, size) {
+            failures.push(format!(
+                "output {out} exceeds {} with {x} = {size}",
+                t.bound.render(&x)
+            ));
+        }
+        let expected = t.bound.num as u128 * size as u128;
+        if t.exact
+            && (t.bound.den as u128 * (out as u128 - t.bound.add.min(out) as u128)) != expected
+        {
+            failures.push(format!(
+                "output {out} is not exactly {} with {x} = {size}",
+                t.bound.render(&x)
+            ));
+        }
+    }
+    failures
 }

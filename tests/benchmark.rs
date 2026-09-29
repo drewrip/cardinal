@@ -21,12 +21,12 @@ const CASES: &[Case] = &[
         no_keys: Proven,
     },
     Case {
-        // Decorrelated into `users LEFT JOIN (orders grouped by user_id)`. The
-        // real output is exactly |users|, but GROUP BY output is not a declared
-        // primary key, so the bound is l * r + l.
+        // Decorrelated into `users LEFT JOIN (orders grouped by user_id)`. With
+        // users.id declared, each group matches at most one user, so the output
+        // is at most |groups| + |users|. Without keys that is not provable.
         name: "correlated_scalar_in_select",
         sql: "SELECT u.id, (SELECT max(o.amount) FROM orders o WHERE o.user_id = u.id) FROM users u",
-        keys: Refuted,
+        keys: Proven,
         no_keys: Refuted,
     },
     Case {
@@ -146,7 +146,7 @@ const CASES: &[Case] = &[
     Case {
         name: "left_join_is_null_anti",
         sql: "SELECT u.* FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.id IS NULL",
-        keys: Refuted,
+        keys: Proven,
         no_keys: Refuted,
     },
     Case {
@@ -160,13 +160,13 @@ const CASES: &[Case] = &[
     Case {
         name: "right_join",
         sql: "SELECT * FROM orders o RIGHT JOIN users u ON o.user_id = u.id",
-        keys: Refuted,
+        keys: Proven,
         no_keys: Refuted,
     },
     Case {
         name: "full_join_duplicates",
         sql: "SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id",
-        keys: Refuted,
+        keys: Proven,
         no_keys: Refuted,
     },
     Case {
@@ -199,8 +199,8 @@ const CASES: &[Case] = &[
     Case {
         name: "theta_join_then_group",
         sql: "SELECT u.id, count(*) FROM users u JOIN orders o ON o.amount > u.age GROUP BY u.id",
-        keys: Refuted,
-        no_keys: Refuted,
+        keys: Proven,
+        no_keys: Proven,
     },
     Case {
         name: "cross_with_scalar_aggregate",
@@ -232,8 +232,8 @@ const CASES: &[Case] = &[
     Case {
         name: "union_distinct_of_cross",
         sql: "SELECT u.id FROM users u CROSS JOIN products p UNION SELECT id FROM orders",
-        keys: Refuted,
-        no_keys: Refuted,
+        keys: Proven,
+        no_keys: Proven,
     },
     Case {
         name: "union_all_of_aggregates",
