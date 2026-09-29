@@ -111,6 +111,12 @@ lie in a domain of `k` values has NDV `<= k`, and an empty domain means `X = 0`.
   its branches), `date_part` (`year` of a date range, and fixed ranges for
   `month`, `quarter`, `day`, `dow`, ...), and small types (`BOOLEAN`, 8- and
   16-bit integers). Stored tables' non-nullable columns are never NULL.
+- Integer arithmetic with a literal maps the domain: `x / k` and `x % k` always
+  (so `GROUP BY id % 16` has at most 31 groups plus NULL, 16 if `id >= 0`), and
+  `x + k`, `x - k`, `x * k` when both ends of `x`'s range are known and the
+  result provably fits its type (Arrow arithmetic wraps on overflow).
+- `date_trunc(unit, t)` over a range of dates or time-zone-free timestamps
+  takes one value per unit the range meets: 12 months in a year.
 
 So `WHERE id BETWEEN 1 AND 10` on a key gives `X <= 10`, TPC-H Q7 (two
 nations each, two ship years) gives `X <= 8`, and `x > 5 AND x < 3` gives `X = 0`.
@@ -145,6 +151,11 @@ on the padded rows. So rows where it is NULL number at most `l`, and rows where
 it is not at most `inner`; both survive operators that keep a subset of rows.
 The anti-join idiom `a LEFT JOIN b ON ... WHERE b.key IS NULL` gives
 `X <= |a|`. Right and full joins are symmetric.
+
+**Solving.** Every check runs in Z3's incremental mode (after a `push`), which
+uses its SMT core. Its one-shot strategy portfolio first tries bit-blasting the
+nonlinear products (`l·r`, NDV products) once domains bound many variables,
+which is an order of magnitude slower.
 
 **Caveats.**
 

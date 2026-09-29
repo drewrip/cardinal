@@ -16,10 +16,10 @@ use datafusion::logical_expr::logical_plan::{
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::{Bool, Int};
+use z3::{Params, Solver};
 
 use crate::domain::{self, Dom, Facts};
 use crate::origin::{self, Origin};
-use z3::{Params, Solver};
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +197,7 @@ impl<'a> Analyzer<'a> {
 
     fn new_var(&mut self, name: String) -> Int {
         let v = Int::new_const(name.as_str());
-        self.solver.assert(v.ge(int(0)));
+        self.assert(v.ge(int(0)));
         self.vars.push((name, v.clone()));
         v
     }
@@ -277,7 +277,7 @@ impl<'a> Analyzer<'a> {
         // with operator variables (which start with `op`).
         let symbol = format!("T{}_{}", self.tables.len(), symbol(display));
         let var = Int::new_const(symbol.as_str());
-        self.solver.assert(var.ge(int(0)));
+        self.assert(var.ge(int(0)));
         self.tables.insert(
             key.to_string(),
             TableVar {

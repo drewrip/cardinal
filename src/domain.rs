@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::logical_expr::utils::split_conjunction;
@@ -173,6 +173,24 @@ impl Dom {
     /// The integers from `lo` up.
     pub(crate) fn at_least(lo: i128) -> Dom {
         Dom::range(Some(lo), None)
+    }
+
+    /// The image under `f`, which must be increasing, if every value maps.
+    fn map_increasing(&self, f: impl Fn(i128) -> Option<i128>) -> Option<Dom> {
+        let vals = match &self.vals {
+            Vals::Any => Vals::Any,
+            Vals::Count(n) => Vals::Count(*n),
+            Vals::Range(lo, hi) => Vals::Range(lo.map(&f).flatten(), hi.map(&f).flatten()),
+            Vals::Set(s) => Vals::Set(
+                s.iter()
+                    .map(|k| match k {
+                        Key::Int(v) => f(*v).map(Key::Int),
+                        _ => None,
+                    })
+                    .collect::<Option<_>>()?,
+            ),
+        };
+        Some(Dom { vals, null: self.null }.normalized())
     }
 
     /// The least value, if every value is a known integer (and never NULL).
@@ -422,8 +440,140 @@ impl Facts {
             Expr::ScalarFunction(f) if f.name() == "date_part" => {
                 self.date_part(&f.args, schema).unwrap_or_else(Dom::top)
             }
+            Expr::ScalarFunction(f) if f.name() == "date_trunc" => {
+                self.date_trunc(&f.args, schema).unwrap_or_else(Dom::top)
+            }
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                self.arithmetic(e, left, *op, right, schema).unwrap_or_else(Dom::top)
+            }
+            // A date as a timestamp: the same days, in the timestamp's unit.
+            Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field }) => {
+                match (expr.get_type(schema), field.data_type()) {
+                    (Ok(DataType::Date32), DataType::Timestamp(unit, None)) => {
+                        let per_day = per_day(unit);
+                        self.dom(expr, schema)
+                            .map_increasing(|d| d.checked_mul(per_day).filter(|v| i64::try_from(*v).is_ok()))
+                            .unwrap_or_else(Dom::top)
+                    }
+                    _ => Dom::top(),
+                }
+            }
             _ => Dom::top(),
         }
+    }
+
+    /// `x op k` or `k op x` for an integer literal `k`, where the result
+    /// provably stays in its type's range (Arrow arithmetic wraps).
+    fn arithmetic(&self, e: &Expr, left: &Expr, op: Operator, right: &Expr, schema: &DFSchema) -> Option<Dom> {
+        use Operator::*;
+        if !matches!(op, Plus | Minus | Multiply | Divide | Modulo) {
+            return None;
+        }
+        let (tmin, tmax) = int_range(&e.get_type(schema).ok()?)?;
+        let (x, k, k_right) = match (left, right) {
+            (x, Expr::Literal(v, _)) => (x, v, true),
+            (Expr::Literal(v, _), x) => (x, v, false),
+            _ => return None,
+        };
+        if !x.get_type(schema).ok()?.is_integer() {
+            return None;
+        }
+        let Some(Key::Int(k)) = key(k) else {
+            return None;
+        };
+        let apply = |v: i128| -> Option<i128> {
+            let r = match (op, k_right) {
+                (Plus, _) => v.checked_add(k)?,
+                (Minus, true) => v.checked_sub(k)?,
+                (Minus, false) => k.checked_sub(v)?,
+                (Multiply, _) => v.checked_mul(k)?,
+                // Truncating, as in SQL, and increasing in `v`.
+                (Divide, true) if k > 0 => v / k,
+                (Modulo, true) if k != 0 => v % k,
+                _ => return None,
+            };
+            (tmin..=tmax).contains(&r).then_some(r)
+        };
+        let d = self.dom(x, schema);
+        let vals = match &d.vals {
+            // Few values: each one's result.
+            Vals::Set(s) => {
+                let out: Option<Vec<Key>> = s
+                    .iter()
+                    .map(|k| match k {
+                        Key::Int(v) => apply(*v).map(Key::Int),
+                        _ => None,
+                    })
+                    .collect();
+                Dom::set(out?)
+            }
+            _ => {
+                let (lo, hi) = match &d.vals {
+                    Vals::Range(lo, hi) => (*lo, *hi),
+                    _ => (None, None),
+                };
+                let m = k.abs() - 1;
+                let r = match op {
+                    // The remainder has the dividend's sign and is smaller than `k`.
+                    Modulo if k_right && k != 0 => match (lo, hi) {
+                        (Some(lo), hi) if lo >= 0 => Dom::range(Some(0), Some(hi.map_or(m, |h| h.min(m)))),
+                        (lo, Some(hi)) if hi <= 0 => Dom::range(Some(lo.map_or(-m, |l| l.max(-m))), Some(0)),
+                        _ => Dom::range(Some(-m), Some(m)),
+                    },
+                    // Increasing and never overflowing: open ends stay open.
+                    Divide if k_right && k > 0 => Dom::range(lo.map(|v| v / k), hi.map(|v| v / k)),
+                    // Otherwise both ends must be known to rule out overflow.
+                    _ => {
+                        let (a, b) = (apply(lo?)?, apply(hi?)?);
+                        Dom::range(Some(a.min(b)), Some(a.max(b)))
+                    }
+                };
+                // Never more results than arguments.
+                match d.clone().without_null().size() {
+                    Some(n) => r.intersect(&Dom::count(n)),
+                    None => r,
+                }
+            }
+        };
+        Some(if d.null { vals.with_null() } else { vals })
+    }
+
+    /// `date_trunc(unit, t)` takes one value per unit that `t`'s range meets.
+    fn date_trunc(&self, args: &[Expr], schema: &DFSchema) -> Option<Dom> {
+        let [Expr::Literal(part, _), arg] = args else {
+            return None;
+        };
+        let part = part.try_as_str()??.to_lowercase();
+        let t = arg.get_type(schema).ok()?;
+        let d = self.dom(arg, schema);
+        let values = d.clone().without_null();
+        let mut n = values.size();
+        if let Some((lo, hi)) = values.int_bounds() {
+            let bucket = |v: i128| -> Option<i128> {
+                let days = days_of(&t, v)?;
+                let (year, month) = civil(i64::try_from(days).ok()?);
+                let (year, month) = (year as i128, month as i128);
+                let units = |per_day: i128| Some(v.div_euclid(per_second(&t)? * 86_400 / per_day));
+                Some(match part.as_str() {
+                    "year" => year,
+                    "quarter" => year * 4 + (month - 1) / 3,
+                    "month" => year * 12 + month - 1,
+                    // Weeks start on Monday; day 0 was a Thursday.
+                    "week" => (days + 3).div_euclid(7),
+                    "day" => days,
+                    "hour" => units(24)?,
+                    "minute" => units(24 * 60)?,
+                    "second" => units(86_400)?,
+                    _ => return None,
+                })
+            };
+            if let (Some(a), Some(b)) = (bucket(lo), bucket(hi)) {
+                let buckets = (b - a + 1).max(0) as u128;
+                n = Some(n.map_or(buckets, |n| n.min(buckets)));
+            }
+        }
+        let d2 = Dom::count(n?);
+        Some(if d.null { d2.with_null() } else { d2 })
     }
 
     fn date_part(&self, args: &[Expr], schema: &DFSchema) -> Option<Dom> {
@@ -446,12 +596,8 @@ impl Facts {
             "year" | "years" => {
                 let (lo, hi) = arg_dom.int_bounds()?;
                 let year = |v: i128| -> Option<i128> {
-                    let days = match t {
-                        DataType::Date32 => v,
-                        DataType::Date64 => v.div_euclid(86_400_000),
-                        _ => return None,
-                    };
-                    Some(civil_year(i64::try_from(days).ok()?) as i128)
+                    let days = days_of(&t, v)?;
+                    Some(civil(i64::try_from(days).ok()?).0 as i128)
                 };
                 fixed(year(lo)?, year(hi)?)
             }
@@ -717,7 +863,13 @@ fn literal_fits(e: &Expr, lit: &ScalarValue, schema: &DFSchema) -> bool {
         _ if int(&t) && int(&l) => true,
         _ if string(&t) && string(&l) => true,
         (DataType::Decimal128(_, a), DataType::Decimal128(_, b)) => a == b,
-        (a, b) => a == b && matches!(a, DataType::Date32 | DataType::Date64 | DataType::Boolean),
+        (a, b) => {
+            a == b
+                && matches!(
+                    a,
+                    DataType::Date32 | DataType::Date64 | DataType::Boolean | DataType::Timestamp(..)
+                )
+        }
     }
 }
 
@@ -752,6 +904,10 @@ fn key(v: &ScalarValue) -> Option<Key> {
         UInt64(Some(x)) => Key::Int(*x as i128),
         Date32(Some(x)) => Key::Int(*x as i128),
         Date64(Some(x)) => Key::Int(*x as i128),
+        TimestampSecond(Some(x), _)
+        | TimestampMillisecond(Some(x), _)
+        | TimestampMicrosecond(Some(x), _)
+        | TimestampNanosecond(Some(x), _) => Key::Int(*x as i128),
         Decimal128(Some(x), _, _) => Key::Int(*x),
         Utf8(Some(s)) | LargeUtf8(Some(s)) | Utf8View(Some(s)) => Key::Str(s.clone()),
         Boolean(Some(b)) => Key::Bool(*b),
@@ -804,7 +960,7 @@ fn widening(from: &DataType, to: &DataType) -> bool {
 }
 
 /// The proleptic Gregorian year of a day count since 1970-01-01.
-fn civil_year(days: i64) -> i64 {
+fn civil(days: i64) -> (i64, i64) {
     // Howard Hinnant's `civil_from_days`.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -813,7 +969,53 @@ fn civil_year(days: i64) -> i64 {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    yoe + era * 400 + (month <= 2) as i64
+    (yoe + era * 400 + (month <= 2) as i64, month)
+}
+
+/// The day (since 1970-01-01) of value `v` of a date or time-zone-free
+/// timestamp type.
+fn days_of(t: &DataType, v: i128) -> Option<i128> {
+    Some(match t {
+        DataType::Date32 => v,
+        DataType::Date64 => v.div_euclid(86_400_000),
+        DataType::Timestamp(unit, None) => v.div_euclid(per_day(unit)),
+        _ => return None,
+    })
+}
+
+/// Units of a time-zone-free timestamp type per second.
+fn per_second(t: &DataType) -> Option<i128> {
+    match t {
+        DataType::Timestamp(unit, None) => Some(per_day(unit) / 86_400),
+        DataType::Date32 | DataType::Date64 => None,
+        _ => None,
+    }
+}
+
+fn per_day(unit: &TimeUnit) -> i128 {
+    86_400
+        * match unit {
+            TimeUnit::Second => 1,
+            TimeUnit::Millisecond => 1_000,
+            TimeUnit::Microsecond => 1_000_000,
+            TimeUnit::Nanosecond => 1_000_000_000,
+        }
+}
+
+/// The values of an integer type.
+fn int_range(t: &DataType) -> Option<(i128, i128)> {
+    use DataType::*;
+    Some(match t {
+        Int8 => (i8::MIN as i128, i8::MAX as i128),
+        Int16 => (i16::MIN as i128, i16::MAX as i128),
+        Int32 => (i32::MIN as i128, i32::MAX as i128),
+        Int64 => (i64::MIN as i128, i64::MAX as i128),
+        UInt8 => (0, u8::MAX as i128),
+        UInt16 => (0, u16::MAX as i128),
+        UInt32 => (0, u32::MAX as i128),
+        UInt64 => (0, u64::MAX as i128),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -822,12 +1024,13 @@ mod tests {
 
     #[test]
     fn years() {
-        assert_eq!(civil_year(0), 1970);
-        assert_eq!(civil_year(-1), 1969);
-        assert_eq!(civil_year(9131), 1995); // 1995-01-01
-        assert_eq!(civil_year(9861), 1996); // 1996-12-31
-        assert_eq!(civil_year(9862), 1997);
-        assert_eq!(civil_year(59), 1970); // 1970-03-01
+        assert_eq!(civil(0).0, 1970);
+        assert_eq!(civil(-1).0, 1969);
+        assert_eq!(civil(9131).0, 1995); // 1995-01-01
+        assert_eq!(civil(9861).0, 1996); // 1996-12-31
+        assert_eq!(civil(9862).0, 1997);
+        assert_eq!(civil(59), (1970, 3)); // 1970-03-01
+        assert_eq!(civil(-1), (1969, 12));
     }
 
     #[test]

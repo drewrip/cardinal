@@ -403,3 +403,42 @@ async fn parameters_and_scalar_subqueries_are_single_values() {
     .await;
     assert_eq!(b.constant, None);
 }
+
+#[tokio::test]
+async fn buckets_of_a_range() {
+    let b = bounds(
+        "SELECT age / 10, count(*) FROM users WHERE age BETWEEN 18 AND 65 GROUP BY 1",
+    )
+    .await;
+    // 1, 2, ..., 6
+    assert_eq!(b.constant, Some(6));
+    let b = bounds("SELECT id % 16, count(*) FROM users WHERE id >= 0 GROUP BY 1").await;
+    assert_eq!(b.constant, Some(16));
+    // Could be negative: -15..=15, and NULL.
+    let b = bounds("SELECT age % 16, count(*) FROM users GROUP BY 1").await;
+    assert_eq!(b.constant, Some(32));
+    let b = bounds("SELECT age * 2 + 1, count(*) FROM users WHERE age IN (1, 2, 3) GROUP BY 1").await;
+    assert_eq!(b.constant, Some(3));
+    // May overflow and wrap: no range.
+    let b = bounds("SELECT age + 1, count(*) FROM users WHERE age > 5 GROUP BY 1").await;
+    assert_eq!(b.constant, None);
+}
+
+#[tokio::test]
+async fn date_trunc_of_a_range() {
+    let b = bounds(
+        "SELECT date_trunc('month', d), count(*)
+         FROM (SELECT make_date(2000 + age, 1 + id, 1) AS d FROM users)
+         WHERE d >= DATE '2024-01-01' AND d < DATE '2025-01-01' GROUP BY 1",
+    )
+    .await;
+    assert_eq!(b.constant, Some(12));
+    let b = bounds(
+        "SELECT date_trunc('week', d), count(*)
+         FROM (SELECT make_date(2000 + age, 1 + id, 1) AS d FROM users)
+         WHERE d BETWEEN DATE '2024-03-01' AND DATE '2024-03-31' GROUP BY 1",
+    )
+    .await;
+    // March 2024 meets the weeks of Feb 26, Mar 4, 11, 18, 25.
+    assert_eq!(b.constant, Some(5));
+}

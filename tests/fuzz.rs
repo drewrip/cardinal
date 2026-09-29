@@ -37,8 +37,12 @@ impl Gen {
     }
 
     fn leaf(&mut self) -> String {
-        match self.r.below(12) {
+        match self.r.below(13) {
             0 | 1 => "SELECT id AS c0, age AS c1 FROM users".into(),
+            11 => "SELECT TRY_CAST(count(*) AS BIGINT) AS c0, TRY_CAST(date_part('day', m) AS BIGINT) AS c1 \
+                   FROM (SELECT date_trunc('week', make_date(1990 + age % 10, 1 + id % 12, 1 + id % 28)) AS m \
+                   FROM users WHERE age BETWEEN 20 AND 22) GROUP BY m"
+                .into(),
             2 | 3 => "SELECT id AS c0, user_id AS c1 FROM orders".into(),
             4 => "SELECT user_id AS c0, id AS c1 FROM orders".into(),
             5 => "SELECT id AS c0, TRY_CAST(price AS BIGINT) AS c1 FROM products".into(),
@@ -107,6 +111,15 @@ impl Gen {
                     format!("SELECT {t}.c1 AS c0, {t}.c0 AS c1 FROM ({a}) {t}")
                 } else if self.r.chance(30) {
                     let c = self.col();
+                    let e = match self.r.below(4) {
+                        0 => format!("{t}.{c} / {}", self.r.range(1, 12)),
+                        1 => format!("{t}.{c} % {}", [-5, -3, 2, 3, 7, 10][self.r.below(6) as usize]),
+                        2 => format!("{t}.{c} * 3 - {}", self.r.range(0, 9)),
+                        _ => format!("{} - {t}.{c}", self.r.range(0, 9)),
+                    };
+                    format!("SELECT {t}.c0, TRY_CAST({e} AS BIGINT) AS c1 FROM ({a}) {t}")
+                } else if self.r.chance(30) {
+                    let c = self.col();
                     format!(
                         "SELECT {t}.c0, CASE WHEN {t}.{c} > 20 THEN 1 WHEN {t}.{c} < 3 THEN {t}.c1 \
                          END AS c1 FROM ({a}) {t}"
@@ -145,7 +158,13 @@ impl Gen {
             7 => {
                 let a = self.rel(d);
                 let c = self.col();
-                if self.r.chance(50) {
+                if self.r.chance(20) {
+                    let k = self.r.range(1, 9);
+                    format!(
+                        "SELECT TRY_CAST({t}.{c} % {k} AS BIGINT) AS c0, count(*) AS c1 \
+                         FROM ({a}) {t} GROUP BY 1"
+                    )
+                } else if self.r.chance(40) {
                     format!("SELECT {t}.{c} AS c0, count(*) AS c1 FROM ({a}) {t} GROUP BY {t}.{c}")
                 } else {
                     format!(

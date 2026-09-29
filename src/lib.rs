@@ -311,7 +311,11 @@ fn analyze_with(
     } else {
         Int::add(&scan_vars)
     };
-    // Prove the claim by showing its negation is unsatisfiable.
+    // Prove the claim by showing its negation is unsatisfiable. The push makes
+    // Z3 use its incremental SMT core, as in `bounds` and `validate`: its
+    // one-shot strategy portfolio tries bit-blasting first once domains bound
+    // many variables, which is far slower.
+    a.solver.push();
     a.solver.assert(root.le(&total).not());
     let smtlib = a.solver.to_string();
 
