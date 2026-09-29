@@ -95,7 +95,7 @@ impl Gen {
         }
         let d = depth - 1;
         let t = self.alias();
-        match self.r.below(22) {
+        match self.r.below(23) {
             0 | 1 => {
                 let a = self.rel(d);
                 let p = self.pred(&t);
@@ -240,6 +240,19 @@ impl Gen {
                 format!(
                     "SELECT DISTINCT ON ({t}.c0) {t}.c0, {t}.c1 FROM ({a}) {t} \
                      ORDER BY {t}.c0, {t}.c1"
+                )
+            }
+            21 => {
+                // One relation split three ways by a threshold (and NULL).
+                let a = self.rel(d);
+                let (u, v) = (self.alias(), self.alias());
+                let c = self.col();
+                let k = self.r.range(0, 40);
+                let dup = if self.r.chance(30) { "=" } else { "" };
+                format!(
+                    "SELECT {t}.c0, {t}.c1 FROM ({a}) {t} WHERE {t}.{c} < {k} \
+                     UNION ALL SELECT {u}.c0, {u}.c1 FROM ({a}) {u} WHERE {u}.{c} >{dup} {k} \
+                     UNION ALL SELECT {v}.c0, {v}.c1 FROM ({a}) {v} WHERE {v}.{c} IS NULL"
                 )
             }
             _ => {

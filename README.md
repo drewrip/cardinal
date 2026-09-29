@@ -119,6 +119,17 @@ distinct, semi / anti joins, projection of the column). Where the column's
 domain says every value is at least `k`, `k·X <= l`: `HAVING count(*) > 1`
 gives `X <= 1/2·l`.
 
+**Disjoint subsets.** A filter's selectivity is unknown, but filters that
+cannot both pass a row have selectivities summing to at most 1. A relation
+built from one scan of `T` by operators that never duplicate a row (filter,
+projection, sort, limit, alias, window, distinct, semi / anti / mark join)
+keeps an *origin*: `T`, and the domains of `T`'s columns over its rows, which
+outlive the columns themselves. Relations with the same origin share a variable
+`part` bounding them all, and for every set of origins that are pairwise
+disjoint (some column's domains don't meet), `Σ part <= |T|`. So
+`... WHERE age < 18 UNION ALL ... WHERE age >= 18` gives `X <= |users|`, not
+`2·|users|`.
+
 **Caveats.**
 
 - Equality-based NDV rules skip floats: `-0.0 = 0.0` in SQL, but the two differ as bits.

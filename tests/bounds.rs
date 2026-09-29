@@ -314,3 +314,27 @@ async fn groups_with_several_rows_are_few() {
     .await;
     assert_eq!(table(&b, "orders"), Some((exactly(1, 3), false)));
 }
+
+#[tokio::test]
+async fn disjoint_filters_of_one_table_partition_it() {
+    // No user is both under 18 and at least 18.
+    let b = bounds(
+        "SELECT id FROM users WHERE age < 18 UNION ALL SELECT id FROM users WHERE age >= 18",
+    )
+    .await;
+    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    let b = bounds(
+        "SELECT name FROM users WHERE age < 18
+         UNION ALL SELECT name FROM users WHERE age BETWEEN 18 AND 64
+         UNION ALL SELECT name FROM users WHERE age > 64
+         UNION ALL SELECT name FROM users WHERE age IS NULL",
+    )
+    .await;
+    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    // Overlapping filters can hold the same rows twice.
+    let b = bounds(
+        "SELECT id FROM users WHERE age < 30 UNION ALL SELECT id FROM users WHERE age > 20",
+    )
+    .await;
+    assert_eq!(table(&b, "users"), Some((exactly(2, 1), false)));
+}

@@ -18,6 +18,7 @@ use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, 
 use z3::ast::{Bool, Int};
 
 use crate::domain::{self, Dom, Facts};
+use crate::origin::{self, Origin};
 use z3::{Params, Solver};
 
 /// How a `TableScan` is treated.
@@ -49,6 +50,8 @@ pub(crate) struct Rel {
     /// `(column, bound)`: the column holds non-negative integers summing to at
     /// most `bound` over all rows, like the counts of a GROUP BY.
     pub(crate) sums: Vec<(Expr, Int)>,
+    /// The stored table this relation's rows are distinct rows of, if any.
+    pub(crate) origin: Option<Origin>,
 }
 
 pub(crate) struct Analyzer<'a> {
@@ -64,6 +67,8 @@ pub(crate) struct Analyzer<'a> {
     /// Every plan node, children before parents, so a validator can evaluate
     /// them bottom-up.
     pub(crate) nodes: Vec<Node>,
+    /// Every relation made of distinct rows of one stored table, by cardinality.
+    origins: Vec<(Int, Origin)>,
     /// Ids of visited nodes not yet claimed by a parent.
     frontier: Vec<usize>,
     counter: usize,
@@ -147,6 +152,7 @@ impl<'a> Analyzer<'a> {
             nodes: Vec::new(),
             frontier: Vec::new(),
             counter: 0,
+            origins: Vec::new(),
             max_product,
         }
     }
@@ -190,6 +196,7 @@ impl<'a> Analyzer<'a> {
             ndv,
             facts: Facts::default(),
             sums: vec![],
+            origin: None,
         };
         self.unique_columns(plan, &rel);
         rel
@@ -258,6 +265,11 @@ impl<'a> Analyzer<'a> {
         self.frontier.truncate(mark);
         let (out, raw_scan) = self.visit_node(plan);
         self.apply_domains(plan, &out);
+        if let Some(o) = &out.origin
+            && o.informative()
+        {
+            self.origins.push((out.card.clone(), o.clone()));
+        }
         let inputs = self.frontier.split_off(mark);
         debug_assert_eq!(inputs.len(), plan.inputs().len());
         let var = self.name_of(&out.card);
@@ -300,6 +312,32 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Relations over one table whose rows are provably disjoint together hold
+    /// at most the table's rows. Each class of relations with the same domains
+    /// gets a variable for the table rows in those domains, bounding all of
+    /// its members, and disjoint classes' variables sum to at most the table.
+    pub(crate) fn assert_partitions(&mut self) {
+        let origins: Vec<Origin> = self.origins.iter().map(|(_, o)| o.clone()).collect();
+        let (classes, cliques) = origin::disjoint_classes(&origins, 64);
+        let mut part: HashMap<usize, Int> = HashMap::new();
+        for clique in cliques {
+            let table = self.tables[&origins[classes[clique[0]][0]].table].var.clone();
+            let mut sum = vec![];
+            for c in clique {
+                if !part.contains_key(&c) {
+                    let v = self.new_var(format!("part{c}"));
+                    for &m in &classes[c] {
+                        self.assert(self.origins[m].0.le(&v));
+                    }
+                    self.assert(v.le(&table));
+                    part.insert(c, v);
+                }
+                sum.push(part[&c].clone());
+            }
+            self.assert(Int::add(&sum).le(&table));
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     fn visit_node(
         &mut self,
@@ -318,6 +356,12 @@ impl<'a> Analyzer<'a> {
                 }
                 o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
                 o.sums = rename_sums(&l.sums, &|c| passed_column(plan, &p.expr, c));
+                o.origin = l.origin.as_ref().map(|origin| {
+                    origin.project(p.expr.iter().map(|e| match strip_alias(e) {
+                        Expr::Column(c) => p.input.schema().index_of_column(c).ok(),
+                        _ => None,
+                    }))
+                });
                 o
             }
             LogicalPlan::Subquery(p) => self.same_rows("Subquery", plan, &p.subquery),
@@ -335,6 +379,7 @@ impl<'a> Analyzer<'a> {
                 o.facts = l.facts.clone();
                 o.sums = l.sums.clone();
                 o.facts.assume(&f.predicate, plan.schema());
+                o.origin = l.origin.clone().map(|x| x.narrow(&o.facts, plan.schema()));
                 o
             }
             LogicalPlan::Distinct(Distinct::All(input)) => {
@@ -342,6 +387,7 @@ impl<'a> Analyzer<'a> {
                 let mut o = self.fresh("Distinct", plan);
                 o.facts = l.facts.clone();
                 o.sums = l.sums.clone();
+                o.origin = l.origin.clone();
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
                 // DISTINCT keeps every value that occurs.
@@ -381,6 +427,7 @@ impl<'a> Analyzer<'a> {
                 let mut o = self.fresh("Sort", plan);
                 o.facts = l.facts.clone();
                 o.sums = l.sums.clone();
+                o.origin = l.origin.clone();
                 match s.fetch {
                     None => {
                         self.assert(o.card.eq(&l.card));
@@ -399,6 +446,7 @@ impl<'a> Analyzer<'a> {
                 let mut o = self.fresh("Limit", plan);
                 o.facts = l.facts.clone();
                 o.sums = l.sums.clone();
+                o.origin = l.origin.clone();
                 self.subset_ndv(&o, &l);
                 let skip = match lim.get_skip_type() {
                     Ok(SkipType::Literal(k)) => Some(k as u64),
@@ -506,6 +554,7 @@ impl<'a> Analyzer<'a> {
                 self.composite_key(scan, &s);
                 let name = self.name_of(&s.card);
                 self.scans.push((name.clone(), display, s.card.clone()));
+                s.origin = Some(Origin::scan(&key, schema).narrow(&s.facts, schema));
                 if !scan.filters.is_empty() {
                     // The raw scan, before pushed-down filters and fetch.
                     let mut raw = scan.clone();
@@ -530,6 +579,7 @@ impl<'a> Analyzer<'a> {
             for filter in &scan.filters {
                 f.facts.assume(filter, plan.schema());
             }
+            f.origin = out.origin.clone().map(|x| x.narrow(&f.facts, plan.schema()));
             out = f;
         }
         (out, raw_scan)
@@ -575,6 +625,7 @@ impl<'a> Analyzer<'a> {
             let i = input.schema().index_of_column(c).ok()?;
             child_column(plan, i)
         });
+        o.origin = l.origin.as_ref().map(|x| x.with_width(plan.schema().fields().len()));
         o
     }
 
@@ -776,6 +827,13 @@ impl<'a> Analyzer<'a> {
             JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.sums.clone(),
             _ => vec![],
         };
+        let width = plan.schema().fields().len();
+        o.origin = match join.join_type {
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.origin.as_ref(),
+            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.origin.as_ref(),
+            _ => None,
+        }
+        .map(|x| x.with_width(width).narrow(&o.facts, plan.schema()));
         o
     }
 
