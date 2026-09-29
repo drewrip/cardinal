@@ -301,3 +301,16 @@ async fn tpch_queries_filtered_to_few_groups_are_constant() {
     let b = bounds_in(&ctx, include_str!("tpch/q22.sql")).await;
     assert_eq!(b.constant, Some(7));
 }
+
+#[tokio::test]
+async fn groups_with_several_rows_are_few() {
+    // Each surviving group holds at least two of the table's rows.
+    let b = bounds("SELECT name, count(*) FROM users GROUP BY name HAVING count(*) > 1").await;
+    assert_eq!(table(&b, "users"), Some((exactly(1, 2), false)));
+    let b = bounds(
+        "SELECT o.user_id FROM orders o JOIN users u ON o.user_id = u.id
+         GROUP BY o.user_id HAVING count(o.id) >= 3 ORDER BY 1",
+    )
+    .await;
+    assert_eq!(table(&b, "orders"), Some((exactly(1, 3), false)));
+}

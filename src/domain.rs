@@ -149,6 +149,27 @@ impl Dom {
         }
     }
 
+    /// The integers from `lo` up.
+    pub(crate) fn at_least(lo: i128) -> Dom {
+        Dom::range(Some(lo), None)
+    }
+
+    /// The least value, if every value is a known integer (and never NULL).
+    pub(crate) fn min(&self) -> Option<i128> {
+        if self.null {
+            return None;
+        }
+        match &self.vals {
+            Vals::Range(lo, _) => *lo,
+            Vals::Set(_) => self.int_bounds().map(|(lo, _)| lo),
+            Vals::Any => None,
+        }
+    }
+
+    pub(crate) fn never_null(&self) -> bool {
+        !self.null
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.size() == Some(0)
     }

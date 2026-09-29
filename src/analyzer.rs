@@ -46,6 +46,9 @@ pub(crate) struct Rel {
     pub(crate) ndv: Vec<Int>,
     /// What every row's values satisfy, whatever the data.
     pub(crate) facts: Facts,
+    /// `(column, bound)`: the column holds non-negative integers summing to at
+    /// most `bound` over all rows, like the counts of a GROUP BY.
+    pub(crate) sums: Vec<(Expr, Int)>,
 }
 
 pub(crate) struct Analyzer<'a> {
@@ -186,6 +189,7 @@ impl<'a> Analyzer<'a> {
             card,
             ndv,
             facts: Facts::default(),
+            sums: vec![],
         };
         self.unique_columns(plan, &rel);
         rel
@@ -284,6 +288,16 @@ impl<'a> Analyzer<'a> {
                 _ => {}
             }
         }
+        // Rows whose values are each at least `k` and sum to at most `bound`
+        // number at most `bound / k`.
+        for (c, bound) in &rel.sums {
+            if let Some(k) = rel.facts.dom(c, schema).min()
+                && k >= 1
+                && k <= u64::MAX as i128
+            {
+                self.assert((&rel.card * int(k as u64)).le(bound));
+            }
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -303,6 +317,7 @@ impl<'a> Analyzer<'a> {
                     self.expr_ndv(&o.ndv[j], e, &p.input, &l);
                 }
                 o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
+                o.sums = rename_sums(&l.sums, &|c| passed_column(plan, &p.expr, c));
                 o
             }
             LogicalPlan::Subquery(p) => self.same_rows("Subquery", plan, &p.subquery),
@@ -318,6 +333,7 @@ impl<'a> Analyzer<'a> {
                 self.subset_ndv(&o, &l);
                 self.filter_ndv(&f.predicate, &f.input, &o, &l);
                 o.facts = l.facts.clone();
+                o.sums = l.sums.clone();
                 o.facts.assume(&f.predicate, plan.schema());
                 o
             }
@@ -325,6 +341,7 @@ impl<'a> Analyzer<'a> {
                 let l = self.visit(input);
                 let mut o = self.fresh("Distinct", plan);
                 o.facts = l.facts.clone();
+                o.sums = l.sums.clone();
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
                 // DISTINCT keeps every value that occurs.
@@ -363,6 +380,7 @@ impl<'a> Analyzer<'a> {
                 let l = self.visit(&s.input);
                 let mut o = self.fresh("Sort", plan);
                 o.facts = l.facts.clone();
+                o.sums = l.sums.clone();
                 match s.fetch {
                     None => {
                         self.assert(o.card.eq(&l.card));
@@ -380,6 +398,7 @@ impl<'a> Analyzer<'a> {
                 let l = self.visit(&lim.input);
                 let mut o = self.fresh("Limit", plan);
                 o.facts = l.facts.clone();
+                o.sums = l.sums.clone();
                 self.subset_ndv(&o, &l);
                 let skip = match lim.get_skip_type() {
                     Ok(SkipType::Literal(k)) => Some(k as u64),
@@ -552,6 +571,10 @@ impl<'a> Analyzer<'a> {
         self.assert(o.card.eq(&l.card));
         self.equal_ndv(&o, &l);
         o.facts = l.facts.by_position(input.schema(), plan.schema());
+        o.sums = rename_sums(&l.sums, &|c| {
+            let i = input.schema().index_of_column(c).ok()?;
+            child_column(plan, i)
+        });
         o
     }
 
@@ -636,6 +659,15 @@ impl<'a> Analyzer<'a> {
         }
         let mut o = self.fresh("GroupBy", plan);
         o.facts = aggregate_facts(plan, agg, &l.facts);
+        // Groups split the input's rows, so their counts sum to at most its
+        // row count.
+        for (i, e) in agg.aggr_expr.iter().enumerate() {
+            if let Expr::AggregateFunction(f) = strip_alias(e)
+                && f.func.name() == "count"
+            {
+                o.sums.push((col(plan, agg.group_expr.len() + i), l.card.clone()));
+            }
+        }
         self.assert(o.card.le(&l.card));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
         // One group per distinct combination of group values; every value of a
@@ -738,6 +770,12 @@ impl<'a> Analyzer<'a> {
         }
         self.join_ndv(join, &o, &l, &r);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
+        // Semi, anti and mark joins keep a subset of one side's rows.
+        o.sums = match join.join_type {
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.sums.clone(),
+            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.sums.clone(),
+            _ => vec![],
+        };
         o
     }
 
@@ -822,12 +860,7 @@ fn col(plan: &LogicalPlan, j: usize) -> Expr {
 /// `input`: each output column takes its expression's values, and facts on
 /// input columns passed through unchanged still hold.
 fn computed_facts(plan: &LogicalPlan, exprs: &[Expr], input: &LogicalPlan, facts: &Facts) -> Facts {
-    let passed = |c: &Column| {
-        let j = exprs
-            .iter()
-            .position(|e| matches!(strip_alias(e), Expr::Column(x) if x == c))?;
-        Some(Column::from(plan.schema().qualified_field(j)))
-    };
+    let passed = |c: &Column| passed_column(plan, exprs, c);
     let mut out = facts.rename(&passed);
     for (j, e) in exprs.iter().enumerate() {
         if let Some(e) = domain::rename(e, &passed) {
@@ -836,6 +869,21 @@ fn computed_facts(plan: &LogicalPlan, exprs: &[Expr], input: &LogicalPlan, facts
         out.add(&col(plan, j), facts.dom(e, input.schema()), plan.schema());
     }
     out
+}
+
+/// The output column of `plan`, computing `exprs`, that passes input column
+/// `c` through unchanged.
+fn passed_column(plan: &LogicalPlan, exprs: &[Expr], c: &Column) -> Option<Column> {
+    let j = exprs
+        .iter()
+        .position(|e| matches!(strip_alias(e), Expr::Column(x) if x == c))?;
+    Some(Column::from(plan.schema().qualified_field(j)))
+}
+
+fn rename_sums(sums: &[(Expr, Int)], map: &dyn Fn(&Column) -> Option<Column>) -> Vec<(Expr, Int)> {
+    sums.iter()
+        .filter_map(|(c, b)| Some((domain::rename(c, map)?, b.clone())))
+        .collect()
 }
 
 fn strip_alias(e: &Expr) -> &Expr {
@@ -860,6 +908,13 @@ fn aggregate_facts(plan: &LogicalPlan, agg: &Aggregate, input: &Facts) -> Facts 
                     if matches!(f.func.name(), "min" | "max") && f.params.args.len() == 1 =>
                 {
                     input.dom(&f.params.args[0], in_schema).with_null()
+                }
+                // A group has at least one row, and `count(*)` counts it.
+                Expr::AggregateFunction(f) if f.func.name() == "count" => {
+                    let counts_all = f.params.filter.is_none()
+                        && !f.params.distinct
+                        && f.params.args.iter().all(|a| input.dom(a, in_schema).never_null());
+                    Dom::at_least(if groups > 0 && counts_all { 1 } else { 0 })
                 }
                 _ => continue,
             }

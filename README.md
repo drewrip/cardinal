@@ -112,6 +112,13 @@ lie in a domain of `k` values has NDV `<= k`, and an empty domain means `X = 0`.
 So `WHERE id BETWEEN 1 AND 10` on a key gives `X <= 10`, TPC-H Q7 (two
 nations each, two ship years) gives `X <= 8`, and `x > 5 AND x < 3` gives `X = 0`.
 
+**Counts.** A GROUP BY's groups split its input, so each `count(..)` column
+sums to at most `l` over the output, and a group's `count(*)` is at least 1.
+The sum survives operators that keep a subset of rows (filter, sort, limit,
+distinct, semi / anti joins, projection of the column). Where the column's
+domain says every value is at least `k`, `k·X <= l`: `HAVING count(*) > 1`
+gives `X <= 1/2·l`.
+
 **Caveats.**
 
 - Equality-based NDV rules skip floats: `-0.0 = 0.0` in SQL, but the two differ as bits.
