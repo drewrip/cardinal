@@ -60,6 +60,8 @@ pub(crate) struct Analyzer<'a> {
     /// Ids of visited nodes not yet claimed by a parent.
     frontier: Vec<usize>,
     counter: usize,
+    /// Most NDV factors multiplied in one constraint.
+    max_product: usize,
 }
 
 /// One plan node and the variables describing its output.
@@ -112,21 +114,23 @@ fn min(a: &Int, b: &Int) -> Int {
     a.le(b).ite(a, b)
 }
 
-/// Products of NDVs are nonlinear; beyond this many factors they are dropped
-/// (the bound is then just the cardinality).
-const MAX_PRODUCT: usize = 3;
+/// Default for `Options::max_product`.
+pub(crate) const DEFAULT_MAX_PRODUCT: usize = 3;
 
-fn product(factors: &[&Int]) -> Option<Int> {
+/// The product of `factors`, or `None` if there are more than `cap` of them.
+/// Products of NDVs are nonlinear, so larger products are dropped (the bound is
+/// then just the cardinality), which is sound but weaker.
+fn product(factors: &[&Int], cap: usize) -> Option<Int> {
     match factors.len() {
         0 => Some(int(1)),
         1 => Some(factors[0].clone()),
-        n if n <= MAX_PRODUCT => Some(Int::mul(factors)),
+        n if n <= cap => Some(Int::mul(factors)),
         _ => None,
     }
 }
 
 impl<'a> Analyzer<'a> {
-    pub(crate) fn new(resolve: &'a dyn Fn(&TableScan) -> ScanKind) -> Self {
+    pub(crate) fn new(resolve: &'a dyn Fn(&TableScan) -> ScanKind, max_product: usize) -> Self {
         Self {
             solver: new_solver(),
             resolve,
@@ -136,6 +140,7 @@ impl<'a> Analyzer<'a> {
             nodes: Vec::new(),
             frontier: Vec::new(),
             counter: 0,
+            max_product,
         }
     }
 
@@ -295,7 +300,7 @@ impl<'a> Analyzer<'a> {
                 // DISTINCT keeps every value that occurs.
                 self.kept_values(plan, &o, &l);
                 let all: Vec<&Int> = l.ndv.iter().collect();
-                if let Some(p) = product(&all) {
+                if let Some(p) = product(&all, self.max_product) {
                     self.assert(o.card.le(p));
                 }
                 let cols: Vec<Column> = (0..input.schema().fields().len())
@@ -314,10 +319,10 @@ impl<'a> Analyzer<'a> {
                 let bounds: Option<Vec<Int>> = on
                     .on_expr
                     .iter()
-                    .map(|e| expr_bound(e, &on.input, &l))
+                    .map(|e| expr_bound(e, &on.input, &l, self.max_product))
                     .collect();
                 if let Some(bounds) = bounds
-                    && let Some(p) = product(&bounds.iter().collect::<Vec<_>>())
+                    && let Some(p) = product(&bounds.iter().collect::<Vec<_>>(), self.max_product)
                 {
                     self.assert(o.card.le(p));
                 }
@@ -487,7 +492,7 @@ impl<'a> Analyzer<'a> {
                 .collect();
             if let Some(positions) = positions {
                 let factors: Vec<&Int> = positions.iter().map(|i| &rel.ndv[*i]).collect();
-                if let Some(p) = product(&factors) {
+                if let Some(p) = product(&factors, self.max_product) {
                     self.assert(rel.card.le(p));
                 }
             }
@@ -537,7 +542,7 @@ impl<'a> Analyzer<'a> {
         {
             // The same values, or an injective image of them.
             self.assert(v.eq(&l.ndv[i]));
-        } else if let Some(bound) = expr_bound(e, input, l) {
+        } else if let Some(bound) = expr_bound(e, input, l, self.max_product) {
             self.assert(v.le(bound));
         }
     }
@@ -591,7 +596,7 @@ impl<'a> Analyzer<'a> {
         let mut factors = vec![];
         for (j, e) in agg.group_expr.iter().enumerate() {
             if plan.schema().field(j).data_type().is_floating() {
-                if let Some(bound) = expr_bound(e, &agg.input, &l) {
+                if let Some(bound) = expr_bound(e, &agg.input, &l, self.max_product) {
                     self.assert(o.ndv[j].le(bound));
                 }
             } else {
@@ -599,7 +604,7 @@ impl<'a> Analyzer<'a> {
             }
             factors.push(&o.ndv[j]);
         }
-        if let Some(p) = product(&factors) {
+        if let Some(p) = product(&factors, self.max_product) {
             self.assert(o.card.le(p));
         }
         // Grouping by a unique key leaves every row its own group.
@@ -803,7 +808,7 @@ fn literal_set(e: &Expr, index: &dyn Fn(&Expr) -> Option<usize>) -> Option<(usiz
 /// `input`, or `None` if nothing better than the row count is known. A
 /// deterministic function of some columns takes at most as many values as
 /// there are combinations of theirs.
-fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel) -> Option<Int> {
+fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int> {
     if let Some(c) = key_column(input, e) {
         let i = input.schema().index_of_column(&c).ok()?;
         return Some(l.ndv[i].clone());
@@ -829,7 +834,7 @@ fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel) -> Option<Int> {
         .into_iter()
         .map(|c| input.schema().index_of_column(c).ok().map(|i| &l.ndv[i]))
         .collect();
-    product(&factors?)
+    product(&factors?, cap)
 }
 
 /// True if the join key expressions `keys` of `side` are unique in `side`'s

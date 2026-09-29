@@ -197,3 +197,31 @@ fn linear_arithmetic() {
         "4"
     );
 }
+
+#[tokio::test]
+async fn product_cap_is_configurable() {
+    use cardinal::{Options, analyze_sql_with};
+    let ctx = shop();
+    let schema = Arc::new(Schema::new(
+        ["a", "b", "c", "d"]
+            .map(|n| Field::new(n, DataType::Int64, true))
+            .to_vec(),
+    ));
+    ctx.register_table(
+        "wide",
+        Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap()),
+    )
+    .unwrap();
+    // Each column is pinned to one value, so there is at most one group, but
+    // proving it multiplies four distinct counts.
+    let sql = "SELECT a, b, c, d, count(*) FROM wide
+               WHERE a = 1 AND b = 2 AND c = 3 AND d = 4 GROUP BY a, b, c, d";
+    assert_eq!(Options::default().max_product, 3);
+    let b = bounds_in(&ctx, sql).await;
+    assert_eq!(b.constant, None);
+    assert_eq!(table(&b, "wide"), Some((exactly(1, 1), false)));
+    let a = analyze_sql_with(&ctx, sql, Options { max_product: 4 })
+        .await
+        .unwrap();
+    assert_eq!(a.bounds().unwrap().constant, Some(1));
+}

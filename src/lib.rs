@@ -171,13 +171,42 @@ impl Analysis {
     }
 }
 
-/// Parses and optimizes `sql` with `ctx`, then analyzes the resulting plan.
+/// Settings for an analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// The most distinct-count factors multiplied in one constraint, e.g. the
+    /// columns of a GROUP BY or DISTINCT. Such products are nonlinear, so a
+    /// larger cap can give tighter bounds at the cost of slower and less often
+    /// decisive solving. Larger products are dropped, which is sound but weaker.
+    /// Defaults to 3.
+    pub max_product: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            max_product: analyzer::DEFAULT_MAX_PRODUCT,
+        }
+    }
+}
+
+/// Parses and optimizes `sql` with `ctx`, then analyzes the resulting plan,
+/// with default [`Options`].
 ///
 /// A scan counts as a base table only if its provider is the one registered in
 /// `ctx`'s catalog under that name. Every spelling of a table's name
 /// (`users`, `public.users`, ...) therefore maps to one variable, and work tables
 /// and table functions such as `generate_series` are not counted as input.
 pub async fn analyze_sql(ctx: &SessionContext, sql: &str) -> Result<Analysis> {
+    analyze_sql_with(ctx, sql, Options::default()).await
+}
+
+/// [`analyze_sql`] with explicit [`Options`].
+pub async fn analyze_sql_with(
+    ctx: &SessionContext,
+    sql: &str,
+    options: Options,
+) -> Result<Analysis> {
     let state = ctx.state();
     let plan = state.create_logical_plan(sql).await?;
     let plan = state.optimize(&plan)?;
@@ -212,15 +241,20 @@ pub async fn analyze_sql(ctx: &SessionContext, sql: &str) -> Result<Analysis> {
             .and_then(|p| base.get(&provider_ptr(&p)).cloned())
             .unwrap_or(ScanKind::NonBase)
     };
-    Ok(analyze_with(&plan, &resolve))
+    Ok(analyze_with(&plan, &resolve, options))
 }
 
-/// Analyzes an already-built logical plan.
+/// Analyzes an already-built logical plan, with default [`Options`].
 ///
 /// With no catalog to consult, every scan except a recursive CTE's work table
 /// counts as a base table, and names are resolved against DataFusion's default
 /// catalog and schema (`datafusion.public`).
 pub fn analyze_plan(plan: &LogicalPlan) -> Analysis {
+    analyze_plan_with(plan, Options::default())
+}
+
+/// [`analyze_plan`] with explicit [`Options`].
+pub fn analyze_plan_with(plan: &LogicalPlan, options: Options) -> Analysis {
     let resolve = |scan: &TableScan| {
         let is_work_table = source_as_provider(&scan.source)
             .map(|p| p.downcast_ref::<CteWorkTable>().is_some())
@@ -231,7 +265,7 @@ pub fn analyze_plan(plan: &LogicalPlan) -> Analysis {
             base_kind(&scan.table_name, "datafusion", "public")
         }
     };
-    analyze_with(plan, &resolve)
+    analyze_with(plan, &resolve, options)
 }
 
 /// Identity of a provider object. An address, not a pointer, so futures holding
@@ -252,8 +286,12 @@ fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str)
     ScanKind::Base { key, display }
 }
 
-fn analyze_with(plan: &LogicalPlan, resolve: &dyn Fn(&TableScan) -> ScanKind) -> Analysis {
-    let mut a = Analyzer::new(resolve);
+fn analyze_with(
+    plan: &LogicalPlan,
+    resolve: &dyn Fn(&TableScan) -> ScanKind,
+    options: Options,
+) -> Analysis {
+    let mut a = Analyzer::new(resolve, options.max_product);
     let root = a.visit(plan).card;
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();
