@@ -21,13 +21,12 @@ const CASES: &[Case] = &[
         no_keys: Reduces,
     },
     Case {
-        // Decorrelated into `users LEFT JOIN (orders grouped by user_id)`. With
-        // users.id declared, each group matches at most one user, so the output
-        // is at most |groups| + |users|. Without keys that is not provable.
+        // Decorrelated into `users LEFT JOIN (orders grouped by user_id)`. The
+        // grouped side is unique on user_id, so every user appears exactly once.
         name: "correlated_scalar_in_select",
         sql: "SELECT u.id, (SELECT max(o.amount) FROM orders o WHERE o.user_id = u.id) FROM users u",
         keys: Reduces,
-        no_keys: MightGrow,
+        no_keys: Reduces,
     },
     Case {
         name: "correlated_scalar_in_where",
@@ -82,13 +81,12 @@ const CASES: &[Case] = &[
     },
     // --- CTEs ------------------------------------------------------------
     Case {
-        // Joins two GROUP BY outputs on their group key: unique in reality, but
-        // not a declared primary key.
+        // Joins two GROUP BY outputs on their group key, which is unique.
         name: "cte_referenced_twice",
         sql: "WITH s AS (SELECT user_id, sum(amount) AS t FROM orders GROUP BY user_id)
               SELECT * FROM s a JOIN s b ON a.user_id = b.user_id",
-        keys: MightGrow,
-        no_keys: MightGrow,
+        keys: Reduces,
+        no_keys: Reduces,
     },
     Case {
         name: "cte_chain",
@@ -97,7 +95,7 @@ const CASES: &[Case] = &[
                    c AS (SELECT * FROM b JOIN users ON b.user_id = users.id)
               SELECT * FROM c WHERE c > 1",
         keys: Reduces,
-        no_keys: MightGrow,
+        no_keys: Reduces,
     },
     Case {
         name: "recursive_cte",
@@ -448,12 +446,12 @@ const CASES: &[Case] = &[
         no_keys: MightGrow,
     },
     Case {
-        // DISTINCT output is unique in reality but is not a declared key.
-        name: "distinct_outputs_are_not_keys",
+        // DISTINCT output is unique on its columns.
+        name: "distinct_outputs_are_keys",
         sql: "SELECT * FROM (SELECT DISTINCT user_id FROM orders) a
               JOIN (SELECT DISTINCT user_id FROM orders) b ON a.user_id = b.user_id",
-        keys: MightGrow,
-        no_keys: MightGrow,
+        keys: Reduces,
+        no_keys: Reduces,
     },
     Case {
         name: "unnest_of_array_agg",

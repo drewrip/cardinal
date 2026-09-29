@@ -10,8 +10,9 @@
 //! - the verdict does not depend on the data;
 //! - declaring keys never loses a proof.
 //!
-//! `CARDINAL_FUZZ_N` sets the number of queries (default 250) and
-//! `CARDINAL_FUZZ_SEED` the seed.
+//! `CARDINAL_FUZZ_N` sets the number of queries (default 250),
+//! `CARDINAL_FUZZ_SEED` the seed, and `CARDINAL_FUZZ_TRACE` (any value) prints
+//! each query and its time to stderr, to find slow ones.
 
 mod common;
 
@@ -363,8 +364,15 @@ async fn fuzz() {
         let depth = 1 + g.r.below(4) as u32;
         let sql = g.rel(depth);
         stats.queries += 1;
+        let started = std::time::Instant::now();
+        if std::env::var("CARDINAL_FUZZ_TRACE").is_ok() {
+            eprintln!("TRACE start {}: {sql}", stats.queries);
+        }
         let with_keys = check_mode(&sql, &keyed, &mut failures, &mut stats).await;
         let without = check_mode(&sql, &unkeyed, &mut failures, &mut stats).await;
+        if std::env::var("CARDINAL_FUZZ_TRACE").is_ok() {
+            eprintln!("TRACE done {} in {:?}", stats.queries, started.elapsed());
+        }
         let (Some(with_keys), Some(without)) = (with_keys, without) else {
             stats.skipped += 1;
             if skipped_examples.len() < 3 {

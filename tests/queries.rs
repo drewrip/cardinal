@@ -430,13 +430,46 @@ async fn unique_constraint_is_not_trusted() {
 }
 
 #[tokio::test]
-async fn group_by_output_is_not_a_key() {
-    let (a, _) = might_grow(
+async fn group_by_output_is_a_key() {
+    // GROUP BY emits one row per key, so its key columns are unique.
+    let a = reduces(
         "SELECT * FROM (SELECT user_id FROM orders GROUP BY user_id) g
          JOIN (SELECT user_id FROM orders GROUP BY user_id) h ON g.user_id = h.user_id",
     )
     .await;
-    assert!(has_op(&a, "InnerEquiJoin") && !has_op(&a, "KeyJoin"));
+    assert!(has_op(&a, "InnerKeyJoin"));
+}
+
+#[tokio::test]
+async fn distinct_output_is_a_key() {
+    let a = reduces(
+        "SELECT * FROM (SELECT DISTINCT user_id FROM orders) g
+         JOIN order_items oi ON g.user_id = oi.order_id",
+    )
+    .await;
+    assert!(has_op(&a, "InnerKeyJoin"));
+}
+
+#[tokio::test]
+async fn partial_group_key_is_not_a_key() {
+    // Grouped by (user_id, amount): user_id alone can repeat.
+    let (a, _) = might_grow(
+        "SELECT * FROM (SELECT user_id, amount FROM orders GROUP BY user_id, amount) g
+         JOIN order_items oi ON g.user_id = oi.order_id",
+    )
+    .await;
+    assert!(has_op(&a, "InnerEquiJoin"));
+}
+
+#[tokio::test]
+async fn rollup_output_is_not_a_key() {
+    // ROLLUP repeats key values across grouping levels.
+    let (a, _) = might_grow(
+        "SELECT * FROM (SELECT user_id, count(*) FROM orders GROUP BY ROLLUP (user_id)) g
+         JOIN order_items oi ON g.user_id = oi.order_id",
+    )
+    .await;
+    assert!(has_op(&a, "InnerEquiJoin"));
 }
 
 #[tokio::test]

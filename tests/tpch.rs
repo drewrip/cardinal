@@ -98,7 +98,7 @@ const CASES: &[Case] = &[
         name: "tpch_q15",
         sql: include_str!("tpch/q15.sql"),
         keys: Reduces,
-        no_keys: MightGrow,
+        no_keys: Reduces,
     },
     Case {
         name: "tpch_q16",

@@ -838,9 +838,7 @@ fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int>
 }
 
 /// True if the join key expressions `keys` of `side` are unique in `side`'s
-/// output, i.e. they cover a declared PRIMARY KEY of a base table and the path
-/// from `side` down to that table cannot duplicate rows. Declared primary keys
-/// are the only evidence of uniqueness; non-column keys are never unique.
+/// output (see `covers_primary_key`). Non-column keys are never unique.
 fn key_is_unique(side: &LogicalPlan, keys: &[&Expr]) -> bool {
     let Some(cols) = keys
         .iter()
@@ -899,8 +897,16 @@ fn same_positions(plan: &LogicalPlan, child: &LogicalPlan, cols: &[Column]) -> O
         .collect()
 }
 
-/// True if `cols` of `plan`'s output are unique because they trace back to a
-/// declared primary key through operators that never duplicate rows.
+/// Positions of `cols` in `plan`'s output.
+fn output_indices(plan: &LogicalPlan, cols: &[Column]) -> Option<Vec<usize>> {
+    cols.iter()
+        .map(|c| plan.schema().index_of_column(c).ok())
+        .collect()
+}
+
+/// True if `cols` of `plan`'s output are unique: they trace back to a declared
+/// primary key, a GROUP BY key or a DISTINCT output through operators that
+/// never duplicate rows.
 fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
     match plan {
         LogicalPlan::TableScan(scan) => {
@@ -926,10 +932,75 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
         | LogicalPlan::Limit(_)
         | LogicalPlan::Repartition(_)
         | LogicalPlan::SubqueryAlias(_)
-        | LogicalPlan::Window(_)
-        | LogicalPlan::Distinct(Distinct::All(_)) => {
+        | LogicalPlan::Window(_) => {
             let child = plan.inputs()[0];
             same_positions(plan, child, cols).is_some_and(|cs| covers_primary_key(child, &cs))
+        }
+        // DISTINCT's output is unique on all its columns, and is a subset of its
+        // input's rows, so its input's keys stay unique too.
+        LogicalPlan::Distinct(Distinct::All(input)) => {
+            let all = output_indices(plan, cols)
+                .is_some_and(|ix| (0..plan.schema().fields().len()).all(|i| ix.contains(&i)));
+            all || same_positions(plan, input, cols)
+                .is_some_and(|cs| covers_primary_key(input, &cs))
+        }
+        // DISTINCT ON is unique on its ON expressions, where they are selected
+        // as columns; its rows are a subset of its input's.
+        LogicalPlan::Distinct(Distinct::On(on)) => {
+            let Some(ix) = output_indices(plan, cols) else {
+                return false;
+            };
+            let on_positions: Option<Vec<usize>> = on
+                .on_expr
+                .iter()
+                .map(|e| {
+                    let c = key_column(&on.input, e)?;
+                    on.select_expr
+                        .iter()
+                        .position(|s| key_column(&on.input, s).as_ref() == Some(&c))
+                })
+                .collect();
+            let by_on = on_positions.is_some_and(|ps| ps.iter().all(|p| ix.contains(p)));
+            let mapped: Option<Vec<Column>> = ix
+                .iter()
+                .map(|&i| key_column(&on.input, &on.select_expr[i]))
+                .collect();
+            by_on || mapped.is_some_and(|cs| covers_primary_key(&on.input, &cs))
+        }
+        // GROUP BY emits one row per distinct combination of its keys (NULLs
+        // forming one group), so it is unique on all its key columns, and on any
+        // keys that are unique in its input. With no GROUP BY there is exactly
+        // one row, unique on anything. ROLLUP / CUBE / GROUPING SETS repeat keys
+        // across grouping levels.
+        LogicalPlan::Aggregate(agg) => {
+            if agg
+                .group_expr
+                .iter()
+                .any(|e| matches!(e, Expr::GroupingSet(_)))
+            {
+                return false;
+            }
+            if agg.group_expr.is_empty() {
+                return true;
+            }
+            let Some(ix) = output_indices(plan, cols) else {
+                return false;
+            };
+            let groups = agg.group_expr.len();
+            if (0..groups).all(|i| ix.contains(&i)) {
+                return true;
+            }
+            let mapped: Option<Vec<Column>> = ix
+                .iter()
+                .map(|&i| {
+                    if i < groups {
+                        key_column(&agg.input, &agg.group_expr[i])
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            mapped.is_some_and(|cs| covers_primary_key(&agg.input, &cs))
         }
         LogicalPlan::Projection(p) => {
             let mapped = cols
@@ -994,8 +1065,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                 JoinType::Full => false,
             }
         }
-        // Aggregates, unions, scans of non-tables and everything else: no
-        // declared primary key to rely on.
+        // Unions, scans of non-tables and everything else: no key to rely on.
         _ => false,
     }
 }
