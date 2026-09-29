@@ -3,23 +3,34 @@
 //! A query is parsed and optimized into a DataFusion `LogicalPlan`, every operator
 //! gets a Z3 integer for its output cardinality, and each operator contributes
 //! constraints relating its output to its inputs. We then ask Z3 whether the root's
-//! cardinality must be at most the sum of all table scan cardinalities.
+//! cardinality must be at most the sum of all base-table scan cardinalities.
 
 mod analyzer;
+mod validate;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use datafusion::catalog::TableProvider;
+use datafusion::common::TableReference;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::datasource::cte_worktable::CteWorkTable;
+use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::prelude::SessionContext;
 use z3::SatResult;
 use z3::ast::Int;
 
-use analyzer::Analyzer;
+use analyzer::{Analyzer, Node, ScanKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
     DataFusion(#[from] datafusion::error::DataFusionError),
+    /// A bug in this library, e.g. constraints that failed to round-trip.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,10 +40,32 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Verdict {
     /// The claim holds for every assignment satisfying the constraints.
     Proven,
-    /// A counterexample: values for every table, scan and operator variable.
-    Refuted(HashMap<String, i64>),
-    /// Z3 could not decide (e.g. nonlinear `l * r` terms); holds its reason.
+    /// A counterexample to the claim.
+    Refuted(Counterexample),
+    /// Z3 could not decide (e.g. nonlinear `l * r` terms, or the solver timed
+    /// out); holds its reason.
     Unknown(String),
+}
+
+/// Cardinalities satisfying every constraint while violating the claim.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Counterexample {
+    /// Row count of each base table, by table name.
+    pub tables: HashMap<String, i64>,
+    /// Row count of each operator variable (scans included), by variable name.
+    pub vars: HashMap<String, i64>,
+}
+
+impl Counterexample {
+    /// The row count of table `name`. Panics if there is no such table.
+    pub fn table(&self, name: &str) -> i64 {
+        self.tables[name]
+    }
+
+    /// The value of operator variable `name`. Panics if there is no such variable.
+    pub fn var(&self, name: &str) -> i64 {
+        self.vars[name]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,24 +75,139 @@ pub struct Analysis {
     pub smtlib: String,
     /// Name of the root operator's variable.
     pub root: String,
-    /// Each scan as (scan variable, table name), in visit order.
+    /// Each base-table scan as (scan variable, table name), in visit order.
     pub scans: Vec<(String, String)>,
     /// The optimized plan that was analyzed, for display.
     pub plan: String,
+    /// The constraint set `S` alone, without the claim, and how many assertions
+    /// it holds (to check that it parses back completely).
+    constraints: String,
+    assertions: usize,
+    /// Every plan node, children before parents.
+    nodes: Vec<Node>,
+}
+
+/// Result of checking a real execution against the constraint set `S`.
+#[derive(Debug, Clone)]
+pub struct Validation {
+    /// Actual output rows of every evaluated plan node, by variable name.
+    pub rows: HashMap<String, u64>,
+    /// The first operator (children before parents) whose actual row count
+    /// contradicts `S` given the counts below it. `None` means every evaluated
+    /// node is consistent with `S`.
+    pub violation: Option<String>,
+    /// True if Z3 could not decide consistency at some step.
+    pub undecided: bool,
+}
+
+impl Analysis {
+    /// Evaluates the analyzed plan against `ctx`'s data and checks that the
+    /// actual row count of every operator satisfies `S`.
+    ///
+    /// The plan is evaluated once, bottom-up: each operator runs over its
+    /// children's materialized output, so every count comes from one consistent
+    /// execution even with `random()`, ties under `LIMIT`, and so on. The plan is
+    /// executed as analyzed, without re-optimizing it. Operators with side effects
+    /// (DML, DDL, `COPY`, ...) are never executed, and operators that cannot run
+    /// on their own (e.g. inside a correlated subquery) are left unconstrained.
+    ///
+    /// A sound analysis admits every real execution, so a `violation` names an
+    /// operator whose constraint real data breaks. Beware that DataFusion does
+    /// not enforce declared primary keys: data that breaks a declared key can
+    /// break a constraint derived from it.
+    pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
+        let counts = validate::evaluate(&self.nodes, ctx).await;
+        validate::check(&self.constraints, self.assertions, &counts)
+    }
 }
 
 /// Parses and optimizes `sql` with `ctx`, then analyzes the resulting plan.
+///
+/// A scan counts as a base table only if its provider is the one registered in
+/// `ctx`'s catalog under that name. Every spelling of a table's name
+/// (`users`, `public.users`, ...) therefore maps to one variable, and work tables
+/// and table functions such as `generate_series` are not counted as input.
 pub async fn analyze_sql(ctx: &SessionContext, sql: &str) -> Result<Analysis> {
     let state = ctx.state();
     let plan = state.create_logical_plan(sql).await?;
     let plan = state.optimize(&plan)?;
-    Ok(analyze_plan(&plan))
+
+    let catalog = state.config().options().catalog.clone();
+    let (default_catalog, default_schema) = (catalog.default_catalog, catalog.default_schema);
+
+    let mut scans = Vec::new();
+    plan.apply_with_subqueries(|p| {
+        if let LogicalPlan::TableScan(scan) = p {
+            scans.push(scan.clone());
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    let mut base = HashMap::new();
+    for scan in scans {
+        let Ok(registered) = ctx.table_provider(scan.table_name.clone()).await else {
+            continue;
+        };
+        let Ok(scanned) = source_as_provider(&scan.source) else {
+            continue;
+        };
+        if provider_ptr(&registered) == provider_ptr(&scanned) {
+            let kind = base_kind(&scan.table_name, &default_catalog, &default_schema);
+            base.insert(provider_ptr(&scanned), kind);
+        }
+    }
+
+    let resolve = |scan: &TableScan| {
+        source_as_provider(&scan.source)
+            .ok()
+            .and_then(|p| base.get(&provider_ptr(&p)).cloned())
+            .unwrap_or(ScanKind::NonBase)
+    };
+    Ok(analyze_with(&plan, &resolve))
 }
 
 /// Analyzes an already-built logical plan.
+///
+/// With no catalog to consult, every scan except a recursive CTE's work table
+/// counts as a base table, and names are resolved against DataFusion's default
+/// catalog and schema (`datafusion.public`).
 pub fn analyze_plan(plan: &LogicalPlan) -> Analysis {
-    let mut a = Analyzer::new();
+    let resolve = |scan: &TableScan| {
+        let is_work_table = source_as_provider(&scan.source)
+            .map(|p| p.downcast_ref::<CteWorkTable>().is_some())
+            .unwrap_or(false);
+        if is_work_table {
+            ScanKind::NonBase
+        } else {
+            base_kind(&scan.table_name, "datafusion", "public")
+        }
+    };
+    analyze_with(plan, &resolve)
+}
+
+/// Identity of a provider object. An address, not a pointer, so futures holding
+/// it stay `Send`.
+fn provider_ptr(p: &Arc<dyn TableProvider>) -> usize {
+    Arc::as_ptr(p) as *const () as usize
+}
+
+/// Canonical identity and display name for a base table reference.
+fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str) -> ScanKind {
+    let r = name.clone().resolve(default_catalog, default_schema);
+    let key = format!("{}\0{}\0{}", r.catalog, r.schema, r.table);
+    let display = if *r.catalog == *default_catalog && *r.schema == *default_schema {
+        r.table.to_string()
+    } else {
+        r.to_string()
+    };
+    ScanKind::Base { key, display }
+}
+
+fn analyze_with(plan: &LogicalPlan, resolve: &dyn Fn(&TableScan) -> ScanKind) -> Analysis {
+    let mut a = Analyzer::new(resolve);
     let root = a.visit(plan);
+    let root_name = a.name_of(&root);
+    let constraints = a.solver.to_string();
+    let assertions = a.solver.get_assertions().len();
 
     let scan_vars: Vec<&Int> = a.scans.iter().map(|(_, _, v)| v).collect();
     let total = if scan_vars.is_empty() {
@@ -80,32 +228,34 @@ pub fn analyze_plan(plan: &LogicalPlan) -> Analysis {
         ),
         SatResult::Sat => {
             let model = a.solver.get_model().expect("sat result has a model");
-            let named = a
-                .tables
-                .iter()
-                .map(|(name, v)| (name.clone(), v.clone()))
-                .chain(a.vars.iter().cloned());
-            let values = named
-                .filter_map(|(name, v)| {
-                    model
-                        .eval(&v, true)
-                        .and_then(|x| x.as_i64())
-                        .map(|x| (name, x))
-                })
-                .collect();
-            Verdict::Refuted(values)
+            let value = |v: &Int| model.eval(v, true).and_then(|x| x.as_i64());
+            Verdict::Refuted(Counterexample {
+                tables: a
+                    .tables
+                    .values()
+                    .filter_map(|t| Some((t.display.clone(), value(&t.var)?)))
+                    .collect(),
+                vars: a
+                    .vars
+                    .iter()
+                    .filter_map(|(name, v)| Some((name.clone(), value(v)?)))
+                    .collect(),
+            })
         }
     };
 
     Analysis {
         verdict,
         smtlib,
-        root: root.to_string(),
+        root: root_name,
         scans: a
             .scans
             .iter()
             .map(|(s, t, _)| (s.clone(), t.clone()))
             .collect(),
         plan: plan.display_indent().to_string(),
+        constraints,
+        assertions,
+        nodes: a.nodes,
     }
 }
