@@ -387,3 +387,19 @@ async fn left_join_rows_without_a_match() {
     .await;
     assert_eq!(table(&b, "orders"), Some((exactly(1, 1), false)));
 }
+
+#[tokio::test]
+async fn parameters_and_scalar_subqueries_are_single_values() {
+    let b = bounds("SELECT * FROM users WHERE id = $1").await;
+    assert_eq!(b.constant, Some(1));
+    let b = bounds("SELECT * FROM users WHERE id IN ($1, $2, 7) AND age > $3").await;
+    assert_eq!(b.constant, Some(3));
+    let b = bounds("SELECT * FROM users WHERE id = (SELECT max(user_id) FROM orders)").await;
+    assert_eq!(b.constant, Some(1));
+    // A correlated subquery takes a value per row.
+    let b = bounds(
+        "SELECT * FROM users u WHERE id = (SELECT max(o.id) FROM orders o WHERE o.user_id = u.age)",
+    )
+    .await;
+    assert_eq!(b.constant, None);
+}

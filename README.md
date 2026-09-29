@@ -98,6 +98,9 @@ lie in a domain of `k` values has NDV `<= k`, and an empty domain means `X = 0`.
   columns, `AND` (intersect) and `OR` (union). Any comparison makes its
   operands non-NULL. Ranges are over integers, dates and decimals of one scale,
   and sets over those, strings and booleans; floats get no domain.
+- Comparing with something that has one value for the whole query (a query
+  parameter `$1`, or an uncorrelated scalar subquery) leaves at most one value,
+  though not which: `id = $1` on a key gives `X <= 1`, `IN ($1, $2)` two.
 - `a = b` in a filter or inner/semi equi-join gives both sides the intersection
   of their domains.
 - Domains flow through projection (a computed column keeps its expression's

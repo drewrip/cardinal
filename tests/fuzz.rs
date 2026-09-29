@@ -221,9 +221,10 @@ impl Gen {
             15 => {
                 let (a, b) = (self.rel(d), self.rel(d));
                 let u = self.alias();
+                let (op, agg) = [(">=", "avg"), ("=", "max"), ("=", "min")][self.r.below(3) as usize];
                 format!(
                     "SELECT {t}.c0, {t}.c1 FROM ({a}) {t} \
-                     WHERE {t}.c0 >= (SELECT TRY_CAST(avg({u}.c0) AS BIGINT) FROM ({b}) {u})"
+                     WHERE {t}.c0 {op} (SELECT TRY_CAST({agg}({u}.c0) AS BIGINT) FROM ({b}) {u})"
                 )
             }
             16 => {

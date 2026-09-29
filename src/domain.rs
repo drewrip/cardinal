@@ -37,6 +37,9 @@ enum Vals {
     Range(Option<i128>, Option<i128>),
     /// Exactly these values (possibly none).
     Set(BTreeSet<Key>),
+    /// At most this many values, not known which: an expression compared
+    /// with a query parameter or a scalar subquery.
+    Count(u128),
 }
 
 /// Integer ranges with fewer values are kept as sets.
@@ -79,6 +82,22 @@ impl Dom {
         }
     }
 
+    /// At most `n` values, not known which.
+    fn count(n: u128) -> Dom {
+        Dom {
+            vals: Vals::Count(n),
+            null: false,
+        }
+        .normalized()
+    }
+
+    fn values(vals: &Vals) -> Dom {
+        Dom {
+            vals: vals.clone(),
+            null: false,
+        }
+    }
+
     fn range(lo: Option<i128>, hi: Option<i128>) -> Dom {
         Dom {
             vals: Vals::Range(lo, hi),
@@ -98,6 +117,7 @@ impl Dom {
     fn normalized(self) -> Dom {
         let vals = match self.vals {
             Vals::Range(None, None) => Vals::Any,
+            Vals::Count(0) => Vals::Set(BTreeSet::new()),
             // Small ranges are listed, so they can lose single values.
             Vals::Range(Some(lo), Some(hi)) if hi - lo < SMALL => {
                 Vals::Set((lo..=hi).map(Key::Int).collect())
@@ -126,6 +146,7 @@ impl Dom {
             Vals::Any | Vals::Range(None, _) | Vals::Range(_, None) => return None,
             Vals::Range(Some(lo), Some(hi)) => (hi - lo) as u128 + 1,
             Vals::Set(s) => s.len() as u128,
+            Vals::Count(n) => *n,
         };
         Some(n + self.null as u128)
     }
@@ -162,7 +183,7 @@ impl Dom {
         match &self.vals {
             Vals::Range(lo, _) => *lo,
             Vals::Set(_) => self.int_bounds().map(|(lo, _)| lo),
-            Vals::Any => None,
+            Vals::Any | Vals::Count(_) => None,
         }
     }
 
@@ -182,6 +203,12 @@ impl Dom {
     pub(crate) fn intersect(&self, o: &Dom) -> Dom {
         let vals = match (&self.vals, &o.vals) {
             (Vals::Any, v) | (v, Vals::Any) => v.clone(),
+            (Vals::Count(a), Vals::Count(b)) => Vals::Count(*a.min(b)),
+            // Keep the known values if there are no more of them.
+            (Vals::Count(n), v) | (v, Vals::Count(n)) => match Dom::values(v).size() {
+                Some(m) if m <= *n => v.clone(),
+                _ => Vals::Count(*n),
+            },
             (Vals::Range(a, b), Vals::Range(c, d)) => {
                 let lo = match (a, c) {
                     (Some(a), Some(c)) => Some(*a.max(c)),
@@ -217,6 +244,10 @@ impl Dom {
     pub(crate) fn union(&self, o: &Dom) -> Dom {
         let vals = match (&self.vals, &o.vals) {
             (Vals::Any, _) | (_, Vals::Any) => Vals::Any,
+            (Vals::Count(n), v) | (v, Vals::Count(n)) => match Dom::values(v).size() {
+                Some(m) => Vals::Count(n + m),
+                None => Vals::Any,
+            },
             (Vals::Set(a), Vals::Set(b)) => Vals::Set(a.union(b).cloned().collect()),
             (Vals::Range(a, b), Vals::Range(c, d)) => Vals::Range(
                 a.zip(*c).map(|(a, c)| a.min(c)),
@@ -514,6 +545,14 @@ impl Facts {
                     // A comparison with NULL is never TRUE.
                     add(left, Dom::non_null());
                     add(right, Dom::non_null());
+                    // Equal to one value, whichever it is.
+                    if *op == Operator::Eq {
+                        for (e, x) in [(left, right), (right, left)] {
+                            if invariant(x) && exact_equality(e, schema) {
+                                add(e, Dom::count(1));
+                            }
+                        }
+                    }
                     let (e, op, lit) = match (&**left, &**right) {
                         (e, Expr::Literal(v, _)) => (e, *op, v),
                         (Expr::Literal(v, _), e) => (e, op.swap().unwrap_or(*op), v),
@@ -546,16 +585,21 @@ impl Facts {
                 }
             }
             Expr::InList(list) if !list.negated => {
-                let keys: Option<Vec<Key>> = list
+                let e = &list.expr;
+                let doms: Option<Vec<Dom>> = list
                     .list
                     .iter()
                     .filter(|x| !matches!(x, Expr::Literal(v, _) if v.is_null()))
                     .map(|x| match x {
-                        Expr::Literal(v, _) if literal_fits(&list.expr, v, schema) => key(v),
+                        Expr::Literal(v, _) if literal_fits(e, v, schema) => Some(Dom::set([key(v)?])),
+                        x if invariant(x) && exact_equality(e, schema) => Some(Dom::count(1)),
                         _ => None,
                     })
                     .collect();
-                add(&list.expr, keys.map_or_else(Dom::non_null, Dom::set));
+                let d = doms.map_or_else(Dom::non_null, |ds| {
+                    ds.iter().fold(Dom::nothing(), |acc, d| acc.union(d))
+                });
+                add(e, d);
             }
             Expr::IsNull(e) => add(e, Dom::null_only()),
             Expr::IsNotNull(e) => add(e, Dom::non_null()),
@@ -589,6 +633,34 @@ pub(crate) fn rename(e: &Expr, map: &dyn Fn(&Column) -> Option<Column>) -> Optio
         .ok()?
         .data;
     ok.then_some(e)
+}
+
+/// True if `e` takes one value for the whole query: it reads no column, and
+/// is built from literals, parameters and uncorrelated scalar subqueries.
+fn invariant(e: &Expr) -> bool {
+    !matches!(e, Expr::Literal(..))
+        && !e.is_volatile()
+        && e
+            .exists(|x| {
+                Ok(match x {
+                    Expr::ScalarSubquery(sq) => !sq.outer_ref_columns.is_empty(),
+                    Expr::Column(_)
+                    | Expr::OuterReferenceColumn(..)
+                    | Expr::Exists(_)
+                    | Expr::InSubquery(_)
+                    | Expr::SetComparison(_)
+                    | Expr::AggregateFunction(_)
+                    | Expr::WindowFunction(_) => true,
+                    _ => false,
+                })
+            })
+            .is_ok_and(|found| !found)
+}
+
+/// True if values of `e` equal under SQL `=` are the same value. Not so for
+/// floats, where `-0.0 = 0.0`.
+fn exact_equality(e: &Expr, schema: &DFSchema) -> bool {
+    e.get_type(schema).is_ok_and(|t| !t.is_floating())
 }
 
 /// True if `e` gives the same value whenever its columns do.
