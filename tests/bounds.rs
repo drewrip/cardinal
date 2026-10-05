@@ -220,7 +220,7 @@ async fn product_cap_is_configurable() {
     let b = bounds_in(&ctx, sql).await;
     assert_eq!(b.constant, None);
     assert_eq!(table(&b, "wide"), Some((exactly(1, 1), false)));
-    let a = analyze_sql_with(&ctx, sql, Options { max_product: 4 })
+    let a = analyze_sql_with(&ctx, sql, Options { max_product: 4, ..Default::default() })
         .await
         .unwrap();
     assert_eq!(a.bounds().unwrap().constant, Some(1));

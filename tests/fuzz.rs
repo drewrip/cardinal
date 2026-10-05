@@ -16,8 +16,8 @@
 
 mod common;
 
-use cardinal::{Verdict, analyze_sql};
-use common::{Rng, check_bounds, shop_datasets};
+use cardinal::{Verdict, analyze_sql_with};
+use common::{Rng, SELECTIVITY, check_bounds, check_selectivity, shop_datasets};
 use datafusion::prelude::SessionContext;
 
 /// Generates queries whose output columns are always exactly `c0, c1`.
@@ -354,7 +354,7 @@ async fn check_mode(
         if df.collect().await.is_err() {
             return None;
         }
-        let a = match analyze_sql(ctx, sql).await {
+        let a = match analyze_sql_with(ctx, sql, SELECTIVITY).await {
             Ok(a) => a,
             Err(_) => return None,
         };
@@ -389,6 +389,13 @@ async fn check_mode(
             failures.push(format!(
                 "{dname}: {f}: {sql}\n  bounds: {}",
                 bounds.as_ref().unwrap()
+            ));
+        }
+        for f in check_selectivity(&v) {
+            failures.push(format!(
+                "{dname}: {f}: {sql}\n  {}\n{}",
+                a.selectivity.as_ref().unwrap(),
+                a.plan
             ));
         }
         let declared = a.smtlib.matches("(declare-fun op").count();

@@ -137,6 +137,47 @@ impl Search {
         unsat
     }
 
+    /// True if variable `x` is provably zero.
+    pub(crate) fn zero(&self, x: &str) -> bool {
+        self.proves(Int::new_const(x).eq(Int::from_u64(0)))
+    }
+
+    /// True if variables `x` and `y` are provably equal.
+    pub(crate) fn equal(&self, x: &str, y: &str) -> bool {
+        self.proves(Int::new_const(x).eq(Int::new_const(y)))
+    }
+
+    /// The tightest proven `lo·d <= x <= hi·d`, as fractions `(num, den)` in
+    /// `0..=1`, for variables with `x <= d` (so `[0, 1]` needs no proof).
+    pub(crate) fn ratio(&self, x: &str, d: &str) -> ((u64, u64), (u64, u64)) {
+        let (x, d) = (Int::new_const(x), Int::new_const(d));
+        let candidates: Vec<(u64, u64)> =
+            coefficients().into_iter().filter(|(p, q)| p <= q).collect();
+        let last = candidates.len() - 1;
+        let below = |i: usize| {
+            let (p, q) = candidates[i];
+            self.proves((&x * Int::from_u64(q)).le(&d * Int::from_u64(p)))
+        };
+        let above = |i: usize| {
+            let (p, q) = candidates[i];
+            self.proves((&x * Int::from_u64(q)).ge(&d * Int::from_u64(p)))
+        };
+        // Most ratios are unconstrained: try the weakest claim on each side
+        // before searching.
+        let hi = if below(last - 1) {
+            smallest(0, last as u64 - 1, |i| below(i as usize)) as usize
+        } else {
+            last
+        };
+        let lo = if above(1) {
+            // `above` holds up to some index; search from the top.
+            last - smallest(0, last as u64 - 1, |i| above(last - i as usize)) as usize
+        } else {
+            0
+        };
+        (candidates[lo], candidates[hi])
+    }
+
     /// `den·X <= num·s + den·add`
     fn upper(&self, x: &Int, num: u64, den: u64, add: u64) -> Bool {
         let lhs = &self.output * Int::from_u64(den);
@@ -202,4 +243,24 @@ fn coefficients() -> Vec<(u64, u64)> {
 
 fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ratio_finds_the_tightest_fractions() {
+        let declare = "(declare-fun x () Int) (declare-fun d () Int) (assert (>= x 0)) (assert (<= x d))";
+        let ratio = |facts: &str| Search::new(&format!("{declare} {facts}"), "x").0.ratio("x", "d");
+        assert_eq!(ratio(""), ((0, 1), (1, 1)));
+        assert_eq!(ratio("(assert (<= (* 2 x) d))"), ((0, 1), (1, 2)));
+        assert_eq!(ratio("(assert (>= (* 3 x) d))"), ((1, 3), (1, 1)));
+        assert_eq!(
+            ratio("(assert (>= (* 4 x) d)) (assert (<= (* 3 x) (* 2 d)))"),
+            ((1, 4), (2, 3))
+        );
+        assert_eq!(ratio("(assert (= x 0))"), ((0, 1), (0, 1)));
+        assert_eq!(ratio("(assert (= x d))"), ((1, 1), (1, 1)));
+    }
 }

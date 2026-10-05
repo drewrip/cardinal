@@ -9,9 +9,11 @@ mod analyzer;
 mod bounds;
 mod domain;
 mod origin;
+mod selectivity;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};
+pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +38,9 @@ pub enum Error {
     /// A bug in this library, e.g. constraints that failed to round-trip.
     #[error("internal error: {0}")]
     Internal(String),
+    /// A formula was evaluated without the row count of a table it mentions.
+    #[error("no row count given for table {0}")]
+    UnknownTable(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -89,6 +94,9 @@ pub struct Analysis {
     pub scans: Vec<(String, String)>,
     /// The optimized plan that was analyzed, for display.
     pub plan: String,
+    /// The output cardinality as a formula over table sizes and operator
+    /// selectivities, if [`Options::selectivity`] is set.
+    pub selectivity: Option<SelectivityReport>,
     /// The constraint set `S` alone, without the claim, and how many assertions
     /// it holds (to check that it parses back completely).
     constraints: String,
@@ -110,6 +118,9 @@ pub struct Validation {
     pub violation: Option<String>,
     /// True if Z3 could not decide consistency at some step.
     pub undecided: bool,
+    /// The selectivities measured from the execution, checked against the
+    /// analysis's [`SelectivityReport`], if it has one.
+    pub selectivity: Option<SelectivityCheck>,
 }
 
 impl Analysis {
@@ -128,8 +139,14 @@ impl Analysis {
     /// not enforce declared primary keys: data that breaks a declared key can
     /// break a constraint derived from it.
     pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
-        let counts = validate::evaluate(&self.nodes, ctx).await;
-        validate::check(&self.constraints, self.assertions, &counts)
+        let auxiliary = self.selectivity.is_some();
+        let (counts, aux) = validate::evaluate(&self.nodes, ctx, auxiliary).await;
+        let mut v = validate::check(&self.constraints, self.assertions, &counts)?;
+        v.selectivity = self
+            .selectivity
+            .as_ref()
+            .map(|s| s.check(&self.scans, &v.rows, &aux));
+        Ok(v)
     }
 
     /// Proves bounds on the output cardinality relative to the source relations:
@@ -187,12 +204,17 @@ pub struct Options {
     /// decisive solving. Larger products are dropped, which is sound but weaker.
     /// Defaults to 3.
     pub max_product: usize,
+    /// Also derive the output cardinality as a formula over table sizes and
+    /// operator selectivities ([`Analysis::selectivity`]). This runs a few
+    /// solver checks per filter, join and GROUP BY. Defaults to false.
+    pub selectivity: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Options {
             max_product: analyzer::DEFAULT_MAX_PRODUCT,
+            selectivity: false,
         }
     }
 }
@@ -375,16 +397,23 @@ fn analyze_with(
         .collect();
     tables.sort();
 
+    let scans: Vec<(String, String)> = a
+        .scans
+        .iter()
+        .map(|(s, t, _)| (s.clone(), t.clone()))
+        .collect();
+    let selectivity = options.selectivity.then(|| {
+        let (search, _) = bounds::Search::new(&constraints, &root_name);
+        selectivity::build(&a.nodes, &scans, &search)
+    });
+
     Analysis {
         verdict,
         smtlib,
         root: root_name,
-        scans: a
-            .scans
-            .iter()
-            .map(|(s, t, _)| (s.clone(), t.clone()))
-            .collect(),
+        scans,
         plan: plan.display_indent().to_string(),
+        selectivity,
         constraints,
         assertions,
         nodes: a.nodes,

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cardinal::{Analysis, Bounds, Validation, Verdict, analyze_sql};
+use cardinal::{Analysis, Bounds, Options, Validation, Verdict, analyze_sql_with};
 use datafusion::arrow::array::{ArrayRef, Date32Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -734,8 +734,9 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         let mut nodes = String::new();
         let mut root_rows = vec![];
         let mut bounds: Option<Bounds> = None;
+        let mut formula = None;
         for (dname, ctx) in &ctxs {
-            let a = match analyze_sql(ctx, case.sql).await {
+            let a = match analyze_sql_with(ctx, case.sql, SELECTIVITY).await {
                 Ok(a) => a,
                 Err(e) => {
                     failures.push(format!("{}: analysis failed: {e}", case.name));
@@ -779,6 +780,10 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
                 failures.push(format!("{}: on {dname}, {f}", case.name));
             }
+            for f in check_selectivity(&v) {
+                failures.push(format!("{}: on {dname}, {f}", case.name));
+            }
+            formula = a.selectivity.as_ref().map(|s| s.to_string());
             if kind == Expect::Reduces {
                 let root = v.rows.get(&a.root).copied();
                 let scanned: Option<u64> =
@@ -810,6 +815,9 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             },
             bounds.as_ref().map_or(String::new(), |b| b.to_string())
         );
+        if let Some(formula) = formula {
+            println!("    {}", formula.replace('\n', "\n    "));
+        }
         if verdict != expect {
             failures.push(format!(
                 "{}: expected {expect:?}, got {verdict:?}",
@@ -825,6 +833,27 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Default options, plus the selectivity formula.
+pub const SELECTIVITY: Options = Options {
+    max_product: 3,
+    selectivity: true,
+};
+
+/// The formula or selectivity range that one real execution contradicts, if
+/// any. The analysis must have been run with [`SELECTIVITY`].
+pub fn check_selectivity(v: &Validation) -> Vec<String> {
+    // A violated constraint ends validation early, with nothing to measure.
+    if v.violation.is_some() {
+        return vec![];
+    }
+    let check = v.selectivity.as_ref().expect("selectivity was enabled");
+    check
+        .violation
+        .iter()
+        .map(|f| format!("selectivity: {f}"))
+        .collect()
 }
 
 /// Checks every claimed bound against one real execution: the actual output

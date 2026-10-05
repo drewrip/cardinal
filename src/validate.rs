@@ -11,7 +11,7 @@ use datafusion::common::tree_node::TreeNode;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::logical_expr::logical_plan::TableScanBuilder;
+use datafusion::logical_expr::logical_plan::{Join, TableScanBuilder};
 use datafusion::physical_plan::collect;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
@@ -19,6 +19,7 @@ use z3::SatResult;
 use z3::ast::Int;
 
 use crate::analyzer::{Node, new_solver};
+use crate::selectivity::auxiliary_joins;
 use crate::{Error, Result, Validation};
 
 /// Evaluates `nodes` bottom-up and returns the actual value of every variable
@@ -28,9 +29,17 @@ use crate::{Error, Result, Validation};
 /// Each node runs over scans of its children's materialized output rather than
 /// over its original subtree, so a parent sees exactly the rows its children's
 /// counts describe.
-pub(crate) async fn evaluate(nodes: &[Node], ctx: &SessionContext) -> Vec<(String, u64)> {
+///
+/// With `auxiliary`, also returns the counts that measure the selectivities of
+/// outer and anti joins (see `selectivity::auxiliary_joins`), by name.
+pub(crate) async fn evaluate(
+    nodes: &[Node],
+    ctx: &SessionContext,
+    auxiliary: bool,
+) -> (Vec<(String, u64)>, HashMap<String, u64>) {
     let state = ctx.state();
     let mut counts = vec![];
+    let mut aux = HashMap::new();
     // For each node, a scan over its materialized output, if it was evaluated.
     let mut outputs: Vec<Option<LogicalPlan>> = Vec::with_capacity(nodes.len());
     // For each node, its measured values (row count, then NDVs), if evaluated.
@@ -64,6 +73,28 @@ pub(crate) async fn evaluate(nodes: &[Node], ctx: &SessionContext) -> Vec<(Strin
         }
         let inputs: Option<Vec<LogicalPlan>> =
             node.inputs.iter().map(|i| outputs[*i].clone()).collect();
+        if auxiliary
+            && let LogicalPlan::Join(join) = &node.plan
+            && let Some([left, right]) = inputs.as_deref()
+        {
+            for (suffix, join_type) in auxiliary_joins(join) {
+                let variant = Join::try_new(
+                    Arc::new(left.clone()),
+                    Arc::new(right.clone()),
+                    join.on.clone(),
+                    join.filter.clone(),
+                    join_type,
+                    join.join_constraint,
+                    join.null_equality,
+                    false,
+                );
+                if let Ok(variant) = variant
+                    && let Some(batches) = run(&state, &LogicalPlan::Join(variant)).await
+                {
+                    aux.insert(format!("{}#{suffix}", node.var), rows(&batches));
+                }
+            }
+        }
         let batches = match inputs {
             Some(inputs) if inputs.is_empty() => run(&state, &node.plan).await,
             Some(inputs) => match node.plan.with_new_exprs(node.plan.expressions(), inputs) {
@@ -92,7 +123,7 @@ pub(crate) async fn evaluate(nodes: &[Node], ctx: &SessionContext) -> Vec<(Strin
         measured.push(Some(values));
         outputs.push(materialize(id, &node.plan, batches));
     }
-    counts
+    (counts, aux)
 }
 
 /// Row count, then each column's distinct count (NULL counted as one value);
@@ -158,6 +189,7 @@ pub(crate) fn check(
                     rows,
                     violation: Some(var.clone()),
                     undecided,
+                    selectivity: None,
                 });
             }
         }
@@ -166,6 +198,7 @@ pub(crate) fn check(
         rows,
         violation: None,
         undecided,
+        selectivity: None,
     })
 }
 

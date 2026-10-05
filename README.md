@@ -167,6 +167,76 @@ verdict, the portfolio gets a turn on a fresh solver.
   (default 3). Larger products are dropped, which is sound but weaker.
 - Declared keys are trusted. DataFusion does not enforce them.
 
+## Selectivities
+
+The bounds above are inequalities, because how many rows a filter keeps
+depends on the data. With `Options::selectivity` set, the analysis also names
+what is unknown: it writes the output cardinality as an exact formula over
+table sizes and *selectivities*, each a number `0 <= s <= 1` belonging to one
+operator, with the predicate or expressions it depends on.
+
+```rust
+let options = Options { selectivity: true, ..Default::default() };
+let a = cardinal::analyze_sql_with(&ctx, sql, options).await?;
+let s = a.selectivity.unwrap();
+s.output;      // X = s1·s2·|orders|·|users|
+s.required;    // s1 = s(users.age > 30) over op2_Scan_users, in [0, 1]
+               // s2 = join(o.user_id = u.id) over op1_.. × op5_.., in [0, 1]
+s.is_exact();  // true if the formula has no unknowns
+s.evaluate(&table_sizes, &values)?;  // a count, or a range if values are missing
+```
+
+Either the formula has no unknowns, and the cardinality is known statically
+from the table sizes, or `required` is the set of selectivities that give the
+exact count once they are known.
+
+| Operator | Cardinality | Selectivity |
+|---|---|---|
+| Table scan of `T` | `\|T\|` | |
+| Pushed-down scan filters | `s·\|T\|` | `s(p1 AND p2 ...)` |
+| Projection, Alias, Repartition, Window, Subquery, Sort | `l` | 1 |
+| Filter on `p` | `s·l` | `s(p)` |
+| Sort with fetch `n` | `min(n, l)` | |
+| Limit (skip `k`, fetch `n`) | `min(n, max(l − k, 0))`. Not literals: `s·l` | |
+| Distinct, Distinct On, GROUP BY | `s·l` | `\|distinct(columns or keys)\| / l` |
+| Aggregate, no GROUP BY | `1` | |
+| Cross join | `l·r` | |
+| Inner join | `s·l·r` | pairs of rows satisfying the condition, of `l·r` |
+| Semi join | `m·l` | rows of the kept side with a match, of `l` |
+| Anti join | `(1 − m)·l` | the semi join's `m` |
+| `NOT IN` (null-aware anti join) | `s·l` | rows kept, of `l` |
+| Left join | `s·l·r + (1 − m)·l` | the inner join's `s`, the semi join's `m` |
+| Right join | `s·l·r + (1 − m)·r` | mirror |
+| Full join | `s·l·r + (1 − mₗ)·l + (1 − mᵣ)·r` | |
+| Mark join | kept side | |
+| Union | `Σ inputs` | |
+| Values, empty relation | its rows | |
+| Anything else (ROLLUP, Unnest, table functions, …) | `\|op\|` | |
+
+A selectivity belongs to one operator: the same predicate over another input
+is another unknown. The last row's `|op|` is an unknown too, but a row count
+rather than a share. A selectivity over no rows has no value, and needs none,
+since it multiplies a zero.
+
+**What the constraints resolve.** The solver is asked, for each operator with
+a selectivity, whether its cardinality is provably zero or provably one of its
+inputs'. If so the formula says that and the selectivity moves to `resolved`:
+`GROUP BY` on a key is `l`, a contradictory filter is `0`, and a left join to
+a key is `l` with neither of its selectivities. Otherwise, for an operator
+that keeps a share of one input, the tightest provable `lo <= s <= hi` (the
+same fractions as the bounds) becomes the selectivity's `range`.
+
+**Evaluating.** `evaluate` takes each table's row count and values for some of
+the unknowns, by name. Unknowns without a value take their range (`|op|`: any
+count), and the result is the range of counts that leaves. With every unknown
+given it is one number.
+
+**Caveat.** A range only holds what the constraints say about an operator
+relative to its direct input. Facts that span operators (`HAVING count(*) > 1`
+keeps at most half of the *grouped* rows; a join on a key outputs at most the
+other side's rows) show up in `bounds()` but not in a selectivity's range, so
+`evaluate` without values can give a wider range than `bounds()` proves.
+
 ## Validation
 
 `validate` evaluates the plan bottom-up, running each operator over its
@@ -174,6 +244,12 @@ children's materialized output. It never runs DML or DDL. It pins every real
 cardinality and NDV onto the constraints and reports the first operator whose
 real counts are unsatisfiable. The benchmark and fuzzer use it, and also check
 every claimed bound against real row counts.
+
+With selectivities enabled it also measures each one from the execution: the
+operator's rows over its input's, and for outer and anti joins the counts of
+the inner and semi joins over the same inputs, which it runs for the purpose.
+`Validation::selectivity` holds the measured values and the first selectivity
+outside its range, or operator whose formula does not give its real row count.
 
 ```sh
 cargo test                                   # everything
