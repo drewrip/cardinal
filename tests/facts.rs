@@ -3,7 +3,7 @@
 //! `scripts/duckdb_fixtures.sh`; print every fact with
 //! `cargo test --test facts print_facts -- --nocapture`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use cardinal::facts::{FactSet, State, derive_facts, states};
@@ -101,14 +101,18 @@ fn ratio(n: u64, d: u64) -> f64 {
 #[tokio::test]
 async fn print_facts() {
     let mut all = vec![];
+    let mut taints = BTreeMap::<String, usize>::new();
     for dir in ["extra", "tpch"] {
         for p in plans(dir).await {
             println!("==== {}\n{p}", p.name);
             for (i, s) in states(&p).iter().enumerate() {
                 match s {
-                    State::Clean(c) => println!("  #{i}: {c}"),
-                    State::Pending(c, pending) => println!("  #{i}: {c} (pending {})", pending.len()),
-                    State::Tainted(t) => println!("  #{i}: tainted: {t}"),
+                    State::Clean(c) => println!("  #{i}: {}", c.canonical()),
+                    State::Pending(c, pending) => println!("  #{i}: {} (pending {})", c.canonical(), pending.len()),
+                    State::Tainted(t) => {
+                        println!("  #{i}: tainted: {t}");
+                        *taints.entry(t.to_string()).or_default() += 1;
+                    }
                 }
             }
             println!("{}", derive_facts(std::slice::from_ref(&p)));
@@ -117,6 +121,53 @@ async fn print_facts() {
     }
     let facts = derive_facts(&all);
     println!("==== all {} plans: {} facts\n{facts}", all.len(), facts.len());
+    println!("==== tainted operators, by reason");
+    for (t, n) in taints {
+        println!("{n:4} {t}");
+    }
+}
+
+/// Every plan's facts together.
+async fn all_facts() -> FactSet {
+    let mut all = plans("extra").await;
+    all.extend(plans("tpch").await);
+    derive_facts(&all)
+}
+
+/// Writes a query counting each fact that counts rows of base tables, for
+/// `scripts/duckdb_fixtures.sh` to run into `fact_checks.json`.
+#[tokio::test]
+async fn dump_fact_queries() {
+    let facts = all_facts().await;
+    let rows: Vec<String> = facts
+        .iter()
+        .filter_map(|f| {
+            let sql = f.kind.count_sql()?;
+            Some(format!("SELECT '{}' AS fact, ({sql}) AS value", f.kind.to_string().replace('\'', "''")))
+        })
+        .collect();
+    std::fs::write(format!("{DIR}/fact_checks.sql"), rows.join("\nUNION ALL ") + ";\n").unwrap();
+}
+
+/// Every fact that counts rows of base tables, against DuckDB's count.
+#[tokio::test]
+async fn facts_match_duckdb() {
+    let counted: HashMap<String, u64> = json("fact_checks.json")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["fact"].as_str().unwrap().to_string(), r["value"].as_u64().unwrap()))
+        .collect();
+    let facts = all_facts().await;
+    let mut checked = 0;
+    for f in facts.iter().filter(|f| f.kind.count_sql().is_some()) {
+        let Some(&n) = counted.get(&f.kind.to_string()) else {
+            panic!("{} is not in fact_checks.json: run scripts/duckdb_fixtures.sh", f.kind)
+        };
+        assert_eq!(f.value.as_int(), Some(n), "{} from {:?}", f.kind, f.origins);
+        checked += 1;
+    }
+    assert!(checked > 50, "only {checked} facts checked");
 }
 
 #[tokio::test]
@@ -244,15 +295,96 @@ async fn taint() {
     assert_eq!(joined.value.as_int(), Some(e["orders⋈customer|BUILDING"]));
 }
 
+/// The fact printed as text starting with `prefix`.
+fn starting<'f>(facts: &'f FactSet, prefix: &str) -> &'f cardinal::facts::Fact {
+    let mut found = facts.iter().filter(|f| f.kind.to_string().starts_with(prefix));
+    match (found.next(), found.next()) {
+        (Some(f), None) => f,
+        (None, _) => panic!("no fact starting {prefix} among:\n{facts}"),
+        (Some(a), Some(b)) => panic!("several facts starting {prefix}: {a}, {b}"),
+    }
+}
+
+/// Correlated subqueries (delim joins) and IN / NOT IN (mark joins).
+#[tokio::test]
+async fn subqueries() {
+    let e = expected();
+    let mut all = vec![];
+    for name in ["semi_join", "not_exists", "in_subquery", "not_in", "scan_filter", "group_base"] {
+        all.push(plan(name).await);
+    }
+    let facts = derive_facts(&all);
+    assert!(facts.conflicts.is_empty(), "{:#?}", facts.conflicts);
+    // EXISTS and NOT EXISTS over the same subquery share one match share.
+    let exists = starting(&facts, "m((\"orders@1\".o_orderkey IS NOT DISTINCT FROM \"orders@2\".o_orderkey) | orders@1 ⋉");
+    assert_eq!(exists.value.as_f64(), ratio(e["orders semi lineitem>49"], e["orders"]));
+    assert_eq!(exists.origins.len(), 2, "{:?}", exists.origins);
+    // A semi join's probe side is pruned by its runtime filter; |part| is
+    // from the NOT IN plan, which scans all of it.
+    let semi = starting(&facts, "m(\"part\".p_partkey = partsupp.ps_partkey | part ⋉ partsupp");
+    assert_eq!(semi.value.as_f64(), ratio(e["part semi partsupp<100"], 2000));
+    let not_in = starting(&facts, "|LeftMark join, unmarked");
+    assert_eq!(not_in.value.as_int(), Some(e["part not in partsupp<100"]));
+}
+
 /// Plans whose operators do not resolve give no facts above them.
 #[tokio::test]
 async fn unresolved() {
-    // DuckDB plans a correlated EXISTS as a delim join, which has no model.
-    let facts = derive_facts(&[plan("semi_join").await]);
-    assert!(facts.iter().all(|f| !f.kind.to_string().starts_with("m(")), "{facts}");
     // This anti join's condition names the build side's column for both
     // sides, so its probe side does not resolve.
     let p = plan("anti_exists").await;
     let join = p.nodes.iter().position(|n| n.engine_op == "HASH_JOIN").unwrap();
     assert!(matches!(states(&p)[join], State::Tainted(_)));
+}
+
+/// A condition the query does not vouch for is not read, even where its
+/// names resolve: here `o_custkey = c_custkey` printed for a query
+/// comparing `o_orderkey` and `c_custkey`.
+#[tokio::test]
+async fn misnamed_condition() {
+    let catalog = catalog().await;
+    let scan = |table: &str, cols: Vec<&str>, rows| {
+        node("TABLE_SCAN", rows, json!({"Table": format!("tpch.main.{table}"), "Projections": cols}), vec![])
+    };
+    let join = |sql: &str| {
+        let mut j = node(
+            "HASH_JOIN",
+            100,
+            json!({"Join Type": "INNER", "Conditions": "o_custkey = c_custkey"}),
+            vec![scan("orders", vec!["o_custkey", "o_orderkey"], 15000), scan("customer", vec!["c_custkey"], 1500)],
+        );
+        j["query_name"] = json!(sql);
+        j.to_string()
+    };
+    let vouched = from_duckdb(&catalog, "ok", &join("select * from orders, customer where o_custkey = c_custkey")).unwrap();
+    assert!(matches!(states(&vouched)[2], State::Clean(_)));
+    let wrong = from_duckdb(&catalog, "wrong", &join("select * from orders, customer where o_orderkey = c_custkey")).unwrap();
+    assert!(matches!(states(&wrong)[2], State::Tainted(_)), "{:?}", states(&wrong)[2]);
+}
+
+/// Self-joins, CTEs, aggregate values, and aliases.
+#[tokio::test]
+async fn other_shapes() {
+    let e = expected();
+    let one = |name: &'static str| async move { derive_facts(&[plan(name).await]) };
+
+    let f = one("self_join").await;
+    let join = starting(&f, "|lineitem@1 × lineitem@2 where");
+    assert_eq!(join.value.as_int(), Some(e["self join"]));
+
+    let f = one("cte").await;
+    assert!(f.iter().any(|f| f.kind.to_string().starts_with("ndv(orders.o_custkey | orders)")), "{f}");
+
+    let f = one("having").await;
+    assert_eq!(value(&f, "ndv(lineitem.l_orderkey | lineitem)"), e["ndv(l_orderkey|lineitem)"] as f64);
+    let having = starting(&f, "s(\"value\".\"sum(lineitem.l_quantity) of group[lineitem.l_orderkey](lineitem)\" > 200.0");
+    assert_eq!(having.value.as_f64(), ratio(e["having sum>200"], e["ndv(l_orderkey|lineitem)"]));
+
+    let f = one("scalar_subquery").await;
+    let price = f.iter().find(|f| f.kind.to_string().starts_with("|σ")).unwrap_or_else(|| panic!("{f}"));
+    assert_eq!(price.value.as_int(), Some(e["price>avg"]));
+
+    let f = one("alias").await;
+    let years = starting(&f, "ndv(date_part(");
+    assert_eq!(years.value.as_int(), Some(e["ndv(year|orders,price>100000)"]));
 }

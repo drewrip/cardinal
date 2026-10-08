@@ -11,13 +11,14 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use datafusion::common::JoinType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
+use datafusion::common::{DataFusionError, JoinType};
 use datafusion::logical_expr::utils::{conjunction, disjunction, split_conjunction_owned};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::sql::unparser::Unparser;
 
-use crate::observed::{ObservedPlan, Op, Pred};
+use super::FactKind;
+use crate::observed::{ObservedPlan, Op, Pred, base_table, column_key, qualified, relation, requalify};
 
 /// An expression in canonical form, ordered and compared by its text.
 #[derive(Debug, Clone)]
@@ -35,6 +36,11 @@ impl Term {
     /// The canonical text, which identifies the term.
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    /// The term with its columns' relations renamed by `f`.
+    pub fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Term {
+        Term::new(requalify(&self.expr, f))
     }
 }
 
@@ -183,7 +189,22 @@ impl Context {
         })
     }
 
-    /// Every base table the rows draw on.
+    /// The context with its table instances renamed by `f`.
+    pub fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Context {
+        match self {
+            Context::Spj { tables, preds } => Context::Spj {
+                tables: tables.iter().map(|t| f(t).unwrap_or_else(|| t.clone())).collect(),
+                preds: preds.iter().map(|p| p.rename(f)).collect(),
+            },
+            Context::Derived { op, args, inputs } => Context::Derived {
+                op: op.clone(),
+                args: args.iter().map(|a| a.rename(f)).collect::<BTreeSet<_>>().into_iter().collect(),
+                inputs: inputs.iter().map(|i| i.rename(f)).collect(),
+            },
+        }
+    }
+
+    /// Every table instance the rows draw on.
     pub fn tables(&self) -> BTreeSet<String> {
         match self {
             Context::Spj { tables, .. } => tables.clone(),
@@ -234,7 +255,7 @@ pub enum Taint {
     Unresolved(String),
     /// A predicate whose value changes between runs, like `random()`.
     Volatile(String),
-    /// Both sides of a join read the same table.
+    /// Both sides of a join read the same rows of one table instance.
     SelfJoin,
     /// An operator without a model.
     Unsupported(String),
@@ -262,6 +283,21 @@ pub enum Pending {
     Join { column: Option<String>, text: String },
     /// An optional filter, enforced by a filter above with the same predicate.
     Filter { term: Option<Term>, text: String },
+}
+
+impl Pending {
+    fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Pending {
+        match self {
+            Pending::Join { column, text } => Pending::Join {
+                column: column.as_ref().map(|c| match c.rsplit_once('.') {
+                    Some((r, n)) => format!("{}.{n}", f(r).unwrap_or_else(|| r.to_string())),
+                    None => c.clone(),
+                }),
+                text: text.clone(),
+            },
+            Pending::Filter { term, text } => Pending::Filter { term: term.as_ref().map(|t| t.rename(f)), text: text.clone() },
+        }
+    }
 }
 
 /// What an operator's rows are.
@@ -305,17 +341,92 @@ fn pending_text(p: &Pending) -> String {
     }
 }
 
-/// Resolved, deterministic predicates, or why not.
-pub(crate) fn resolve(preds: &[Pred]) -> std::result::Result<BTreeSet<Term>, Taint> {
-    let mut exprs = vec![];
-    for p in preds {
-        match &p.expr {
-            None => return Err(Taint::Unresolved(p.text.clone())),
-            Some(e) if e.is_volatile() => return Err(Taint::Volatile(p.text.clone())),
-            Some(e) => exprs.push(e.clone()),
+/// Resolves references to values computed by aggregates (columns of
+/// relation `@node`, as the reader writes them): each becomes an opaque
+/// column named for the aggregate and the rows it ran over, so that it reads
+/// the same in any plan.
+pub(crate) struct Values<'a> {
+    pub plan: &'a ObservedPlan,
+    pub states: &'a [State],
+    pub stopped: &'a [bool],
+}
+
+impl Values<'_> {
+    fn settle(&self, e: &Expr) -> Option<Expr> {
+        e.clone()
+            .transform_up(|e| match e {
+                Expr::Column(c) if relation(&c).is_some_and(|r| r.starts_with('@')) => {
+                    let k: usize = relation(&c).unwrap()[1..].parse().map_err(|_| unresolved(&c.name))?;
+                    let name = self.value(k, &c.name).ok_or_else(|| unresolved(&c.name))?;
+                    Ok(Transformed::yes(qualified("value", &name)))
+                }
+                e => Ok(Transformed::no(e)),
+            })
+            .ok()
+            .map(|t| t.data)
+    }
+
+    /// `{aggregate} of {rows}` for output column `name` of aggregate `k`.
+    fn value(&self, k: usize, name: &str) -> Option<String> {
+        let node = &self.plan.nodes[k];
+        let Op::Aggregate { keys, values } = &node.op else { return None };
+        let i = node.columns.iter().position(|c| c.name == name)?.checked_sub(keys.len())?;
+        // A value may be computed from another (`first(avg(x))`).
+        let value = self.settle(values.get(i)?.as_ref()?)?;
+        let over = self.states.get(k)?.clean().filter(|_| !self.stopped[k])?.clone();
+        let FactKind::Distinct { keys, over } = (FactKind::Distinct { keys: [Term::new(value)].into(), over }).canonical()
+        else {
+            unreachable!()
+        };
+        Some(format!("{} of {over}", keys.first().unwrap()))
+    }
+
+    /// Resolved, deterministic predicates, or why not.
+    pub(crate) fn resolve(&self, preds: &[Pred]) -> std::result::Result<BTreeSet<Term>, Taint> {
+        let mut exprs = vec![];
+        for p in preds {
+            match p.expr.as_ref().map(|e| self.settle(e)) {
+                None | Some(None) => return Err(Taint::Unresolved(p.text.clone())),
+                Some(Some(e)) if e.is_volatile() => return Err(Taint::Volatile(p.text.clone())),
+                Some(Some(e)) => exprs.push(e),
+            }
+        }
+        Ok(terms(exprs))
+    }
+
+    /// Resolved grouping keys, or `None`.
+    pub(crate) fn keys(&self, keys: &[Option<Expr>]) -> Option<BTreeSet<Term>> {
+        keys.iter().map(|k| k.as_ref().and_then(|k| self.settle(k)).map(Term::new)).collect()
+    }
+}
+
+fn unresolved(name: &str) -> DataFusionError {
+    DataFusionError::Plan(format!("unresolved value {name}"))
+}
+
+/// Operators that may not have run to completion: below a `LIMIT`, and the
+/// probe side of a join whose build side was empty.
+pub(crate) fn stopped(plan: &ObservedPlan) -> Vec<bool> {
+    let mut stopped = vec![false; plan.nodes.len()];
+    for i in (0..plan.nodes.len()).rev() {
+        let node = &plan.nodes[i];
+        let stops = match &node.op {
+            Op::Limit => node.children.clone(),
+            Op::Join { kind, .. } if plan.nodes[node.children[1]].rows == 0 && !preserves_probe(*kind) => {
+                vec![node.children[0]]
+            }
+            _ => vec![],
+        };
+        // A reused result was materialized in full before it was read: a
+        // read cut short leaves it whole.
+        if matches!(node.op, Op::Reuse { .. }) {
+            continue;
+        }
+        for c in node.children.iter().copied() {
+            stopped[c] |= stopped[i] || stops.contains(&c);
         }
     }
-    Ok(terms(exprs))
+    stopped
 }
 
 /// The state of every operator of `plan`, by index.
@@ -332,28 +443,17 @@ pub fn states(plan: &ObservedPlan) -> Vec<State> {
             above[c].extend(keys.iter().cloned());
         }
     }
+    let stopped = stopped(plan);
     let mut states: Vec<State> = vec![];
-    for (node, above) in plan.nodes.iter().zip(&above) {
-        let inputs: Vec<State> = node.children.iter().map(|&c| states[c].clone()).collect();
-        states.push(state(node, &inputs, above));
-    }
-    // Operators may stop pulling rows early: everything below them may have
-    // produced fewer than it would have.
-    let mut stopped = vec![false; plan.nodes.len()];
-    for i in (0..plan.nodes.len()).rev() {
+    for (i, above) in above.iter().enumerate() {
         let node = &plan.nodes[i];
-        let stops = match &node.op {
-            Op::Limit => node.children.clone(),
-            // With an empty build side DuckDB need not run the probe side.
-            Op::Join { kind, .. } if plan.nodes[node.children[1]].rows == 0 && !preserves_probe(*kind) => {
-                vec![node.children[0]]
-            }
-            _ => vec![],
-        };
-        for c in node.children.iter().copied() {
-            stopped[c] |= stopped[i] || stops.contains(&c);
-        }
+        let inputs: Vec<State> = node.children.iter().map(|&c| states[c].clone()).collect();
+        let values = Values { plan, states: &states, stopped: &stopped };
+        let s = state(plan, i, &inputs, above, &values, &stopped);
+        states.push(s);
     }
+    // Rows that may be short are no context's, though what is computed from
+    // them may still be (a join with an empty side is empty).
     for (s, stop) in states.iter_mut().zip(stopped) {
         if stop {
             *s = State::Tainted(Taint::EarlyStop);
@@ -367,11 +467,19 @@ fn preserves_probe(kind: JoinType) -> bool {
     matches!(kind, JoinType::Left | JoinType::Full | JoinType::LeftAnti | JoinType::LeftMark)
 }
 
-fn state(node: &crate::observed::ONode, inputs: &[State], above: &BTreeSet<String>) -> State {
+fn state(
+    plan: &ObservedPlan,
+    i: usize,
+    inputs: &[State],
+    above: &BTreeSet<String>,
+    values: &Values,
+    stopped: &[bool],
+) -> State {
+    let node = &plan.nodes[i];
     match &node.op {
-        Op::Scan { table, filters, runtime_filters } => {
+        Op::Scan { instance, filters, runtime_filters, .. } => {
             let (optional, required): (Vec<Pred>, Vec<Pred>) = filters.iter().cloned().partition(|p| p.optional);
-            let preds = match resolve(&required) {
+            let preds = match values.resolve(&required) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -383,11 +491,23 @@ fn state(node: &crate::observed::ONode, inputs: &[State], above: &BTreeSet<Strin
                 term: p.expr.map(Term::new),
                 text: p.text,
             }));
-            State::with(Context::table(table).filter(&preds), pending)
+            State::with(Context::table(instance).filter(&preds), pending)
         }
         Op::Project | Op::Sort | Op::Window => inputs[0].clone(),
+        Op::Reuse { suffix, checked } => {
+            let of = node.children[0];
+            if stopped[of] || (*checked && plan.nodes[of].rows != node.rows) {
+                return State::Tainted(Taint::Unsupported(format!("{} of a short input", node.engine_op)));
+            }
+            let f = |r: &str| base_table(r).map(|_| format!("{r}{suffix}"));
+            match &inputs[0] {
+                State::Clean(c) => State::Clean(c.rename(&f)),
+                State::Pending(c, p) => State::Pending(c.rename(&f), p.iter().map(|p| p.rename(&f)).collect()),
+                State::Tainted(t) => State::Tainted(t.clone()),
+            }
+        }
         Op::Filter { predicate } => {
-            let preds = match resolve(predicate) {
+            let preds = match values.resolve(predicate) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -400,8 +520,23 @@ fn state(node: &crate::observed::ONode, inputs: &[State], above: &BTreeSet<Strin
                 }
             }
         }
+        // IN and EXISTS keep the rows of a semi join. NOT IN's null
+        // semantics have no other name here.
+        Op::MarkFilter { negated } => {
+            let (c, pending) = match &inputs[0] {
+                State::Tainted(t) => return State::Tainted(t.clone()),
+                s => parts(s),
+            };
+            match c {
+                Context::Derived { op, args, inputs } if op == "LeftMark join" => {
+                    let op = if *negated { "LeftMark join, unmarked" } else { "LeftSemi join" };
+                    State::with(Context::Derived { op: op.into(), args, inputs }, pending)
+                }
+                _ => State::Tainted(Taint::Unsupported(node.engine_op.clone())),
+            }
+        }
         Op::Join { kind, on } => {
-            let on_terms = match resolve(on) {
+            let on_terms = match values.resolve(on) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -435,18 +570,18 @@ fn state(node: &crate::observed::ONode, inputs: &[State], above: &BTreeSet<Strin
             };
             State::with(ctx, pending)
         }
-        Op::Aggregate { keys } => {
+        Op::Aggregate { keys, .. } => {
             let input = match inputs[0].clone().settle() {
                 Ok(c) => c,
                 Err(t) => return State::Tainted(t),
             };
-            let Some(keys) = keys.iter().cloned().collect::<Option<Vec<_>>>() else {
+            let Some(keys) = values.keys(keys) else {
                 return State::Tainted(Taint::Unresolved("grouping key".into()));
             };
             // A GROUP BY and a DISTINCT on the same keys give as many rows,
             // whatever the aggregates.
             let op = if keys.is_empty() { "aggregate" } else { "group" };
-            State::Clean(Context::Derived { op: op.into(), args: keys.into_iter().map(Term::new).collect::<BTreeSet<_>>().into_iter().collect(), inputs: vec![input] })
+            State::Clean(Context::Derived { op: op.into(), args: keys.into_iter().collect(), inputs: vec![input] })
         }
         Op::TopN { fetch } => match inputs[0].clone().settle() {
             Ok(c) => State::Clean(Context::Derived {
@@ -474,7 +609,7 @@ fn state(node: &crate::observed::ONode, inputs: &[State], above: &BTreeSet<Strin
 fn join_keys(on: &[Pred]) -> BTreeSet<String> {
     on.iter()
         .filter_map(|p| p.expr.as_ref())
-        .flat_map(|e| e.column_refs().into_iter().map(|c| c.flat_name()).collect::<Vec<_>>())
+        .flat_map(|e| e.column_refs().into_iter().map(column_key).collect::<Vec<_>>())
         .collect()
 }
 

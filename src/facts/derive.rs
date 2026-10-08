@@ -125,7 +125,8 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
             _ => continue,
         };
         let (kept, other) = if left { (&inputs[0], &inputs[1]) } else { (&inputs[1], &inputs[0]) };
-        let Some(n) = cards.get(kept).and_then(|k| k.as_int()) else { continue };
+        // Named as a fact of its own, kept may read differently.
+        let Some(n) = cards.get(&kept.canonical()).and_then(|k| k.as_int()) else { continue };
         let Some(rows) = v.as_int() else { continue };
         let matched = if semi { Some(rows) } else { n.checked_sub(rows) };
         if let Some(m) = matched.and_then(|m| Ratio::new(m, n)) {

@@ -7,12 +7,13 @@
 //! and [`derive_facts`] combines what several plans show into everything
 //! that follows from it.
 
+mod canonical;
 mod context;
 mod derive;
 mod rules;
 
 pub use context::{Context, Pending, State, Taint, Term, states};
-pub use rules::{FactRule, RULES};
+pub use rules::{FactRule, Observation, RULES};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

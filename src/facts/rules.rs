@@ -6,28 +6,37 @@
 
 use datafusion::common::JoinType;
 
-use super::context::{Context, State, Term, resolve, states};
+use super::context::{Context, State, Values, states, stopped};
 use super::{Fact, FactKind, Origin, Ratio};
 use crate::observed::{ObservedPlan, Op};
 
 pub trait FactRule: Sync {
     fn name(&self) -> &'static str;
-    /// The facts operator `node` of `plan` shows, given every operator's state.
-    fn apply(&self, plan: &ObservedPlan, node: usize, states: &[State], out: &mut Vec<(FactKind, Ratio)>);
+    /// The facts operator `node` shows.
+    fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>);
 }
 
 pub static RULES: &[&dyn FactRule] = &[&Cardinality, &FilterSelectivity, &JoinSelectivity, &DistinctCount];
 
-/// Every fact the rules read off `plan`.
+/// An executed plan, with every operator's state.
+pub struct Observation<'a> {
+    pub plan: &'a ObservedPlan,
+    pub states: &'a [State],
+    values: Values<'a>,
+}
+
+/// Every fact the rules read off `plan`, canonically named.
 pub(crate) fn observe(plan: &ObservedPlan) -> Vec<Fact> {
     let states = states(plan);
+    let stopped = stopped(plan);
+    let obs = Observation { plan, states: &states, values: Values { plan, states: &states, stopped: &stopped } };
     let mut facts = vec![];
     for node in 0..plan.nodes.len() {
         for rule in RULES {
             let mut out = vec![];
-            rule.apply(plan, node, &states, &mut out);
+            rule.apply(&obs, node, &mut out);
             facts.extend(out.into_iter().map(|(kind, value)| Fact {
-                kind,
+                kind: kind.canonical(),
                 value,
                 origins: vec![Origin::Observed { query: plan.name.clone(), node, rule: rule.name() }],
             }));
@@ -37,13 +46,13 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Vec<Fact> {
 }
 
 /// The clean contexts of `node` and of its inputs, with their row counts.
-fn clean<'s>(plan: &ObservedPlan, node: usize, states: &'s [State]) -> Option<(&'s Context, Vec<(&'s Context, u64)>)> {
-    let n = &plan.nodes[node];
-    let out = states[node].clean()?;
+fn clean<'s>(obs: &Observation<'s>, node: usize) -> Option<(&'s Context, Vec<(&'s Context, u64)>)> {
+    let n = &obs.plan.nodes[node];
+    let out = obs.states[node].clean()?;
     let inputs = n
         .children
         .iter()
-        .map(|&c| Some((states[c].clean()?, plan.nodes[c].rows)))
+        .map(|&c| Some((obs.states[c].clean()?, obs.plan.nodes[c].rows)))
         .collect::<Option<Vec<_>>>()?;
     Some((out, inputs))
 }
@@ -59,10 +68,10 @@ impl FactRule for Cardinality {
         "cardinality"
     }
 
-    fn apply(&self, plan: &ObservedPlan, node: usize, states: &[State], out: &mut Vec<(FactKind, Ratio)>) {
-        let n = &plan.nodes[node];
+    fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
+        let n = &obs.plan.nodes[node];
         let grouped = |c: &Context| matches!(c, Context::Derived { op, .. } if op == "group" || op == "aggregate");
-        if let Some(ctx) = states[node].clean().filter(|c| !grouped(c)) {
+        if let Some(ctx) = obs.states[node].clean().filter(|c| !grouped(c)) {
             out.push((FactKind::Cardinality(ctx.clone()), Ratio::int(n.rows)));
         }
     }
@@ -77,11 +86,11 @@ impl FactRule for FilterSelectivity {
         "filter selectivity"
     }
 
-    fn apply(&self, plan: &ObservedPlan, node: usize, states: &[State], out: &mut Vec<(FactKind, Ratio)>) {
-        let n = &plan.nodes[node];
-        let (Op::Filter { predicate }, Some((_, inputs))) = (&n.op, clean(plan, node, states)) else { return };
+    fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
+        let n = &obs.plan.nodes[node];
+        let (Op::Filter { predicate }, Some((_, inputs))) = (&n.op, clean(obs, node)) else { return };
         let (input, rows) = inputs[0];
-        let Ok(mut pred) = resolve(predicate) else { return };
+        let Ok(mut pred) = obs.values.resolve(predicate) else { return };
         if let Context::Spj { preds, .. } = input {
             pred.retain(|p| !preds.contains(p));
         }
@@ -101,10 +110,10 @@ impl FactRule for JoinSelectivity {
         "join selectivity"
     }
 
-    fn apply(&self, plan: &ObservedPlan, node: usize, states: &[State], out: &mut Vec<(FactKind, Ratio)>) {
-        let n = &plan.nodes[node];
-        let (Op::Join { kind, on }, Some((_, inputs))) = (&n.op, clean(plan, node, states)) else { return };
-        let Ok(on) = resolve(on) else { return };
+    fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
+        let n = &obs.plan.nodes[node];
+        let (Op::Join { kind, on }, Some((_, inputs))) = (&n.op, clean(obs, node)) else { return };
+        let Ok(on) = obs.values.resolve(on) else { return };
         let [(l, lr), (r, rr)] = inputs[..] else { return };
         let fact = match kind {
             JoinType::Inner if !on.is_empty() => l.cross(r).and_then(|over| {
@@ -134,13 +143,12 @@ impl FactRule for DistinctCount {
         "distinct count"
     }
 
-    fn apply(&self, plan: &ObservedPlan, node: usize, states: &[State], out: &mut Vec<(FactKind, Ratio)>) {
-        let n = &plan.nodes[node];
-        let (Op::Aggregate { keys }, Some((_, inputs))) = (&n.op, clean(plan, node, states)) else { return };
-        let Some(keys) = keys.iter().cloned().collect::<Option<Vec<_>>>() else { return };
+    fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
+        let n = &obs.plan.nodes[node];
+        let (Op::Aggregate { keys, .. }, Some((_, inputs))) = (&n.op, clean(obs, node)) else { return };
+        let Some(keys) = obs.values.keys(keys) else { return };
         if !keys.is_empty() {
-            let kind = FactKind::Distinct { keys: keys.into_iter().map(Term::new).collect(), over: inputs[0].0.clone() };
-            out.push((kind, Ratio::int(n.rows)));
+            out.push((FactKind::Distinct { keys, over: inputs[0].0.clone() }, Ratio::int(n.rows)));
         }
     }
 }

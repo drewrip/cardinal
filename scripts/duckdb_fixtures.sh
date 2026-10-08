@@ -34,3 +34,7 @@ for f in "$out"/extra/*.sql; do
 done
 
 duckdb "$db" -json < "$out/expected.sql" > "$out/expected.json"
+
+# Every fact the tests derive that counts rows of base tables, counted.
+(cd "$root" && cargo test -q --test facts dump_fact_queries > /dev/null)
+duckdb "$db" -json < "$out/fact_checks.sql" > "$out/fact_checks.json"
