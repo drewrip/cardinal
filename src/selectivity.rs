@@ -19,12 +19,16 @@ use datafusion::logical_expr::Expr;
 
 use crate::analyzer::Node;
 use crate::bounds::Search;
+use crate::facts::Ratio;
 use crate::{Error, Result};
 
 /// A cardinality as an expression over table sizes and selectivities.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Card {
     Const(u64),
+    /// An exact fraction `num/den`, in lowest terms with `den > 1`: a
+    /// selectivity known from a fact.
+    Ratio(u64, u64),
     /// The row count of a base table, by name.
     Table(String),
     /// A selectivity, by name.
@@ -46,49 +50,129 @@ pub enum Card {
 impl Card {
     fn mul(parts: Vec<Card>) -> Card {
         let mut constant: u64 = 1;
+        let mut fraction = Ratio::int(1);
         let mut out = vec![];
         let mut stack: Vec<Card> = parts.into_iter().rev().collect();
         while let Some(p) = stack.pop() {
             match p {
                 Card::Const(n) => constant = constant.saturating_mul(n),
+                Card::Ratio(n, d) => match Ratio::new(n, d).and_then(|r| fraction.times(r)) {
+                    Some(f) => fraction = f,
+                    None => out.push(Card::Ratio(n, d)),
+                },
                 Card::Mul(ps) => stack.extend(ps.into_iter().rev()),
                 p => out.push(p),
             }
         }
-        if constant == 0 {
+        if constant == 0 || fraction.num() == 0 {
             return Card::Const(0);
         }
         // Selectivities first, then sizes, each in plan order.
-        out.sort_by_key(|p| !matches!(p, Card::Sel(_) | Card::Not(_)));
-        if constant != 1 || out.is_empty() {
-            out.insert(0, Card::Const(constant));
+        out.sort_by_key(|p| !matches!(p, Card::Ratio(..) | Card::Sel(_) | Card::Not(_)));
+        let constant = match fraction.times(Ratio::int(constant)) {
+            Some(c) => Card::ratio(c),
+            None => {
+                if fraction.den() > 1 {
+                    out.insert(0, Card::ratio(fraction));
+                }
+                Card::Const(constant)
+            }
+        };
+        if constant != Card::Const(1) || out.is_empty() {
+            out.insert(0, constant);
         }
         if out.len() == 1 { out.remove(0) } else { Card::Mul(out) }
     }
 
     fn add(parts: Vec<Card>) -> Card {
-        let mut constant: u64 = 0;
+        let mut constant = Ratio::int(0);
         let mut out = vec![];
         let mut stack: Vec<Card> = parts.into_iter().rev().collect();
         while let Some(p) = stack.pop() {
             match p {
-                Card::Const(n) => constant = constant.saturating_add(n),
+                Card::Const(n) => match constant.plus(Ratio::int(n)) {
+                    Some(c) => constant = c,
+                    None => constant = Ratio::int(u64::MAX),
+                },
+                Card::Ratio(n, d) => match Ratio::new(n, d).and_then(|r| constant.plus(r)) {
+                    Some(c) => constant = c,
+                    None => out.push(Card::Ratio(n, d)),
+                },
                 Card::Add(ps) => stack.extend(ps.into_iter().rev()),
                 p => out.push(p),
             }
         }
-        if constant != 0 || out.is_empty() {
-            out.push(Card::Const(constant));
+        if constant.num() != 0 || out.is_empty() {
+            out.push(Card::ratio(constant));
         }
         if out.len() == 1 { out.remove(0) } else { Card::Add(out) }
     }
 
-    fn min(a: Card, b: Card) -> Card {
-        match (a, b) {
-            (Card::Const(x), Card::Const(y)) => Card::Const(x.min(y)),
-            (Card::Const(0), _) | (_, Card::Const(0)) => Card::Const(0),
-            (a, b) => Card::Min(Box::new(a), Box::new(b)),
+    /// The exact fraction `r`.
+    fn ratio(r: Ratio) -> Card {
+        match r.as_int() {
+            Some(n) => Card::Const(n),
+            None => Card::Ratio(r.num(), r.den()),
         }
+    }
+
+    /// This value, if it is a constant.
+    fn constant(&self) -> Option<Ratio> {
+        match self {
+            Card::Const(n) => Some(Ratio::int(*n)),
+            Card::Ratio(n, d) => Ratio::new(*n, *d),
+            _ => None,
+        }
+    }
+
+    fn min(a: Card, b: Card) -> Card {
+        match (a.constant(), b.constant()) {
+            (Some(x), Some(y)) => Card::ratio(x.min(y)),
+            _ if a == Card::Const(0) || b == Card::Const(0) => Card::Const(0),
+            _ => Card::Min(Box::new(a), Box::new(b)),
+        }
+    }
+
+    fn max(a: Card, b: Card) -> Card {
+        match (a.constant(), b.constant()) {
+            (Some(x), Some(y)) => Card::ratio(x.max(y)),
+            _ => Card::Max(Box::new(a), Box::new(b)),
+        }
+    }
+
+    /// This formula with each leaf `f` gives a value for replaced by it, and
+    /// constants folded.
+    pub(crate) fn substitute(&self, f: &dyn Fn(&Card) -> Option<Card>) -> Card {
+        match self {
+            Card::Const(_) | Card::Ratio(..) => self.clone(),
+            Card::Table(_) | Card::Sel(_) | Card::Operator(_) => f(self).unwrap_or_else(|| self.clone()),
+            Card::Mul(ps) => Card::mul(ps.iter().map(|p| p.substitute(f)).collect()),
+            Card::Add(ps) => Card::add(ps.iter().map(|p| p.substitute(f)).collect()),
+            Card::Not(c) => {
+                let c = c.substitute(f);
+                match c.constant().and_then(|r| Ratio::int(1).minus(r)) {
+                    Some(r) => Card::ratio(r),
+                    None => Card::Not(Box::new(c)),
+                }
+            }
+            Card::Min(a, b) => Card::min(a.substitute(f), b.substitute(f)),
+            Card::Max(a, b) => Card::max(a.substitute(f), b.substitute(f)),
+            Card::Sub(c, k) => {
+                let c = c.substitute(f);
+                match c.constant().and_then(|r| r.minus(Ratio::int(*k))) {
+                    Some(r) => Card::ratio(r),
+                    None => Card::Sub(Box::new(c), *k),
+                }
+            }
+        }
+    }
+
+    /// True if no leaf is a selectivity: the value follows from the tables'
+    /// and operators' row counts.
+    pub(crate) fn is_known(&self) -> bool {
+        let mut known = true;
+        self.leaves(&mut |c| known &= !matches!(c, Card::Sel(_)));
+        known
     }
 
     /// `max(self - k, 0)`
@@ -101,9 +185,9 @@ impl Card {
     }
 
     /// Calls `f` on every leaf.
-    fn leaves<'a>(&'a self, f: &mut dyn FnMut(&'a Card)) {
+    pub(crate) fn leaves<'a>(&'a self, f: &mut dyn FnMut(&'a Card)) {
         match self {
-            Card::Const(_) | Card::Table(_) | Card::Sel(_) | Card::Operator(_) => f(self),
+            Card::Const(_) | Card::Ratio(..) | Card::Table(_) | Card::Sel(_) | Card::Operator(_) => f(self),
             Card::Mul(ps) | Card::Add(ps) => ps.iter().for_each(|p| p.leaves(f)),
             Card::Not(c) | Card::Sub(c, _) => c.leaves(f),
             Card::Min(a, b) | Card::Max(a, b) => {
@@ -119,6 +203,7 @@ impl Card {
         let times = |a: f64, b: f64| if a == 0.0 || b == 0.0 { 0.0 } else { a * b };
         Ok(match self {
             Card::Const(n) => Interval::point(*n as f64),
+            Card::Ratio(n, d) => Interval::point(*n as f64 / *d as f64),
             Card::Table(_) | Card::Sel(_) | Card::Operator(_) => leaf(self)?,
             Card::Mul(ps) => {
                 let mut out = Interval::point(1.0);
@@ -187,6 +272,7 @@ impl fmt::Display for Card {
         };
         match self {
             Card::Const(n) => write!(f, "{n}"),
+            Card::Ratio(n, d) => write!(f, "{n}/{d}"),
             Card::Table(t) => write!(f, "|{t}|"),
             Card::Sel(s) => write!(f, "{s}"),
             Card::Operator(v) => write!(f, "|{v}|"),
@@ -340,8 +426,11 @@ pub struct SelectivityReport {
     pub resolved: Vec<Selectivity>,
     /// Every operator's cardinality, by variable name, children before parents.
     pub operators: Vec<(String, Card)>,
+    /// Every operator's cardinality over its inputs' variables, as
+    /// [`Card::Operator`]s, in the order of `operators` (raw scans aside).
+    pub(crate) local: Vec<(String, Card)>,
     /// Every selectivity `operators` mentions.
-    all: Vec<Selectivity>,
+    pub(crate) all: Vec<Selectivity>,
 }
 
 /// Result of checking a [`SelectivityReport`] against a real execution.
@@ -378,7 +467,7 @@ impl SelectivityReport {
         self.eval(&self.output, tables, values)
     }
 
-    fn eval(
+    pub(crate) fn eval(
         &self,
         card: &Card,
         tables: &HashMap<String, u64>,
@@ -482,9 +571,12 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
         all: vec![],
         ratios: vec![],
         count: 0,
+        search,
+        resolved: vec![],
     };
     let mut cards: Vec<Card> = Vec::with_capacity(nodes.len());
     let mut operators = vec![];
+    let mut local = vec![];
     let mut resolved = vec![];
     for node in nodes {
         // The operator's inputs: variable and cardinality.
@@ -502,6 +594,13 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
                 }
             }
         }
+        // The same rule over the inputs' variables, naming the same
+        // selectivities: the operator's cardinality relative to its inputs'.
+        let inputs_local: Vec<(String, Card)> = match node.plan {
+            LogicalPlan::TableScan(_) => inputs.clone(),
+            _ => inputs.iter().map(|(v, _)| (v.clone(), Card::Operator(v.clone()))).collect(),
+        };
+        let mut relative = b.clone().rule(node, &inputs_local);
         let first = b.all.len();
         let mut card = b.rule(node, &inputs);
         if b.all.len() > first {
@@ -515,6 +614,10 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
                     .map(|(_, c)| c.clone())
             };
             if let Some(known) = known {
+                relative = match inputs.iter().position(|(_, c)| *c == known) {
+                    Some(i) => inputs_local[i].1.clone(),
+                    None => Card::Const(0),
+                };
                 card = known;
                 resolved.extend(b.all.drain(first..));
                 b.ratios.truncate(first);
@@ -535,8 +638,10 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
             }
         }
         operators.push((node.var.clone(), card.clone()));
+        local.push((node.var.clone(), relative));
         cards.push(card);
     }
+    resolved.append(&mut b.resolved);
     let output = cards.pop().unwrap_or(Card::Const(0));
     let mut mentioned = vec![];
     output.leaves(&mut |c| {
@@ -555,11 +660,13 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
         required,
         resolved,
         operators,
+        local,
         all: b.all,
     }
 }
 
-struct Builder {
+#[derive(Clone)]
+struct Builder<'a> {
     all: Vec<Selectivity>,
     /// For each selectivity, whether its operator's cardinality `X` is a share
     /// of one input `l`: `Some(false)` if `X = s·l`, `Some(true)` if
@@ -567,9 +674,28 @@ struct Builder {
     ratios: Vec<Option<bool>>,
     /// Selectivities named so far.
     count: usize,
+    /// The constraint set.
+    search: &'a Search,
+    /// Selectivities of a part of an operator the constraints determine.
+    resolved: Vec<Selectivity>,
 }
 
-impl Builder {
+impl Builder<'_> {
+    /// Moves the selectivity named last to `resolved`.
+    fn resolve_last(&mut self) {
+        self.ratios.pop();
+        self.resolved.extend(self.all.pop());
+    }
+
+    /// The value of count variable `v`, if the constraints prove it zero or
+    /// equal to one of `inputs`' variables.
+    fn known(&self, v: &str, inputs: &[(&String, &Card)]) -> Option<Card> {
+        if self.search.zero(v) {
+            return Some(Card::Const(0));
+        }
+        inputs.iter().find(|(var, _)| self.search.equal(v, var)).map(|(_, c)| (*c).clone())
+    }
+
     /// A new selectivity of `node`, measured as `measure / Π over`.
     fn sel(&mut self, node: &Node, kind: Kind, over: &[&str], measure: String, ratio: Option<bool>) -> Card {
         self.count += 1;
@@ -668,18 +794,25 @@ impl Builder {
         let cross = on.is_empty() && filter.is_none();
         // What measures a selectivity: the operator's own rows, or an
         // auxiliary count.
-        let own = node.var.clone();
-        let aux = |suffix: &str| format!("{}#{suffix}", node.var);
-        let pairs = |b: &mut Builder, measure: String| {
+        // What measures a selectivity: the operator's own rows, or an
+        // auxiliary count, which the analysis also names (`{var}_{suffix}`)
+        // and may determine.
+        let own = (node.var.clone(), None);
+        let aux = |suffix: &str| (format!("{}#{suffix}", node.var), Some(format!("{}_{suffix}", node.var)));
+        let pairs = |b: &mut Builder, (measure, count): (String, Option<String>)| {
             let kind = Kind::Join {
                 on: on.clone(),
                 filter: filter.clone(),
             };
             let s = b.sel(node, kind, &[lv, rv], measure, None);
+            if let Some(known) = count.and_then(|c| b.known(&c, &[(lv, l), (rv, r)])) {
+                b.resolve_last();
+                return known;
+            }
             Card::mul(vec![l.clone(), r.clone(), s])
         };
         // The rows of one side with a match, or (`anti`) without one.
-        let matched = |b: &mut Builder, left: bool, measure: String, anti: bool, ratio: bool| {
+        let matched = |b: &mut Builder, left: bool, (measure, count): (String, Option<String>), anti: bool, ratio: bool| {
             let kind = Kind::Match {
                 on: on.clone(),
                 filter: filter.clone(),
@@ -687,6 +820,12 @@ impl Builder {
             };
             let (v, side) = if left { (lv, l) } else { (rv, r) };
             let m = b.sel(node, kind, &[v], measure, ratio.then_some(anti));
+            // Every row of the side matched, or none.
+            if let Some(known) = count.and_then(|c| b.known(&c, &[(v, side)])) {
+                b.resolve_last();
+                let all = known != Card::Const(0);
+                return if all != anti { side.clone() } else { Card::Const(0) };
+            }
             let m = if anti { Card::Not(Box::new(m)) } else { m };
             Card::mul(vec![side.clone(), m])
         };

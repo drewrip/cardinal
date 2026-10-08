@@ -114,17 +114,16 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
         }
     }
 
-    // Match: a semi or anti join's size over its kept side's.
+    // Match: a semi or anti join's size over its kept side's, the first
+    // (`Context::join` names a right one as a left one).
     for (c, v) in &cards {
         let Context::Derived { op, args, inputs } = c else { continue };
-        let (left, semi) = match op.as_str() {
-            "LeftSemi join" => (true, true),
-            "LeftAnti join" => (true, false),
-            "RightSemi join" => (false, true),
-            "RightAnti join" => (false, false),
+        let semi = match op.as_str() {
+            "LeftSemi join" => true,
+            "LeftAnti join" => false,
             _ => continue,
         };
-        let (kept, other) = if left { (&inputs[0], &inputs[1]) } else { (&inputs[1], &inputs[0]) };
+        let (kept, other) = (&inputs[0], &inputs[1]);
         // Named as a fact of its own, kept may read differently.
         let Some(n) = cards.get(&kept.canonical()).and_then(|k| k.as_int()) else { continue };
         let Some(rows) = v.as_int() else { continue };
@@ -132,6 +131,76 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
         if let Some(m) = matched.and_then(|m| Ratio::new(m, n)) {
             let on = args.iter().cloned().collect();
             out.push((FactKind::Match { on, kept: kept.clone(), other: other.clone() }, m, "match"));
+        }
+    }
+
+    // Redundant: s(P | C) = 1 says every row of C satisfies each term of P,
+    // so a context with C's tables and predicates names the same rows with
+    // or without it. Engines add such terms (DuckDB filters a join's side by
+    // the other's key range), and a query that does not spell them out
+    // finds the facts without them. One term goes at a time: which can go
+    // next may depend on which went first.
+    let always: Vec<(&BTreeSet<String>, &BTreeSet<Term>, &Term)> = set
+        .iter()
+        .filter(|f| f.value == Ratio::int(1))
+        .filter_map(|f| match &f.kind {
+            FactKind::Selectivity { pred, over: Context::Spj { tables, preds } } => Some((tables, preds, pred)),
+            _ => None,
+        })
+        .flat_map(|(tables, preds, pred)| pred.iter().map(move |p| (tables, preds, p)))
+        .collect();
+    if !always.is_empty() {
+        // Whether `p` holds on every row of the cross product of `tables`
+        // satisfying `preds`.
+        let implied = |p: &Term, tables: &BTreeSet<String>, preds: &BTreeSet<Term>| {
+            always.iter().any(|(t, c, q)| *q == p && t.is_subset(tables) && c.is_subset(preds) && !c.contains(p))
+        };
+        // `c` without each term it implies otherwise.
+        let reduced = |c: &Context| -> Vec<Context> {
+            let Context::Spj { tables, preds } = c else { return vec![] };
+            preds
+                .iter()
+                .filter_map(|p| {
+                    let mut rest = preds.clone();
+                    rest.remove(p);
+                    implied(p, tables, &rest).then(|| Context::Spj { tables: tables.clone(), preds: rest })
+                })
+                .collect()
+        };
+        for f in set.iter() {
+            let kinds: Vec<FactKind> = match &f.kind {
+                FactKind::Cardinality(c) => reduced(c).into_iter().map(FactKind::Cardinality).collect(),
+                FactKind::Selectivity { pred, over } => {
+                    let mut out: Vec<FactKind> = reduced(over)
+                        .into_iter()
+                        .map(|over| FactKind::Selectivity { pred: pred.clone(), over })
+                        .collect();
+                    if let Context::Spj { tables, preds } = over {
+                        for p in pred.iter().filter(|p| pred.len() > 1 && implied(p, tables, preds)) {
+                            let mut rest = pred.clone();
+                            rest.remove(p);
+                            out.push(FactKind::Selectivity { pred: rest, over: over.clone() });
+                        }
+                    }
+                    out
+                }
+                FactKind::Distinct { keys, over } => {
+                    reduced(over).into_iter().map(|over| FactKind::Distinct { keys: keys.clone(), over }).collect()
+                }
+                FactKind::Unique { keys, over } => {
+                    reduced(over).into_iter().map(|over| FactKind::Unique { keys: keys.clone(), over }).collect()
+                }
+                FactKind::Match { on, kept, other } => {
+                    let kept_side = reduced(kept)
+                        .into_iter()
+                        .map(|kept| FactKind::Match { on: on.clone(), kept, other: other.clone() });
+                    let other_side = reduced(other)
+                        .into_iter()
+                        .map(|other| FactKind::Match { on: on.clone(), kept: kept.clone(), other });
+                    kept_side.chain(other_side).collect()
+                }
+            };
+            out.extend(kinds.into_iter().map(|k| (k.canonical(), f.value, "redundant")));
         }
     }
 

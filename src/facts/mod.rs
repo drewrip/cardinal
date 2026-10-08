@@ -10,6 +10,7 @@
 mod canonical;
 mod context;
 mod derive;
+pub(crate) mod logical;
 mod rules;
 
 pub use context::{Context, Pending, State, Taint, Term, states};
@@ -68,6 +69,33 @@ impl Ratio {
 
     pub fn over(self, o: Ratio) -> Option<Ratio> {
         self.times(Ratio::new(o.den, o.num)?)
+    }
+
+    pub fn plus(self, o: Ratio) -> Option<Ratio> {
+        let g = gcd(self.den, o.den);
+        let den = (self.den / g).checked_mul(o.den)?;
+        let num = self.num.checked_mul(o.den / g)?.checked_add(o.num.checked_mul(self.den / g)?)?;
+        Ratio::new(num, den)
+    }
+
+    /// `self − o`; `None` if negative.
+    pub fn minus(self, o: Ratio) -> Option<Ratio> {
+        let g = gcd(self.den, o.den);
+        let den = (self.den / g).checked_mul(o.den)?;
+        let num = self.num.checked_mul(o.den / g)?.checked_sub(o.num.checked_mul(self.den / g)?)?;
+        Ratio::new(num, den)
+    }
+}
+
+impl PartialOrd for Ratio {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Ratio {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        (self.num as u128 * o.den as u128).cmp(&(o.num as u128 * self.den as u128))
     }
 }
 

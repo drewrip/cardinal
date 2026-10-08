@@ -9,14 +9,13 @@
 //! vouches for each join condition's columns.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{DataType, Field};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{DFSchema, DataFusionError, JoinType};
-use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::logical_expr::utils::split_conjunction_owned;
 use datafusion::logical_expr::{BinaryExpr, Expr, ExprSchemable, Operator};
-use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::sql::sqlparser::ast;
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
@@ -24,8 +23,8 @@ use serde_json::Value;
 
 use super::sql::QueryText;
 use super::{
-    Catalog, Lineage, ONode, ObservedPlan, Op, OutCol, Pred, RuntimeFilter, base_table, qualified, relation,
-    requalify,
+    Catalog, Lineage, ONode, ObservedPlan, Op, OutCol, Pred, RuntimeFilter, base_table, normalize, qualified,
+    relation, requalify,
 };
 use crate::{Error, Result};
 
@@ -555,21 +554,25 @@ impl Builder<'_> {
         requalify(e, &|r| base_table(r).map(str::to_string)).get_type(self.catalog.all.as_ref()).ok()
     }
 
-    /// `e` simplified (constants folded), against the schemas of the
-    /// instances it reads.
+    /// `e` normalized against the schemas of the instances it reads, and of
+    /// the aggregates whose values it reads.
     fn simplify(&self, e: Expr) -> Expr {
-        let mut schema = DFSchema::empty();
-        let instances: BTreeSet<String> =
-            e.column_refs().into_iter().filter_map(relation).filter(|r| base_table(r).is_some()).map(str::to_string).collect();
-        for i in &instances {
-            let Some(t) = self.catalog.tables.get(base_table(i).unwrap()) else { return e };
-            match DFSchema::try_from_qualified_schema(i.as_str(), t) {
-                Ok(s) => schema.merge(&s),
-                Err(_) => return e,
-            }
-        }
-        let context = SimplifyContext::builder().with_schema(schema.into()).build();
-        ExprSimplifier::new(context).simplify(e.clone()).unwrap_or(e)
+        normalize(e, &|r| match base_table(r) {
+            Some(t) => self.catalog.tables.get(t).cloned(),
+            None => self.values(r),
+        })
+    }
+
+    /// The value columns of aggregate `@k`, with their types.
+    fn values(&self, relation: &str) -> Option<SchemaRef> {
+        let node = self.nodes.get(relation.strip_prefix('@')?.parse::<usize>().ok()?)?;
+        let Op::Aggregate { keys, values } = &node.op else { return None };
+        let fields: Vec<Field> = node.columns[keys.len()..]
+            .iter()
+            .zip(values)
+            .filter_map(|(c, v)| Some(Field::new(&c.name, self.type_of(v.as_ref()?)?, true)))
+            .collect();
+        Some(Arc::new(Schema::new(fields)))
     }
 }
 

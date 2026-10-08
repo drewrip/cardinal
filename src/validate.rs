@@ -91,7 +91,10 @@ pub(crate) async fn evaluate(
                 if let Ok(variant) = variant
                     && let Some(batches) = run(&state, &LogicalPlan::Join(variant)).await
                 {
-                    aux.insert(format!("{}#{suffix}", node.var), rows(&batches));
+                    let n = rows(&batches);
+                    aux.insert(format!("{}#{suffix}", node.var), n);
+                    // The analysis names the same count `{var}_{suffix}`.
+                    counts.push((format!("{}_{suffix}", node.var), n));
                 }
             }
         }

@@ -189,6 +189,24 @@ impl Context {
         })
     }
 
+    /// The rows of a join other than an inner one, on `on`. A right join
+    /// is named as the left join with its inputs swapped, and a full join's
+    /// inputs are in order, so that each reads one way whichever side an
+    /// engine built.
+    pub fn join(kind: JoinType, on: BTreeSet<Term>, l: Context, r: Context) -> Context {
+        let (kind, mut inputs) = match kind {
+            JoinType::Right => (JoinType::Left, vec![r, l]),
+            JoinType::RightSemi => (JoinType::LeftSemi, vec![r, l]),
+            JoinType::RightAnti => (JoinType::LeftAnti, vec![r, l]),
+            JoinType::RightMark => (JoinType::LeftMark, vec![r, l]),
+            kind => (kind, vec![l, r]),
+        };
+        if kind == JoinType::Full {
+            inputs.sort();
+        }
+        Context::Derived { op: format!("{kind} join"), args: on.into_iter().collect(), inputs }
+    }
+
     /// The context with its table instances renamed by `f`.
     pub fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Context {
         match self {
@@ -562,11 +580,7 @@ fn state(
             }
             let ctx = match kind {
                 JoinType::Inner => l.cross(&r).unwrap().filter(&on_terms),
-                kind => Context::Derived {
-                    op: format!("{kind} join"),
-                    args: on_terms.into_iter().collect(),
-                    inputs: vec![l, r],
-                },
+                kind => Context::join(*kind, on_terms, l, r),
             };
             State::with(ctx, pending)
         }
@@ -649,6 +663,17 @@ mod tests {
         let p = col("t.a").gt(lit(1));
         let q = col("t.b").lt(lit(2));
         assert_eq!(terms([p.clone().and(q.clone())]), terms([q, p.clone(), p]));
+    }
+
+    #[test]
+    fn joins_read_one_way() {
+        let on = terms([col("t.a").eq(col("u.b"))]);
+        let (t, u) = (Context::table("t"), Context::table("u"));
+        let join = |kind, l: &Context, r: &Context| Context::join(kind, on.clone(), l.clone(), r.clone());
+        assert_eq!(join(JoinType::Right, &t, &u), join(JoinType::Left, &u, &t));
+        assert_eq!(join(JoinType::RightSemi, &t, &u), join(JoinType::LeftSemi, &u, &t));
+        assert_eq!(join(JoinType::Full, &t, &u), join(JoinType::Full, &u, &t));
+        assert_ne!(join(JoinType::Left, &t, &u), join(JoinType::Left, &u, &t));
     }
 
     #[test]

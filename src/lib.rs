@@ -9,12 +9,14 @@ mod analyzer;
 mod bounds;
 mod domain;
 pub mod facts;
+mod informed;
 pub mod observed;
 mod origin;
 mod selectivity;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};
+pub use informed::{FactMode, Informed, Matched};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 
 use std::collections::HashMap;
@@ -169,39 +171,88 @@ impl Analysis {
                 self.assertions
             )));
         }
-        let constant = search.constant();
-        let scans: Vec<Int> = self
-            .scans
-            .iter()
-            .map(|(s, _)| Int::new_const(s.as_str()))
-            .collect();
-        let sum = if scans.is_empty() {
-            None
-        } else {
-            search.linear(&Int::add(&scans)).map(|(b, _)| b)
-        };
-        let tables = self
-            .tables
-            .iter()
-            .filter_map(|(name, symbol)| {
-                let (bound, exact) = search.linear(&Int::new_const(symbol.as_str()))?;
-                Some(TableBound {
-                    table: name.clone(),
-                    bound,
-                    exact,
-                })
+        let scans: Vec<String> = self.scans.iter().map(|(s, _)| s.clone()).collect();
+        Ok(prove_bounds(&search, &scans, &self.tables))
+    }
+
+    /// This analysis with what `facts` know put in place: each selectivity a
+    /// fact gives a value for is substituted in the formula, and its
+    /// operator's relation to its inputs joins the constraints, so
+    /// [`Informed::bounds`] can be tighter than [`Analysis::bounds`]. With
+    /// [`FactMode::Pinned`], row counts the facts give are used too. Needs
+    /// [`Options::selectivity`].
+    ///
+    /// The facts must describe the data the bounds are for: a fact read off
+    /// a plan of other data gives bounds about that data.
+    pub fn with_facts(&self, facts: &facts::FactSet, mode: FactMode) -> Result<Informed> {
+        informed::inform(self, facts, mode)
+    }
+}
+
+/// The bounds `search` proves on its output: a constant, relative to the sum
+/// of the scans' variables, and relative to each table's symbol.
+pub(crate) fn prove_bounds(search: &bounds::Search, scans: &[String], tables: &[(String, String)]) -> Bounds {
+    let constant = search.constant();
+    let scans: Vec<Int> = scans.iter().map(|s| Int::new_const(s.as_str())).collect();
+    let sum = if scans.is_empty() {
+        None
+    } else {
+        search.linear(&Int::add(&scans)).map(|(b, _)| b)
+    };
+    let tables = tables
+        .iter()
+        .filter_map(|(name, symbol)| {
+            let (bound, exact) = search.linear(&Int::new_const(symbol.as_str()))?;
+            Some(TableBound {
+                table: name.clone(),
+                bound,
+                exact,
             })
-            .collect();
-        Ok(Bounds {
-            constant,
-            sum,
-            tables,
         })
+        .collect();
+    Bounds {
+        constant,
+        sum,
+        tables,
+    }
+}
+
+/// A foreign key: each row of `table` has `columns` never NULL and equal to
+/// `referenced` of exactly one row of `references`. Tables are named as the
+/// analysis shows them (bare in the default schema). Declared keys are
+/// trusted, like primary keys: data that breaks one can break a bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub references: String,
+    pub referenced: Vec<String>,
+}
+
+impl ForeignKey {
+    /// `table(columns)` referencing `references(referenced)`, column for column.
+    pub fn new(table: &str, columns: &[&str], references: &str, referenced: &[&str]) -> ForeignKey {
+        assert_eq!(columns.len(), referenced.len(), "a foreign key pairs its columns");
+        let names = |cs: &[&str]| cs.iter().map(|c| c.to_string()).collect();
+        ForeignKey {
+            table: table.to_string(),
+            columns: names(columns),
+            references: references.to_string(),
+            referenced: names(referenced),
+        }
+    }
+
+    /// The pairs of referencing and referenced columns, in order.
+    pub(crate) fn pairs(&self) -> Vec<(&str, &str)> {
+        let mut pairs: Vec<(&str, &str)> =
+            self.columns.iter().map(String::as_str).zip(self.referenced.iter().map(String::as_str)).collect();
+        pairs.sort();
+        pairs
     }
 }
 
 /// Settings for an analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The most distinct-count factors multiplied in one constraint, e.g. the
     /// columns of a GROUP BY or DISTINCT. Such products are nonlinear, so a
@@ -213,6 +264,11 @@ pub struct Options {
     /// operator selectivities ([`Analysis::selectivity`]). This runs a few
     /// solver checks per filter, join and GROUP BY. Defaults to false.
     pub selectivity: bool,
+    /// Foreign keys the data satisfies. A join on exactly one, against every
+    /// row of the table it references, keeps each referencing row exactly
+    /// once. DataFusion has no foreign key constraints, so they are declared
+    /// here. Defaults to none.
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 impl Default for Options {
@@ -220,6 +276,7 @@ impl Default for Options {
         Options {
             max_product: analyzer::DEFAULT_MAX_PRODUCT,
             selectivity: false,
+            foreign_keys: Vec::new(),
         }
     }
 }
@@ -325,7 +382,7 @@ fn analyze_with(
     resolve: &dyn Fn(&TableScan) -> ScanKind,
     options: Options,
 ) -> Analysis {
-    let mut a = Analyzer::new(resolve, options.max_product);
+    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys);
     let root = a.visit(plan).card;
     a.assert_partitions();
     let root_name = a.name_of(&root);

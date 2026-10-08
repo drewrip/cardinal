@@ -839,6 +839,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
 pub const SELECTIVITY: Options = Options {
     max_product: 3,
     selectivity: true,
+    foreign_keys: Vec::new(),
 };
 
 /// The formula or selectivity range that one real execution contradicts, if

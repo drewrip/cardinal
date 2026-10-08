@@ -185,6 +185,26 @@ impl Search {
         lhs.le(rhs)
     }
 
+    /// Adds `claim` to the constraints if it is consistent with them:
+    /// `Some(true)` if added, `Some(false)` if it contradicts them, and
+    /// `None` if that is undecided (it is then not added).
+    pub(crate) fn assume(&self, claim: &Bool) -> Option<bool> {
+        self.solver.push();
+        self.solver.assert(claim);
+        match self.solver.check() {
+            SatResult::Sat => Some(true),
+            result => {
+                self.solver.pop(1);
+                (result == SatResult::Unsat).then_some(false)
+            }
+        }
+    }
+
+    /// The largest `N` with `X >= N`.
+    pub(crate) fn lower(&self) -> u64 {
+        smallest(0, CAP, |n| !self.proves(self.output.ge(Int::from_u64(n + 1))))
+    }
+
     /// The smallest `N` with `X <= N`.
     pub(crate) fn constant(&self) -> Option<u64> {
         if !self.proves(self.output.le(Int::from_u64(CAP))) {

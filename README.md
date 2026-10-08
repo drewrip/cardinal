@@ -56,18 +56,24 @@ Every relation also gets:
 | Aggregate, no GROUP BY | `X = 1` | |
 | GROUP BY | `X <= l`, `X <= Π ndv(keys)`, `l >= 1 → X >= 1`. Keys cover a unique key: `X = l` | Keys: `=` expression's NDV |
 | ROLLUP / CUBE / GROUPING SETS | none | |
-| Inner join | `X <= l·r`. Right key unique: `X <= l`. Left key unique: `X <= r`. Cross join: `X = l·r` | Columns `<=` input. Equi-keys `<=` the other side's key NDV |
-| Left join | Right key unique: `X = l`. Else `l <= X <= inner + l` | Left `=`, right `<= ndv + 1` |
+| Inner join | `X <= l·r`. Right key unique: `X <= l`. Left key unique: `X <= r`. Cross join: `X = l·r`. On a foreign key from the left: `X = l` (mirror) | Columns `<=` input. Equi-keys `<=` the other side's key NDV |
+| Left join | Right key unique: `X = l`. Else `l <= X <= inner + l`. Exactly `X = i + l − mₗ` (below) | Left `=`, right `<= ndv + 1` |
 | Right join | Mirror of left | Mirror |
-| Full join | `X >= l`, `X >= r`, `X <= inner + l + r`. Either key unique: `X <= l + r` | Both sides `<= ndv + 1` |
-| Semi / anti join | `X <=` kept side | `<=`. Semi: equi-key `<=` other side |
+| Full join | `X >= l`, `X >= r`, `X <= inner + l + r`. Either key unique: `X <= l + r`. Exactly `X = i + l − mₗ + r − mᵣ` | Both sides `<= ndv + 1` |
+| Semi / anti join | `X <=` kept side. On a foreign key from the kept side: semi `X =` kept side, anti `X = 0`. Anti: `X = l − mₗ` | `<=`. Semi: equi-key `<=` other side |
 | Mark join | `X =` kept side | `=` |
 | Union | `X = Σ inputs` | `<= Σ`, `>=` each input |
 | Values | `X = rows` | Domain: the literals |
 | Empty relation | `X = 0`, or `1` if it produces a row | |
 | Anything else (Unnest, recursive CTE, …) | none | |
 
-`inner` is the bound on an inner join with the same inputs.
+`inner` is the bound on an inner join with the same inputs. An outer or anti
+join also gets variables for what its selectivities measure (`validate`
+counts them): its inner join's rows `i` (`{op}_inner`), and the rows of each
+side with a partner `mₗ`, `mᵣ` (`{op}_left`, `{op}_right`). `i <= inner`,
+`m <= i` and `m <=` its side, `i >= 1 → m >= 1`; if the other side's key is
+unique, `m = i`, and on a foreign key from a side, `m =` the side and `i =` the
+side.
 
 **Unique keys.** A set of columns is unique if it covers one of these:
 
@@ -87,6 +93,25 @@ A key stays unique:
 
 `UNIQUE` constraints are not trusted (DataFusion doesn't enforce them), and
 ROLLUP / CUBE / GROUPING SETS outputs are not keys, since they repeat key values.
+
+**Foreign keys.** DataFusion has none, so they are declared in
+`Options::foreign_keys`: `ForeignKey::new("orders", &["cust"], "customers",
+&["id"])` says every order's `cust` is non-NULL and equals the `id` of exactly
+one customer. A join on exactly a foreign key's columns (no other condition),
+where one side's columns hold one row's referencing values and the other side
+holds every row of the referenced table once, matches each row of the first
+side exactly once:
+
+- The referencing side may be filtered, joined, grouped by the key, or
+  deduplicated: its values are still some row's. Not padded by an outer join,
+  whose NULLs match nothing.
+- The referenced side must be the whole table: a scan without filters, through
+  projections, aliases, sorts without a limit, and windows.
+
+So `orders ⋈ customers` on the key has `X = |orders|`, and its selectivity is
+resolved: no fact needed. So is any part of an outer or anti join's formula
+the constraints determine: in `customers LEFT JOIN orders` on the key, the
+inner join has `|orders|` rows, so `X = |orders| + (1 − m)·|customers|`.
 
 **Value domains.** Rows above a filter or join condition all satisfy it, so
 every relation also carries, per expression, a *domain*: an integer range or a
@@ -165,7 +190,7 @@ verdict, the portfolio gets a turn on a fresh solver.
 - Equality-based NDV rules skip floats: `-0.0 = 0.0` in SQL, but the two differ as bits.
 - Products of NDVs are nonlinear and capped at `Options::max_product` factors
   (default 3). Larger products are dropped, which is sound but weaker.
-- Declared keys are trusted. DataFusion does not enforce them.
+- Declared keys, primary and foreign, are trusted. DataFusion does not enforce them.
 
 ## Selectivities
 
@@ -259,6 +284,17 @@ encoding of one, or unknown). Columns are qualified by *table instance*
 aggregate's output is a column of the aggregate itself (`@7.sum(l_quantity)`),
 so HAVING and scalar-subquery comparisons read too.
 
+Every expression is written as DataFusion's optimizer writes it, so that a
+predicate reads the same in a profile and in the query it is matched against
+(see [Bounds from facts](#bounds-from-facts)): types are coerced as for
+execution, so a literal takes its column's type (`l_quantity < 10.00` is
+`Decimal128(10.00,15,2)`, an aggregate's value its aggregate's type), and
+constants are folded. DuckDB computes `date '1998-12-01' - interval '90' day`
+as a timestamp, and DataFusion as a date, so a date compared with a timestamp
+at midnight is compared with that date. DuckDB prints `LIKE 'abc%'`,
+`'%abc'` and `'%abc%'` as `starts_with`, `ends_with` and `contains`, so they
+are written that way.
+
 `from_duckdb` reads DuckDB's profile, resolving names only when one column
 has the name, and positions (`#2`) only where the column order is known (not
 above a join, which drops and reorders columns unseen). What does not resolve
@@ -299,7 +335,7 @@ precise, but specific.
 | Project, Sort, Window | the input's |
 | Filter `p` | input `where p` |
 | Inner join on `c` | `L × R where c` |
-| Outer, semi, anti, mark join | `Derived` |
+| Outer, semi, anti, mark join | `Derived`; a right join as the left join with its inputs swapped |
 | Filter on a mark | the semi join's (`IN`, `EXISTS`), or `Derived` (`NOT IN`) |
 | Group by / distinct, aggregate, top-n, union | `Derived` |
 | Reuse (CTE scan, delim join input) | the read operator's, over copied instances |
@@ -343,8 +379,12 @@ selectivity times its input's size is a size (`product`). A join's size over
 its inputs' sizes is a join selectivity, even when the inputs were counted in
 other plans (`join`). The same goes for a semi join's size over its kept
 side's (`match`). A distinct count equal to its context's size makes the keys
-unique there (`unique`). The same fact with two values is a `Conflict`: the
-data changed, or a context names the wrong rows.
+unique there (`unique`). A selectivity of 1 says every row of its context
+satisfies the predicate, so a context containing that one names the same rows
+without it (`redundant`): DuckDB filters a join's side by the other's key
+range (`c_custkey <= 1499`), which a query never spells out. The same fact
+with two values is a `Conflict`: the data changed, or a context names the
+wrong rows.
 
 The fixtures under `tests/duckdb` are DuckDB profiles of TPC-H (scale factor
 0.01) and some hand-written queries, regenerated by
@@ -358,6 +398,62 @@ facts change.
 scripts/duckdb_fixtures.sh                          # profiles, true counts, fact checks
 cargo test --test facts                             # including facts_match_duckdb
 cargo test --test facts print_facts -- --nocapture  # every plan's contexts and facts
+```
+
+## Bounds from facts
+
+Facts fill in selectivities. Each operator of a query gets the context facts
+would name its rows by (`facts::logical`), built by the same rules from the
+DataFusion plan: scans are instances (`lineitem#4`, by node), predicates are
+read through projections and aliases to base columns, and expressions are
+normalized as a profile's are. A selectivity's value is then a lookup:
+
+| Selectivity | Fact | Or, from sizes |
+|---|---|---|
+| Filter `p` over input `I` | `s(p \| I)`, without conjuncts `I` satisfies | `\|I where p\| / \|I\|` |
+| Inner join on `c` of `L`, `R` | `s(c \| L × R)` | `\|L × R where c\| / (\|L\|·\|R\|)` |
+| Semi / anti join share `m` | `m(c \| kept ⋉ other)` | the semi or anti join's size over the kept side's |
+| `NOT IN` | | its size over its input's |
+| Distinct, GROUP BY on `k` | `ndv(k \| I) / \|I\|`, or 1 if `unique(k \| I)` | |
+
+```rust
+let facts = facts::derive_facts(&plans);
+let informed = analysis.with_facts(&facts, FactMode::Ratios)?;
+informed.output;   // 10816/60175·|lineitem|
+informed.matched;  // s1 = 10816/60175 from s(lineitem.l_quantity < 10.00 | lineitem)
+informed.bounds()?;  // as Analysis::bounds, with the facts among the constraints
+informed.range()?;   // the proven lo <= X <= hi
+```
+
+A matched value replaces its selectivity in the formula, and its operator's
+relation to its inputs (`X = 10816/60175 · l`, over reals) joins the
+constraints, where it combines with what they already know (keys, domains,
+disjoint subsets). Two modes:
+
+- `FactMode::Ratios` uses only selectivities. Table sizes stay unknowns, so
+  the bounds hold as the tables grow, as long as the shares do (a GROUP BY's
+  groups are the least likely to keep their share).
+- `FactMode::Pinned` also fixes every row count a fact gives: tables, and any
+  operator whose context has a known size (a GROUP BY's from its distinct
+  count). This holds a join's size even where it was joined in another order,
+  and is exact for the data the facts were read from only.
+
+A value outside its selectivity's proven range, or contradicting the
+constraints, is `rejected`: a fact matched to the wrong rows, or data that
+changed. A relation the solver cannot check in time is left out (`unchecked`).
+A conflicting fact is never used.
+
+The fixture queries test this against DuckDB's profiles of themselves: with
+every fact, and with only the other queries', no fact is rejected and every
+bound holds the true count. With TPC-H's foreign keys declared, 91
+selectivities remain to find (23 fewer than without), and with every fact 38
+have a value. Most of the rest were never counted: DuckDB joined in another
+order, or a runtime filter pruned the scan.
+
+```sh
+cargo test --test fact_bounds                                  # bounds hold, match rates
+cargo test --test fact_bounds print_matches -- --nocapture     # each query's matches, and why not
+cargo test --test fact_bounds print_bounds -- --nocapture      # bounds before and after
 ```
 
 ## Validation

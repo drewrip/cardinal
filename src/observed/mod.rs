@@ -14,15 +14,18 @@ mod sql;
 pub use duckdb::from_duckdb;
 pub use sql::QueryText;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::{Column, DFSchema, JoinType, TableReference};
+use datafusion::common::{Column, DFSchema, JoinType, ScalarValue, TableReference};
 use datafusion::execution::SessionState;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{BinaryExpr, Expr, ExprSchemable, Operator};
+use datafusion::logical_expr::simplify::SimplifyContext;
+use datafusion::functions::string::expr_fn::{contains, ends_with, starts_with};
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::prelude::SessionContext;
 
 use crate::Result;
@@ -228,6 +231,100 @@ pub(crate) fn column_key(c: &Column) -> String {
 
 pub(crate) fn qualified(relation: &str, name: &str) -> Expr {
     Expr::Column(Column::new(Some(TableReference::bare(relation)), name))
+}
+
+/// `e` as DataFusion's optimizer writes it: types coerced as for execution,
+/// so a literal takes its column's type (`l_quantity < 10.00` reads
+/// `Decimal128(10.00,15,2)`, as in an optimized plan), then simplified
+/// (constants folded). `schema` gives the columns of each relation: an
+/// instance's table's, or an aggregate's values. Facts read off any engine's
+/// plan, and the plans they are matched against, pass through here, so that
+/// one predicate reads one way. An expression over a relation without a
+/// schema does not type-check, and is only simplified.
+pub(crate) fn normalize(e: Expr, schema: &dyn Fn(&str) -> Option<SchemaRef>) -> Expr {
+    let mut columns = DFSchema::empty();
+    let relations: BTreeSet<String> = e.column_refs().into_iter().filter_map(relation).map(str::to_string).collect();
+    for r in &relations {
+        let Some(s) = schema(r) else { continue };
+        match DFSchema::try_from_qualified_schema(r.as_str(), &s) {
+            Ok(s) => columns.merge(&s),
+            Err(_) => return e,
+        }
+    }
+    let schema = columns;
+    let schema = Arc::new(schema);
+    let simplifier = ExprSimplifier::new(SimplifyContext::builder().with_schema(schema.clone()).build());
+    let coerced = simplifier.coerce(e.clone(), &schema).unwrap_or_else(|_| e.clone());
+    let simplified = simplifier.simplify(coerced).unwrap_or(e);
+    simplified
+        .clone()
+        .transform_up(|e| date_comparison(e, &schema).transform_data(|e| Ok(like(e))))
+        .map(|t| t.data)
+        .unwrap_or(simplified)
+}
+
+/// `x LIKE 'abc%'`, `'%abc'` and `'%abc%'` as `starts_with`, `ends_with`
+/// and `contains`, as DuckDB prints them.
+fn like(e: Expr) -> Transformed<Expr> {
+    let Expr::Like(l) = &e else { return Transformed::no(e) };
+    let Expr::Literal(ScalarValue::Utf8(Some(p)) | ScalarValue::Utf8View(Some(p)) | ScalarValue::LargeUtf8(Some(p)), _) =
+        l.pattern.as_ref()
+    else {
+        return Transformed::no(e);
+    };
+    if l.case_insensitive || l.escape_char.is_some() {
+        return Transformed::no(e);
+    }
+    let literal = |s: &str| !s.is_empty() && !s.contains(['%', '_', '\\']);
+    let (x, text) = (*l.expr.clone(), |s: &str| Expr::Literal(ScalarValue::Utf8(Some(s.to_string())), None));
+    let call = if let Some(middle) = p.strip_prefix('%').and_then(|r| r.strip_suffix('%')).filter(|m| literal(m)) {
+        contains(x, text(middle))
+    } else if let Some(end) = p.strip_prefix('%').filter(|r| literal(r)) {
+        ends_with(x, text(end))
+    } else if let Some(start) = p.strip_suffix('%').filter(|r| literal(r)) {
+        starts_with(x, text(start))
+    } else {
+        return Transformed::no(e);
+    };
+    Transformed::yes(if l.negated { Expr::Not(Box::new(call)) } else { call })
+}
+
+/// `CAST(d AS TIMESTAMP) op t`, for a date `d` and a time-zone-free
+/// timestamp `t` at midnight, as `d op date(t)`: DuckDB computes
+/// `date '1998-12-01' - interval '90' day` as a timestamp, where DataFusion
+/// folds it to a date. At midnight the two comparisons agree.
+fn date_comparison(e: Expr, schema: &DFSchema) -> Transformed<Expr> {
+    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = &e else { return Transformed::no(e) };
+    if !matches!(op, Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq | Operator::Eq | Operator::NotEq) {
+        return Transformed::no(e);
+    }
+    let date = |side: &Expr| match side {
+        Expr::Cast(c)
+            if matches!(c.field.data_type(), DataType::Timestamp(_, None))
+                && c.expr.get_type(schema).is_ok_and(|t| t == DataType::Date32) =>
+        {
+            Some((*c.expr).clone())
+        }
+        _ => None,
+    };
+    let midnight = |side: &Expr| {
+        let Expr::Literal(v, _) = side else { return None };
+        let (v, per_day) = match v {
+            ScalarValue::TimestampSecond(Some(v), None) => (*v, 86_400),
+            ScalarValue::TimestampMillisecond(Some(v), None) => (*v, 86_400_000),
+            ScalarValue::TimestampMicrosecond(Some(v), None) => (*v, 86_400_000_000),
+            ScalarValue::TimestampNanosecond(Some(v), None) => (*v, 86_400_000_000_000),
+            _ => return None,
+        };
+        let days = i32::try_from(v.div_euclid(per_day)).ok()?;
+        (v.rem_euclid(per_day) == 0).then(|| Expr::Literal(ScalarValue::Date32(Some(days)), None))
+    };
+    let (l, r) = match (date(left), midnight(right), midnight(left), date(right)) {
+        (Some(d), Some(t), _, _) => (d, t),
+        (_, _, Some(t), Some(d)) => (t, d),
+        _ => return Transformed::no(e),
+    };
+    Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(Box::new(l), *op, Box::new(r))))
 }
 
 /// `e` with each column's relation renamed by `f`, where it gives a name.

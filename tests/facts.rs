@@ -3,73 +3,14 @@
 //! `scripts/duckdb_fixtures.sh`; print every fact with
 //! `cargo test --test facts print_facts -- --nocapture`.
 
+mod fixtures;
+
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use cardinal::facts::{FactSet, State, derive_facts, states};
-use cardinal::observed::{Catalog, ObservedPlan, from_duckdb};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::datasource::MemTable;
-use datafusion::prelude::SessionContext;
+use cardinal::observed::{ObservedPlan, from_duckdb};
+use fixtures::{DIR, catalog, json, plans};
 use serde_json::{Value, json};
-
-const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/duckdb");
-
-fn json(path: &str) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(format!("{DIR}/{path}")).unwrap()).unwrap()
-}
-
-/// DuckDB's type names as Arrow types.
-fn arrow_type(t: &str) -> DataType {
-    if let Some(ps) = t.strip_prefix("DECIMAL(").and_then(|r| r.strip_suffix(')')) {
-        let (p, s) = ps.split_once(',').unwrap();
-        return DataType::Decimal128(p.trim().parse().unwrap(), s.trim().parse().unwrap());
-    }
-    match t {
-        "INTEGER" => DataType::Int32,
-        "BIGINT" => DataType::Int64,
-        "DOUBLE" => DataType::Float64,
-        "VARCHAR" => DataType::Utf8,
-        "DATE" => DataType::Date32,
-        t => panic!("no Arrow type for DuckDB type {t}"),
-    }
-}
-
-/// The TPC-H tables, empty, with DuckDB's schemas.
-async fn catalog() -> Catalog {
-    let mut tables: Vec<(String, Vec<Field>)> = vec![];
-    for c in json("catalog.json").as_array().unwrap() {
-        let table = c["table_name"].as_str().unwrap();
-        let field = Field::new(c["column_name"].as_str().unwrap(), arrow_type(c["data_type"].as_str().unwrap()), true);
-        match tables.last_mut() {
-            Some((t, fields)) if t == table => fields.push(field),
-            _ => tables.push((table.to_string(), vec![field])),
-        }
-    }
-    let ctx = SessionContext::new();
-    for (name, fields) in tables {
-        let schema = Arc::new(Schema::new(fields));
-        ctx.register_table(name.as_str(), Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap())).unwrap();
-    }
-    Catalog::from_context(&ctx).await.unwrap()
-}
-
-/// Every fixture under `dir`, by name, in name order.
-fn fixtures(dir: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = std::fs::read_dir(format!("{DIR}/{dir}"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .map(|p| (p.file_stem().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&p).unwrap()))
-        .collect();
-    out.sort();
-    out
-}
-
-async fn plans(dir: &str) -> Vec<ObservedPlan> {
-    let catalog = catalog().await;
-    fixtures(dir).iter().map(|(name, json)| from_duckdb(&catalog, name, json).unwrap()).collect()
-}
 
 async fn plan(name: &str) -> ObservedPlan {
     let catalog = catalog().await;
@@ -203,14 +144,14 @@ async fn extra_facts_are_true() {
     let li = e["lineitem"];
     let q10 = e["lineitem|l_quantity<10"];
     assert_eq!(value(&facts, "|lineitem|"), li as f64);
-    assert_eq!(value(&facts, "|lineitem where lineitem.l_quantity < 10.0|"), q10 as f64);
-    assert_eq!(value(&facts, "s(lineitem.l_quantity < 10.0 | lineitem)"), ratio(q10, li));
+    assert_eq!(value(&facts, "|lineitem where lineitem.l_quantity < 10.00|"), q10 as f64);
+    assert_eq!(value(&facts, "s(lineitem.l_quantity < 10.00 | lineitem)"), ratio(q10, li));
     assert_eq!(
         value(&facts, "ndv(lineitem.l_suppkey | lineitem)"),
         e["ndv(l_suppkey|lineitem)"] as f64
     );
     assert_eq!(
-        value(&facts, "ndv(lineitem.l_suppkey | lineitem where lineitem.l_quantity < 10.0)"),
+        value(&facts, "ndv(lineitem.l_suppkey | lineitem where lineitem.l_quantity < 10.00)"),
         e["ndv(l_suppkey|lineitem,l_quantity<10)"] as f64
     );
     assert_eq!(
@@ -222,7 +163,7 @@ async fn extra_facts_are_true() {
     let (f, o) = (e["orders|o_orderstatus=F"], e["orders"]);
     let joined = e["lineitem⋈orders|F,l_quantity<10"];
     let join = "lineitem × orders where lineitem.l_orderkey = orders.o_orderkey \
-                and lineitem.l_quantity < 10.0 and orders.o_orderstatus = 'F'";
+                and lineitem.l_quantity < 10.00 and orders.o_orderstatus = 'F'";
     assert_eq!(value(&facts, &format!("|{join}|")), joined as f64);
     // From one plan's join and filtered orders, and another's filtered
     // lineitem: the join selectivity over both filtered inputs.
@@ -230,7 +171,7 @@ async fn extra_facts_are_true() {
         value(
             &facts,
             "s(lineitem.l_orderkey = orders.o_orderkey | lineitem × orders \
-             where lineitem.l_quantity < 10.0 and orders.o_orderstatus = 'F')"
+             where lineitem.l_quantity < 10.00 and orders.o_orderstatus = 'F')"
         ),
         joined as f64 / (q10 * f) as f64
     );
@@ -267,7 +208,7 @@ async fn projections_pass_through() {
     let renamed = node("PROJECTION", 60175, json!({"Projections": ["#1", "l_quantity"]}), vec![computed]);
     let over = node("FILTER", 6959, json!({"Expression": "(#0 > 10000.00)"}), vec![renamed]);
     let direct = node("FILTER", 6959, json!({"Expression": "((l_extendedprice * 2) > 10000.00)"}), vec![scan()]);
-    let key = "s(lineitem.l_extendedprice * 2 > 10000.0 | lineitem)";
+    let key = "s(lineitem.l_extendedprice * 2 > 10000.00 | lineitem)";
     for (name, plan) in [("over", over), ("direct", direct)] {
         let facts = derive_facts(&[from_duckdb(&catalog, name, &plan.to_string()).unwrap()]);
         assert_eq!(value(&facts, key), ratio(6959, 60175), "{name}");
