@@ -8,6 +8,8 @@
 mod analyzer;
 mod bounds;
 mod domain;
+pub mod facts;
+pub mod observed;
 mod origin;
 mod selectivity;
 mod validate;
@@ -41,6 +43,9 @@ pub enum Error {
     /// A formula was evaluated without the row count of a table it mentions.
     #[error("no row count given for table {0}")]
     UnknownTable(String),
+    /// An engine's plan profile that could not be read.
+    #[error("unreadable plan profile: {0}")]
+    Observed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
