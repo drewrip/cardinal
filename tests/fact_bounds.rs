@@ -59,6 +59,9 @@ fn facts(cases: &[Case], except: Option<&str>) -> FactSet {
         for f in c.observed.iter() {
             set.insert(f.clone());
         }
+        for b in c.observed.bounds() {
+            set.insert_bound(b.clone());
+        }
     }
     set.close();
     set
@@ -71,9 +74,11 @@ fn sizes(facts: &FactSet) -> HashMap<String, u64> {
     tables.iter().filter_map(|t| Some((t.to_string(), size(t)?))).collect()
 }
 
-/// How many of the selectivities the output needs have a value.
+/// How many of the selectivities the output needs have a value. One the
+/// output mentions twice (an outer join's) is unmatched twice.
 fn matched(a: &Analysis, i: &Informed) -> usize {
-    a.selectivity.as_ref().unwrap().required.len() - i.unmatched.len()
+    let required = &a.selectivity.as_ref().unwrap().required;
+    required.iter().filter(|s| !i.unmatched.iter().any(|(u, _)| *u == s.name)).count()
 }
 
 #[tokio::test]
@@ -156,59 +161,58 @@ async fn bounds_hold() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// How many selectivities find a fact. Raise the floors as matching improves.
+/// How many selectivities find a fact, and how many outputs the bounds cap
+/// at their true count. Raise the floors as matching improves.
 #[tokio::test]
 async fn match_rates() {
     let cases = cases().await;
     let all = facts(&cases, None);
-    let (mut every, mut others) = (0, 0);
-    for Case { name, analysis: a, .. } in &cases {
+    const EVERY: usize = 6;
+    const OTHERS: usize = 1;
+    const TIGHT: usize = 30;
+    let (mut every, mut others, mut tight) = (0, 0, 0);
+    for c @ Case { name, analysis: a, .. } in &cases {
         every += matched(a, &a.with_facts(&all, FactMode::Ratios).unwrap());
         others += matched(a, &a.with_facts(&facts(&cases, Some(name)), FactMode::Ratios).unwrap());
+        // Bounds that cap the output at its true count.
+        let (_, hi) = a.with_facts(&all, FactMode::Pinned).unwrap().range().unwrap();
+        tight += usize::from(hi == Some(c.rows()));
     }
-    assert!(every >= 38, "{every} selectivities matched with every fact");
-    assert!(others >= 7, "{others} selectivities matched with other queries' facts");
+    println!("{every} matched with every fact, {others} with others', {tight} of {} outputs capped at their count", cases.len());
+    assert!(every >= EVERY, "{every} selectivities matched with every fact");
+    assert!(others >= OTHERS, "{others} selectivities matched with other queries' facts");
+    assert!(tight >= TIGHT, "{tight} outputs capped at their true count");
 }
 
-/// Facts from other plans meet the query's operators, through pushed-down
-/// filters, a projection's alias, and a join's inputs.
+/// A filter pushed into a scan gives no exact fact, only an upper bound on
+/// the rows it and what keeps them above name: pinned, those bounds meet
+/// the query's operators through pushed-down filters, a projection's alias,
+/// and a join's inputs, and cap the output at its true count.
 #[tokio::test]
-async fn values_are_exact() {
+async fn pushed_filters_bound() {
     let cases = cases().await;
     let all = facts(&cases, None);
     let case = |name: &str| {
         let c = cases.iter().find(|c| c.name == name).unwrap();
         (&c.analysis, c.rows())
     };
-    let value = |i: &Informed, s: &str| i.matched.iter().find(|m| m.name == s).map(|m| m.value.to_string());
 
-    // `select * from lineitem where l_quantity < 10`: its filter is pushed
-    // into the scan, measured from another plan's sizes.
-    let (a, _) = case("scan_filter");
-    let i = a.with_facts(&facts(&cases, Some("scan_filter")), FactMode::Ratios).unwrap();
-    assert_eq!(value(&i, "s1").as_deref(), Some("10816/60175 ≈ 0.1797"), "{i}");
-    assert_eq!(i.output.to_string(), "10816/60175·|lineitem|");
-
-    // The GROUP BY reads `yr`, an alias of `extract(year from o_orderdate)`.
-    let (a, _) = case("alias");
+    // `select * from lineitem where l_quantity < 10`: the share is unknown,
+    // and the scan's rows are at most what it returned.
+    let (a, rows) = case("scan_filter");
     let i = a.with_facts(&all, FactMode::Ratios).unwrap();
-    assert!(i.unmatched.is_empty(), "{i}");
-
-    // Every share of a filtered join, through its inputs' contexts.
-    let (a, rows) = case("join_filtered");
-    let i = a.with_facts(&all, FactMode::Ratios).unwrap();
-    assert!(i.unmatched.is_empty(), "{i}");
-    let exact = i.evaluate(&sizes(&all)).unwrap();
-    assert_eq!(exact.exact(), Some(rows as f64), "{i}");
-
-    // DuckDB prints `p_name LIKE '%green%'` as `contains(p_name, 'green')`.
-    let (a, _) = case("q09");
-    let i = a.with_facts(&all, FactMode::Ratios).unwrap();
-    assert_eq!(value(&i, "s1").as_deref(), Some("107/2000 ≈ 0.0535"), "{i}");
-
-    // DuckDB's `date - interval` is a timestamp, DataFusion's a date.
-    let (a, rows) = case("q01");
+    assert!(i.matched.is_empty(), "{i}");
     let i = a.with_facts(&all, FactMode::Pinned).unwrap();
-    assert!(i.unmatched.is_empty(), "{i}");
-    assert_eq!(i.range().unwrap(), (rows, Some(rows)));
+    assert!(i.capped.iter().any(|(_, n)| *n == rows), "{:?}", i.capped);
+    assert_eq!(i.range().unwrap().1, Some(rows));
+
+    // The GROUP BY reads `yr`, an alias of `extract(year from o_orderdate)`;
+    // DuckDB prints `p_name LIKE '%green%'` as `contains(p_name, 'green')`;
+    // and its `date - interval` is a timestamp, DataFusion's a date.
+    for name in ["alias", "q09", "q01", "q03"] {
+        let (a, rows) = case(name);
+        let i = a.with_facts(&all, FactMode::Pinned).unwrap();
+        assert!(i.rejected.is_empty(), "{name}: {i}");
+        assert_eq!(i.range().unwrap().1, Some(rows), "{name}: {i}");
+    }
 }

@@ -322,12 +322,32 @@ table of the constants, is read as the `IN` predicate DuckDB also pushes into
 the scan.
 
 **Contexts.** A fact holds for the rows it was measured over: its *context*.
-A filter or inner join over base tables gives an `Spj` context, the rows of
-the cross product of its tables satisfying a set of canonical predicates, so
-the same rows meet from any plan shape: a filter pushed into a scan, above a
-projection, or below a join in another order. Other operators give a
-`Derived` context, named by the operator, its keys and its inputs' contexts:
-precise, but specific.
+Contexts are built in a normal form (`facts::rewrite`), so that plans that
+compute the same rows in a different order name them the same. Filters,
+inner joins, and semi and anti joins over any inputs give one `Spj` context:
+the cross product of its tables and *atoms* (inputs that are not themselves
+SPJs, like a GROUP BY or an outer join), with a set of canonical predicates
+and of existence conditions (`exists[on](other)`, `not exists[...]`,
+`not in[...]`). Other operators give a `Derived` context, named by the
+operator, its keys and its inputs' contexts. Each rewrite into the normal
+form holds for any data, and fires only when that can be read off the terms:
+
+- Inner joins and filters flatten, over atoms too: join order does not matter.
+- A semi or anti join is a condition on its kept side's rows, so it commutes
+  with the inner joins and filters around it, and with other such joins.
+- Equal columns (`a = b ∧ b = c`) are written as a star from the least, and
+  a semi or anti join's condition reads each side's least.
+- DuckDB's decorrelation, a semi join against `σP(X × group_k'(K'))` where
+  `K'` is a copy of the kept rows, reads as the semi join of `X` it computes.
+- A left join's preserved side is only the inputs its condition reads; the
+  rest applies outside it, and a term of the condition on the other side alone
+  filters that side. A predicate rejecting the padded side's NULLs makes the
+  inner join (a full join, the left join preserving the other side).
+
+A predicate on a GROUP BY's keys stays above it: a value the GROUP BY
+computes is named by the rows it ran over, and what reads it above would no
+longer name a GROUP BY of the rows. Engines move such predicates below the
+GROUP BY themselves.
 
 | Operator | Output context |
 |---|---|
@@ -335,8 +355,9 @@ precise, but specific.
 | Project, Sort, Window | the input's |
 | Filter `p` | input `where p` |
 | Inner join on `c` | `L × R where c` |
-| Outer, semi, anti, mark join | `Derived`; a right join as the left join with its inputs swapped |
-| Filter on a mark | the semi join's (`IN`, `EXISTS`), or `Derived` (`NOT IN`) |
+| Semi, anti join | `kept where exists[c](other)`, `not exists[c](other)` |
+| Left, full join | `Derived`; a right join as the left join with its inputs swapped |
+| Filter on a mark | `kept where exists[...]` (`IN`), or `not in[...]` |
 | Group by / distinct, aggregate, top-n, union | `Derived` |
 | Reuse (CTE scan, delim join input) | the read operator's, over copied instances |
 | Limit | tainted, with everything below it |
@@ -348,17 +369,26 @@ the fact least, so the same fact from two plans reads the same. A value of an
 aggregate reads as `"value"."sum(lineitem.l_quantity) of group[...](...)"`:
 the aggregate and the rows it ran over.
 
-Some counts are not a function of the data, and their operators get no
-context:
+Some counts are not exactly a function of the context, and give no fact:
 
+- *Pushed filters.* A filter pushed into a scan, required or optional, may be
+  applied loosely (only to skip blocks, say), so the scan's rows are the
+  context's and maybe more. Its count, and the count of each operator above
+  that keeps all of a superset input's rows (filters, inner and semi joins,
+  an anti join's kept side, a left join's preserved side), is only an upper
+  bound: `|ctx| <= rows`, and for a GROUP BY over such rows,
+  `ndv(k | input) <= rows`. An anti join's other side, an outer join's padded
+  side, a mark join, a GROUP BY's values, a top-n and a union cannot take
+  extra rows, and taint. A filter above that checks the same predicate makes
+  the rows exact again.
 - *Runtime filters.* DuckDB pushes a join's build-side keys into the probe
-  side's scan as optional filters. The scan's count then depends on what
-  they pruned, and stays pending until the join on that column (the highest
-  one, should several join on it), whose output they cannot change. An
-  optional filter in a scan stays pending until a filter above enforces the
-  same predicate.
-- *Early stops.* Below a `LIMIT`, and on the probe side of a join whose build
-  side is empty, operators may not have run to completion.
+  side's scan as filters, which remove real rows of the context. The rows
+  stay pending, with no fact nor bound, until the join on that column (the
+  highest one, should several join on it), whose output they cannot change.
+- *Early stops.* Below a `LIMIT`, on the probe side of a join that output
+  nothing (its build side empty, or with no key that can match), and in a
+  scan that reports reading fewer rows than it output, operators may not
+  have run to completion.
 - *Volatile* (`random()`) and unresolved predicates. Names stay unresolved
   above a self-join where both instances' columns share them (TPC-H q07's two
   `n_name`s), and aggregates named only by an alias (`total_revenue`,
@@ -372,6 +402,7 @@ context:
 | Filter selectivity | `s(p \| input) = rows / input`, without conjuncts the input already satisfies |
 | Join selectivity | inner: `s(c \| L × R) = rows / (l·r)`; semi/anti: the kept side's share with a partner `m` |
 | Distinct count | group by / distinct on `k`: `ndv(k \| input) = rows` |
+| Upper bound | pending only on pushed filters: `\|ctx\| <= rows`; a GROUP BY over such rows: `ndv(k \| input) <= rows` |
 
 **Closure.** `FactSet::close` combines facts from every plan until nothing new
 follows. A filtered size over an unfiltered one is a selectivity (`ratio`); a
@@ -384,20 +415,35 @@ satisfies the predicate, so a context containing that one names the same rows
 without it (`redundant`): DuckDB filters a join's side by the other's key
 range (`c_custkey <= 1499`), which a query never spells out. The same fact
 with two values is a `Conflict`: the data changed, or a context names the
-wrong rows.
+wrong rows. So is a bound below its context's exact value. Bounds keep the
+least seen, and do not combine.
 
 The fixtures under `tests/duckdb` are DuckDB profiles of TPC-H (scale factor
 0.01) and some hand-written queries, regenerated by
-`scripts/duckdb_fixtures.sh`. It also checks the facts themselves: every
-derived size or distinct count of a context over base tables
-(`FactKind::count_sql`) is counted by DuckDB into `fact_checks.json`, which
-`facts_match_duckdb` compares against. Rerun the script whenever the derived
-facts change.
+`scripts/duckdb_fixtures.sh`. It also checks the facts themselves:
+`FactKind::count_sql` writes what any fact or bound counts as SQL, from what
+its context means rather than how a plan computed it (each instance a
+subquery with uniquely named columns, existence conditions as `EXISTS`,
+groups as `GROUP BY`, outer joins as outer joins). An aggregate's value is
+computed by the GROUP BY among the fact's rows whose context it names, by the
+definition the `FactSet` recorded when it read the plan. DuckDB counts
+each into `fact_checks.json`, which `facts_match_duckdb` compares against: a
+fact must equal its count, a bound be at least it. Rerun the script whenever
+the derived facts change.
+
+`tests/fact_truth.rs` does the same live, on many more queries: TPC-H, the
+fixtures, the larger queries in `tests/truth/queries.sql`, and generated ones
+(joins of every kind, grouped subqueries, nested and correlated semi and anti
+joins, `NOT IN` against NULLs), each profiled with one thread and with four.
+Every fact and bound is counted, no two plans may disagree, and each query's
+bounds with the facts must hold its true count. It needs the `duckdb` CLI.
 
 ```sh
 scripts/duckdb_fixtures.sh                          # profiles, true counts, fact checks
 cargo test --test facts                             # including facts_match_duckdb
 cargo test --test facts print_facts -- --nocapture  # every plan's contexts and facts
+CARDINAL_TRUTH_N=300 CARDINAL_TRUTH_SEED=11 \
+  cargo test --release --test fact_truth -- --nocapture
 ```
 
 ## Bounds from facts
@@ -419,8 +465,8 @@ normalized as a profile's are. A selectivity's value is then a lookup:
 ```rust
 let facts = facts::derive_facts(&plans);
 let informed = analysis.with_facts(&facts, FactMode::Ratios)?;
-informed.output;   // 10816/60175·|lineitem|
-informed.matched;  // s1 = 10816/60175 from s(lineitem.l_quantity < 10.00 | lineitem)
+informed.output;   // s1·|lineitem|: the filter is pushed into the scan
+informed.matched;  // the selectivities with a value from a fact
 informed.bounds()?;  // as Analysis::bounds, with the facts among the constraints
 informed.range()?;   // the proven lo <= X <= hi
 ```
@@ -435,8 +481,9 @@ disjoint subsets). Two modes:
   groups are the least likely to keep their share).
 - `FactMode::Pinned` also fixes every row count a fact gives: tables, and any
   operator whose context has a known size (a GROUP BY's from its distinct
-  count). This holds a join's size even where it was joined in another order,
-  and is exact for the data the facts were read from only.
+  count), and caps every operator whose context has an upper bound
+  (`capped`). This holds a join's size even where it was joined in another
+  order, and is exact for the data the facts were read from only.
 
 A value outside its selectivity's proven range, or contradicting the
 constraints, is `rejected`: a fact matched to the wrong rows, or data that

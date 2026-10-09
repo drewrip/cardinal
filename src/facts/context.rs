@@ -17,7 +17,7 @@ use datafusion::logical_expr::utils::{conjunction, disjunction, split_conjunctio
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::sql::unparser::Unparser;
 
-use super::FactKind;
+use super::{FactKind, rewrite};
 use crate::observed::{ObservedPlan, Op, Pred, base_table, column_key, qualified, relation, requalify};
 
 /// An expression in canonical form, ordered and compared by its text.
@@ -137,19 +137,49 @@ pub fn terms(exprs: impl IntoIterator<Item = Expr>) -> BTreeSet<Term> {
 }
 
 /// A set of rows, named by how they derive from the base tables.
+///
+/// Contexts are built in a normal form ([`super::rewrite`]), so that plans
+/// computing the same rows in a different order name them the same: inner
+/// joins, filters, and semi and anti joins all flatten into one
+/// [`Context::Spj`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Context {
-    /// The rows of the cross product of `tables` satisfying every predicate
-    /// in `preds`. No two tables are the same.
-    Spj { tables: BTreeSet<String>, preds: BTreeSet<Term> },
+    /// The rows of the cross product of `tables` and `atoms` satisfying every
+    /// predicate in `preds` and every condition in `exists`. No two inputs
+    /// draw on the same instance, and no atom is itself an `Spj`.
+    Spj { tables: BTreeSet<String>, atoms: BTreeSet<Context>, preds: BTreeSet<Term>, exists: BTreeSet<Exists> },
     /// Any other rows: those of operator `op` with arguments `args` over
     /// `inputs` (an outer join, a GROUP BY, ...). Precise, but specific.
     Derived { op: String, args: Vec<Term>, inputs: Vec<Context> },
 }
 
+/// A condition on each row of a context: whether it has a partner in
+/// `other` under `on`. This is what a semi or anti join keeps.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Exists {
+    pub kind: ExistsKind,
+    pub on: BTreeSet<Term>,
+    pub other: Context,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExistsKind {
+    /// Has a partner (a semi join, `EXISTS`, `IN`).
+    Semi,
+    /// Has none (an anti join, `NOT EXISTS`).
+    Anti,
+    /// `NOT IN`: has none, and `other` has no NULL to compare with.
+    NotIn,
+}
+
 impl Context {
     pub fn table(table: &str) -> Context {
-        Context::Spj { tables: [table.to_string()].into(), preds: BTreeSet::new() }
+        Context::Spj {
+            tables: [table.to_string()].into(),
+            atoms: BTreeSet::new(),
+            preds: BTreeSet::new(),
+            exists: BTreeSet::new(),
+        }
     }
 
     /// The rows of `self` satisfying `preds`.
@@ -157,17 +187,9 @@ impl Context {
         if preds.is_empty() {
             return self.clone();
         }
-        match self {
-            Context::Spj { tables, preds: p } => {
-                Context::Spj { tables: tables.clone(), preds: p.union(preds).cloned().collect() }
-            }
-            Context::Derived { op, args, inputs } if op == "σ" => Context::Derived {
-                op: op.clone(),
-                args: args.iter().chain(preds).cloned().collect::<BTreeSet<_>>().into_iter().collect(),
-                inputs: inputs.clone(),
-            },
-            c => Context::Derived { op: "σ".into(), args: preds.iter().cloned().collect(), inputs: vec![c.clone()] },
-        }
+        let mut s = rewrite::Spj::of(self);
+        s.preds.extend(preds.iter().cloned());
+        s.build()
     }
 
     /// The cross product of two contexts over different tables, or `None`
@@ -176,23 +198,25 @@ impl Context {
         if !self.tables().is_disjoint(&other.tables()) {
             return None;
         }
-        Some(match (self, other) {
-            (Context::Spj { tables: t1, preds: p1 }, Context::Spj { tables: t2, preds: p2 }) => Context::Spj {
-                tables: t1.union(t2).cloned().collect(),
-                preds: p1.union(p2).cloned().collect(),
-            },
-            (a, b) => {
-                let mut inputs = vec![a.clone(), b.clone()];
-                inputs.sort();
-                Context::Derived { op: "×".into(), args: vec![], inputs }
-            }
-        })
+        let mut s = rewrite::Spj::of(self);
+        s.merge(rewrite::Spj::of(other));
+        Some(s.build())
+    }
+
+    /// The rows of `self` with (or, by `kind`, without) a partner in `other`
+    /// under `on`.
+    pub fn exists(&self, kind: ExistsKind, on: BTreeSet<Term>, other: Context) -> Context {
+        let mut s = rewrite::Spj::of(self);
+        s.exists.insert(rewrite::decorrelate(self, Exists { kind, on, other }));
+        s.build()
     }
 
     /// The rows of a join other than an inner one, on `on`. A right join
     /// is named as the left join with its inputs swapped, and a full join's
     /// inputs are in order, so that each reads one way whichever side an
-    /// engine built.
+    /// engine built. A semi or anti join keeps its kept side's rows that
+    /// pass an [`Exists`] condition, and a left join is in the normal form
+    /// [`rewrite::left_join`] gives.
     pub fn join(kind: JoinType, on: BTreeSet<Term>, l: Context, r: Context) -> Context {
         let (kind, mut inputs) = match kind {
             JoinType::Right => (JoinType::Left, vec![r, l]),
@@ -201,43 +225,89 @@ impl Context {
             JoinType::RightMark => (JoinType::LeftMark, vec![r, l]),
             kind => (kind, vec![l, r]),
         };
-        if kind == JoinType::Full {
-            inputs.sort();
+        match kind {
+            JoinType::LeftSemi | JoinType::LeftAnti => {
+                let exists = if kind == JoinType::LeftSemi { ExistsKind::Semi } else { ExistsKind::Anti };
+                let other = inputs.pop().unwrap();
+                return inputs[0].exists(exists, on, other);
+            }
+            JoinType::Left => {
+                let r = inputs.pop().unwrap();
+                return rewrite::left_join(on, inputs.pop().unwrap(), r);
+            }
+            JoinType::Full => inputs.sort(),
+            _ => {}
         }
         Context::Derived { op: format!("{kind} join"), args: on.into_iter().collect(), inputs }
     }
 
-    /// The context with its table instances renamed by `f`.
+    /// The context with its table instances renamed by `f`, in normal form
+    /// for its new names.
     pub fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Context {
+        let terms = |ts: &BTreeSet<Term>| ts.iter().map(|t| t.rename(f)).collect::<BTreeSet<_>>();
         match self {
-            Context::Spj { tables, preds } => Context::Spj {
+            Context::Spj { tables, atoms, preds, exists } => rewrite::Spj {
                 tables: tables.iter().map(|t| f(t).unwrap_or_else(|| t.clone())).collect(),
-                preds: preds.iter().map(|p| p.rename(f)).collect(),
-            },
-            Context::Derived { op, args, inputs } => Context::Derived {
-                op: op.clone(),
-                args: args.iter().map(|a| a.rename(f)).collect::<BTreeSet<_>>().into_iter().collect(),
-                inputs: inputs.iter().map(|i| i.rename(f)).collect(),
-            },
+                atoms: atoms.iter().map(|a| a.rename(f)).collect(),
+                preds: terms(preds),
+                exists: exists
+                    .iter()
+                    .map(|e| Exists { kind: e.kind, on: terms(&e.on), other: e.other.rename(f) })
+                    .collect(),
+            }
+            .build(),
+            Context::Derived { op, args, inputs } => {
+                let mut inputs: Vec<Context> = inputs.iter().map(|i| i.rename(f)).collect();
+                // A GROUP BY's keys stay as written: what reads its rows names
+                // them so.
+                let args: BTreeSet<Term> = args.iter().map(|a| a.rename(f)).collect();
+                if op == "Left join" {
+                    let r = inputs.pop().unwrap();
+                    return rewrite::left_join(args, inputs.pop().unwrap(), r);
+                }
+                if op == "Full join" {
+                    inputs.sort();
+                }
+                Context::Derived { op: op.clone(), args: args.into_iter().collect(), inputs }
+            }
         }
     }
 
     /// Every table instance the rows draw on.
     pub fn tables(&self) -> BTreeSet<String> {
         match self {
-            Context::Spj { tables, .. } => tables.clone(),
+            Context::Spj { tables, atoms, exists, .. } => tables
+                .iter()
+                .cloned()
+                .chain(atoms.iter().flat_map(Context::tables))
+                .chain(exists.iter().flat_map(|e| e.other.tables()))
+                .collect(),
             Context::Derived { inputs, .. } => inputs.iter().flat_map(Context::tables).collect(),
         }
+    }
+}
+
+impl fmt::Display for Exists {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            ExistsKind::Semi => "exists",
+            ExistsKind::Anti => "not exists",
+            ExistsKind::NotIn => "not in",
+        };
+        write!(f, "{kind}[{}]({})", join(&self.on, " and "), self.other)
     }
 }
 
 impl fmt::Display for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Context::Spj { tables, preds } => {
-                write!(f, "{}", tables.iter().cloned().collect::<Vec<_>>().join(" × "))?;
-                if !preds.is_empty() {
-                    write!(f, " where {}", join(preds, " and "))?;
+            Context::Spj { tables, atoms, preds, exists } => {
+                let inputs: Vec<String> = tables.iter().cloned().chain(atoms.iter().map(ToString::to_string)).collect();
+                write!(f, "{}", inputs.join(" × "))?;
+                let conds: Vec<String> =
+                    std::iter::once(join(preds, " and ")).filter(|s| !s.is_empty()).chain(exists.iter().map(ToString::to_string)).collect();
+                if !conds.is_empty() {
+                    write!(f, " where {}", conds.join(" and "))?;
                 }
                 Ok(())
             }
@@ -299,7 +369,9 @@ pub enum Pending {
     /// output is the same whether or not it pruned, since it only removes
     /// rows without a partner.
     Join { column: Option<String>, text: String },
-    /// An optional filter, enforced by a filter above with the same predicate.
+    /// A filter pushed into a scan, which may have let through rows that
+    /// fail it: the rows are all of the context's, and maybe more, until a
+    /// filter above checks the same predicate. `None` if it did not resolve.
     Filter { term: Option<Term>, text: String },
 }
 
@@ -322,8 +394,9 @@ impl Pending {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Clean(Context),
-    /// Rows of the context, once the pending filters are enforced; until
-    /// then, some may be missing.
+    /// Rows of the context, once the pending filters are enforced. Until
+    /// then, a pending runtime filter may have removed some of them, and a
+    /// pending pushed filter may have let others through.
     Pending(Context, BTreeSet<Pending>),
     Tainted(Taint),
 }
@@ -332,6 +405,18 @@ impl State {
     pub fn clean(&self) -> Option<&Context> {
         match self {
             State::Clean(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A context whose rows are among these: the rows are its, and maybe
+    /// more, so `|context| <=` their count. Clean rows are exactly the
+    /// context's; pending ones are a superset when every pending filter is a
+    /// pushed filter that resolved, since none removed a row of the context.
+    pub fn upper(&self) -> Option<&Context> {
+        match self {
+            State::Clean(c) => Some(c),
+            State::Pending(c, p) if p.iter().all(|p| matches!(p, Pending::Filter { term: Some(_), .. })) => Some(c),
             _ => None,
         }
     }
@@ -357,6 +442,16 @@ fn pending_text(p: &Pending) -> String {
     match p {
         Pending::Join { text, .. } | Pending::Filter { text, .. } => text.clone(),
     }
+}
+
+/// A value computed by an aggregate, read as the column `"value"."{name}"`:
+/// `aggregate` over the rows `over` (a GROUP BY's or an aggregate's), the
+/// two named canonically together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Value {
+    pub name: String,
+    pub aggregate: Term,
+    pub over: Context,
 }
 
 /// Resolves references to values computed by aggregates (columns of
@@ -386,6 +481,12 @@ impl Values<'_> {
 
     /// `{aggregate} of {rows}` for output column `name` of aggregate `k`.
     fn value(&self, k: usize, name: &str) -> Option<String> {
+        self.definition(k, name).map(|d| d.name)
+    }
+
+    /// The value output as column `name` of aggregate `k`: its name, and the
+    /// aggregate and the rows it ran over, named canonically together.
+    fn definition(&self, k: usize, name: &str) -> Option<Value> {
         let node = &self.plan.nodes[k];
         let Op::Aggregate { keys, values } = &node.op else { return None };
         let i = node.columns.iter().position(|c| c.name == name)?.checked_sub(keys.len())?;
@@ -396,7 +497,19 @@ impl Values<'_> {
         else {
             unreachable!()
         };
-        Some(format!("{} of {over}", keys.first().unwrap()))
+        let aggregate = keys.into_iter().next().unwrap();
+        Some(Value { name: format!("{aggregate} of {over}"), aggregate, over })
+    }
+
+    /// Every value an aggregate of the plan outputs.
+    pub(crate) fn definitions(&self) -> Vec<Value> {
+        let mut out = vec![];
+        for (k, node) in self.plan.nodes.iter().enumerate() {
+            if let Op::Aggregate { .. } = node.op {
+                out.extend(node.columns.iter().filter_map(|c| self.definition(k, &c.name)));
+            }
+        }
+        out
     }
 
     /// Resolved, deterministic predicates, or why not.
@@ -422,19 +535,24 @@ fn unresolved(name: &str) -> DataFusionError {
     DataFusionError::Plan(format!("unresolved value {name}"))
 }
 
-/// Operators that may not have run to completion: below a `LIMIT`, and the
-/// probe side of a join whose build side was empty.
+/// Operators that may not have run to completion: below a `LIMIT`, the
+/// probe side of a join that output nothing, and a scan that says it was
+/// cut short.
 pub(crate) fn stopped(plan: &ObservedPlan) -> Vec<bool> {
     let mut stopped = vec![false; plan.nodes.len()];
     for i in (0..plan.nodes.len()).rev() {
         let node = &plan.nodes[i];
         let stops = match &node.op {
             Op::Limit => node.children.clone(),
-            Op::Join { kind, .. } if plan.nodes[node.children[1]].rows == 0 && !preserves_probe(*kind) => {
+            // A join that keeps only matched probe rows and output none may
+            // have stopped probing: its build side was empty, or had no key
+            // that could match (all NULL).
+            Op::Join { kind, .. } if (plan.nodes[node.children[1]].rows == 0 || node.rows == 0) && !preserves_probe(*kind) => {
                 vec![node.children[0]]
             }
             _ => vec![],
         };
+        stopped[i] |= node.cut_short;
         // A reused result was materialized in full before it was read: a
         // read cut short leaves it whole.
         if matches!(node.op, Op::Reuse { .. }) {
@@ -496,8 +614,13 @@ fn state(
     let node = &plan.nodes[i];
     match &node.op {
         Op::Scan { instance, filters, runtime_filters, .. } => {
+            // A filter pushed into a scan may be applied loosely (only to
+            // skip blocks, say): the scan's rows are the context's and maybe
+            // more, until a filter above checks the same predicate. Each is
+            // in the context, required or optional, so that the rows are a
+            // superset of the context's whichever were applied.
             let (optional, required): (Vec<Pred>, Vec<Pred>) = filters.iter().cloned().partition(|p| p.optional);
-            let preds = match values.resolve(&required) {
+            let mut preds = match values.resolve(&required) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -505,10 +628,12 @@ fn state(
                 .iter()
                 .map(|r| Pending::Join { column: r.column.clone(), text: r.text.clone() })
                 .collect();
-            pending.extend(optional.into_iter().map(|p| Pending::Filter {
-                term: p.expr.map(Term::new),
-                text: p.text,
-            }));
+            pending.extend(preds.iter().map(|t| Pending::Filter { term: Some(t.clone()), text: t.to_string() }));
+            for p in optional {
+                let term = p.expr.map(Term::new);
+                preds.extend(term.clone());
+                pending.insert(Pending::Filter { term, text: p.text });
+            }
             State::with(Context::table(instance).filter(&preds), pending)
         }
         Op::Project | Op::Sort | Op::Window => inputs[0].clone(),
@@ -546,9 +671,10 @@ fn state(
                 s => parts(s),
             };
             match c {
-                Context::Derived { op, args, inputs } if op == "LeftMark join" => {
-                    let op = if *negated { "LeftMark join, unmarked" } else { "LeftSemi join" };
-                    State::with(Context::Derived { op: op.into(), args, inputs }, pending)
+                Context::Derived { op, args, mut inputs } if op == "LeftMark join" => {
+                    let kind = if *negated { ExistsKind::NotIn } else { ExistsKind::Semi };
+                    let other = inputs.pop().unwrap();
+                    State::with(inputs[0].exists(kind, args.into_iter().collect(), other), pending)
                 }
                 _ => State::Tainted(Taint::Unsupported(node.engine_op.clone())),
             }
@@ -568,6 +694,21 @@ fn state(
             };
             if !l.tables().is_disjoint(&r.tables()) {
                 return State::Tainted(Taint::SelfJoin);
+            }
+            // Extra rows on a side give extra rows out only where the join
+            // keeps more for more input: not on the other side of an anti
+            // join, nor the padded side of an outer join, whose rows decide
+            // which rows are padded.
+            let (l_more, r_more) = match kind {
+                JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => (true, true),
+                JoinType::LeftAnti | JoinType::Left => (true, false),
+                JoinType::RightAnti | JoinType::Right => (false, true),
+                _ => (false, false),
+            };
+            let loose = |p: &BTreeSet<Pending>| p.iter().any(|p| matches!(p, Pending::Filter { .. }));
+            if (!l_more && loose(&lp)) || (!r_more && loose(&rp)) {
+                let pending = if !l_more && loose(&lp) { &lp } else { &rp };
+                return State::Tainted(Taint::Pruned(pending.iter().map(pending_text).collect::<Vec<_>>().join(", ")));
             }
             // The join enforces the runtime filters on its keys, where the
             // rows it prunes are ones it would drop anyway.

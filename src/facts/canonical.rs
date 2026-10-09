@@ -7,9 +7,9 @@
 //! least. Any renaming of instances of one table keeps a fact's meaning, so
 //! the least is a canonical form.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::{Context, FactKind, Term};
+use super::{Context, Exists, ExistsKind, FactKind, Term, rewrite};
 use crate::observed::base_table;
 
 /// More orders than this are not tried: instances are then numbered as they
@@ -19,7 +19,10 @@ const MAX_ORDERS: usize = 5040;
 impl FactKind {
     /// This fact with its table instances canonically renamed.
     pub fn canonical(&self) -> FactKind {
-        let instances = self.instances();
+        // Decorrelated first: the copy it takes out is no instance to name.
+        let decorrelated = self.decorrelated();
+        let this = decorrelated.as_ref().unwrap_or(self);
+        let instances = this.instances();
         let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
         for i in &instances {
             groups.entry(base_table(i).unwrap()).or_default().push(i);
@@ -28,30 +31,56 @@ impl FactKind {
         let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
         if orders.is_none_or(|n| n > MAX_ORDERS) {
             let names = groups.iter().map(|(_, g)| g.clone()).collect::<Vec<_>>();
-            return self.rename(&labels(&groups, &names));
+            return this.rename(&labels(&groups, &names));
         }
         let mut best: Option<FactKind> = None;
         let mut choice = vec![];
         each_order(&groups, 0, &mut choice, &mut |order| {
-            let candidate = self.rename(&labels(&groups, order));
+            let candidate = this.rename(&labels(&groups, order));
             if best.as_ref().is_none_or(|b| candidate < *b) {
                 best = Some(candidate);
             }
         });
-        best.unwrap_or_else(|| self.clone())
+        best.unwrap_or_else(|| this.clone())
     }
 
+    /// A match share on a copy of its kept side grouped on the correlated
+    /// columns, as a semi join of the kept side itself (see
+    /// [`rewrite::decorrelate`]). `None` if it is not one.
+    fn decorrelated(&self) -> Option<FactKind> {
+        let FactKind::Match { on, kept, other: before } = self else { return None };
+        let e = Exists { kind: ExistsKind::Semi, on: on.clone(), other: before.clone() };
+        let Exists { on, other, .. } = rewrite::decorrelate(kept, e);
+        (other != *before).then(|| FactKind::Match { on, kept: kept.clone(), other })
+    }
+
+    /// This fact with its instances renamed by `names`, in normal form:
+    /// contexts as [`rewrite`] builds them, a selectivity's predicates as its
+    /// rows with them write them, and keys and conditions with columns
+    /// written as the least column equal to them.
     fn rename(&self, names: &HashMap<String, String>) -> FactKind {
         let f = |r: &str| names.get(r).cloned();
-        let terms = |s: &std::collections::BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect();
+        let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
         match self {
             FactKind::Cardinality(c) => FactKind::Cardinality(c.rename(&f)),
-            FactKind::Selectivity { pred, over } => FactKind::Selectivity { pred: terms(pred), over: over.rename(&f) },
-            FactKind::Match { on, kept, other } => {
-                FactKind::Match { on: terms(on), kept: kept.rename(&f), other: other.rename(&f) }
+            FactKind::Selectivity { pred, over } => {
+                let (pred, over) = (terms(pred), over.rename(&f));
+                let delta = rewrite::delta(&over, &pred);
+                FactKind::Selectivity { pred: if delta.is_empty() { pred } else { delta }, over }
             }
-            FactKind::Distinct { keys, over } => FactKind::Distinct { keys: terms(keys), over: over.rename(&f) },
-            FactKind::Unique { keys, over } => FactKind::Unique { keys: terms(keys), over: over.rename(&f) },
+            FactKind::Match { on, kept, other } => {
+                let (kept, other) = (kept.rename(&f), other.rename(&f));
+                let on = rewrite::on(&other, &rewrite::on(&kept, &terms(on)));
+                FactKind::Match { on, kept, other }
+            }
+            FactKind::Distinct { keys, over } => {
+                let over = over.rename(&f);
+                FactKind::Distinct { keys: rewrite::keys(&over, &terms(keys)), over }
+            }
+            FactKind::Unique { keys, over } => {
+                let over = over.rename(&f);
+                FactKind::Unique { keys: rewrite::keys(&over, &terms(keys)), over }
+            }
         }
     }
 
@@ -81,38 +110,6 @@ impl FactKind {
         }
         out
     }
-
-    /// A query counting what this fact counts, if it is the size of, or the
-    /// distinct keys in, a context over base tables, to check it against
-    /// the engine.
-    pub fn count_sql(&self) -> Option<String> {
-        let (keys, over) = match self {
-            FactKind::Cardinality(c) => (None, c),
-            FactKind::Distinct { keys, over } => (Some(keys), over),
-            _ => return None,
-        };
-        let Context::Spj { tables, preds } = over else { return None };
-        let opaque = |t: &Term| t.expr.column_refs().iter().any(|c| c.relation.as_ref().is_some_and(|r| r.table() == "value"));
-        if preds.iter().chain(keys.into_iter().flatten()).any(opaque) {
-            return None;
-        }
-        let from = tables
-            .iter()
-            .map(|t| format!("{} AS \"{t}\"", t.split('@').next().unwrap()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let filter = match preds.is_empty() {
-            true => String::new(),
-            false => format!(" WHERE {}", preds.iter().map(|p| format!("({p})")).collect::<Vec<_>>().join(" AND ")),
-        };
-        Some(match keys {
-            None => format!("SELECT count(*) FROM {from}{filter}"),
-            Some(keys) => {
-                let keys = keys.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-                format!("SELECT count(*) FROM (SELECT DISTINCT {keys} FROM {from}{filter})")
-            }
-        })
-    }
 }
 
 impl Context {
@@ -127,12 +124,21 @@ impl Context {
 
 fn context_instances(c: &Context, out: &mut Vec<String>) {
     match c {
-        Context::Spj { tables, preds } => {
+        Context::Spj { tables, atoms, preds, exists } => {
             for t in tables {
                 push(t, out);
             }
+            for a in atoms {
+                context_instances(a, out);
+            }
             for p in preds {
                 term_instances(p, out);
+            }
+            for e in exists {
+                context_instances(&e.other, out);
+                for t in &e.on {
+                    term_instances(t, out);
+                }
             }
         }
         Context::Derived { args, inputs, .. } => {

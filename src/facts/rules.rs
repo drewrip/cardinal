@@ -6,7 +6,7 @@
 
 use datafusion::common::JoinType;
 
-use super::context::{Context, State, Values, states, stopped};
+use super::context::{Context, State, Value, Values, states, stopped};
 use super::{Fact, FactKind, Origin, Ratio};
 use crate::observed::{ObservedPlan, Op};
 
@@ -25,24 +25,45 @@ pub struct Observation<'a> {
     values: Values<'a>,
 }
 
-/// Every fact the rules read off `plan`, canonically named.
-pub(crate) fn observe(plan: &ObservedPlan) -> Vec<Fact> {
+/// Every fact the rules read off `plan`, every upper bound, canonically
+/// named, and the definition of every value they may read.
+pub(crate) fn observe(plan: &ObservedPlan) -> (Vec<Fact>, Vec<Fact>, Vec<Value>) {
     let states = states(plan);
     let stopped = stopped(plan);
     let obs = Observation { plan, states: &states, values: Values { plan, states: &states, stopped: &stopped } };
     let mut facts = vec![];
+    let mut bounds = vec![];
+    let fact = |kind: FactKind, value, node, rule| Fact {
+        kind: kind.canonical(),
+        value,
+        origins: vec![Origin::Observed { query: plan.name.clone(), node, rule }],
+    };
     for node in 0..plan.nodes.len() {
         for rule in RULES {
             let mut out = vec![];
             rule.apply(&obs, node, &mut out);
-            facts.extend(out.into_iter().map(|(kind, value)| Fact {
-                kind: kind.canonical(),
-                value,
-                origins: vec![Origin::Observed { query: plan.name.clone(), node, rule: rule.name() }],
-            }));
+            facts.extend(out.into_iter().map(|(kind, value)| fact(kind, value, node, rule.name())));
         }
+        bounds.extend(upper_bound(&obs, node).map(|(kind, value)| fact(kind, value, node, "upper bound")));
     }
-    facts
+    (facts, bounds, obs.values.definitions())
+}
+
+/// `|ctx| <= rows` for an operator whose rows may include more than its
+/// context's: those of a scan with a filter pushed into it, and of what
+/// keeps all of them above. For a GROUP BY over such rows, its keys'
+/// distinct values over them are at most its rows.
+fn upper_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
+    let n = &obs.plan.nodes[node];
+    if let State::Pending(..) = obs.states[node] {
+        let ctx = obs.states[node].upper()?;
+        return Some((FactKind::Cardinality(ctx.clone()), Ratio::int(n.rows)));
+    }
+    let Op::Aggregate { keys, .. } = &n.op else { return None };
+    let input = &obs.states[n.children[0]];
+    let (State::Pending(..), Some(over)) = (input, input.upper()) else { return None };
+    let keys = obs.values.keys(keys).filter(|k| !k.is_empty())?;
+    Some((FactKind::Distinct { keys, over: over.clone() }, Ratio::int(n.rows)))
 }
 
 /// The clean contexts of `node` and of its inputs, with their row counts.
@@ -59,8 +80,9 @@ fn clean<'s>(obs: &Observation<'s>, node: usize) -> Option<(&'s Context, Vec<(&'
 
 /// `|ctx| = rows` for any operator whose rows have a context: base-table
 /// sizes from unfiltered scans, filtered sizes from scans with pushed-down
-/// predicates, and the sizes of joins. Aggregates, and operators passing
-/// their rows on, are left to [`DistinctCount`].
+/// predicates, and the sizes of joins. A GROUP BY's rows are its keys'
+/// distinct values over its input, as a filter on its keys above it reads
+/// once it goes below ([`DistinctCount`] reads the GROUP BY itself).
 pub struct Cardinality;
 
 impl FactRule for Cardinality {
@@ -70,9 +92,14 @@ impl FactRule for Cardinality {
 
     fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
         let n = &obs.plan.nodes[node];
-        let grouped = |c: &Context| matches!(c, Context::Derived { op, .. } if op == "group" || op == "aggregate");
-        if let Some(ctx) = obs.states[node].clean().filter(|c| !grouped(c)) {
-            out.push((FactKind::Cardinality(ctx.clone()), Ratio::int(n.rows)));
+        match obs.states[node].clean() {
+            Some(Context::Derived { op, args, inputs }) if op == "group" => {
+                let keys = args.iter().cloned().collect();
+                out.push((FactKind::Distinct { keys, over: inputs[0].clone() }, Ratio::int(n.rows)));
+            }
+            Some(Context::Derived { op, .. }) if op == "aggregate" => {}
+            Some(ctx) => out.push((FactKind::Cardinality(ctx.clone()), Ratio::int(n.rows))),
+            None => {}
         }
     }
 }

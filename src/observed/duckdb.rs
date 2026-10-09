@@ -117,7 +117,9 @@ impl Builder<'_> {
         {
             kids = vec![self.nodes[*c].children[0]];
         }
-        self.nodes.push(ONode { op, rows, children: kids, columns, ordered, engine_op: ty.to_string() });
+        let scanned = v.get("operator_rows_scanned").and_then(Value::as_u64);
+        let cut_short = matches!(op, Op::Scan { .. }) && scanned.is_some_and(|s| s < rows);
+        self.nodes.push(ONode { op, rows, children: kids, columns, ordered, engine_op: ty.to_string(), cut_short });
         Ok(self.nodes.len() - 1)
     }
 
@@ -137,6 +139,7 @@ impl Builder<'_> {
             columns,
             ordered: self.nodes[of].ordered,
             engine_op: engine_op.to_string(),
+            cut_short: false,
         };
         self.nodes.push(node);
         id
@@ -171,6 +174,7 @@ impl Builder<'_> {
             columns: keys.clone(),
             ordered: true,
             engine_op: distinct.get("operator_type").and_then(Value::as_str).unwrap_or("HASH_GROUP_BY").to_string(),
+            cut_short: false,
         };
         self.nodes.push(g);
         let g = self.nodes.len() - 1;
@@ -429,7 +433,11 @@ impl Builder<'_> {
         let Some(kind) = strings(info, "Join Type").first().and_then(|t| join_type(t)) else {
             return (Op::Other, vec![], false);
         };
-        let on = strings(info, "Conditions").iter().map(|c| self.condition(c, l, r)).collect();
+        let mut on: Vec<Pred> = strings(info, "Conditions").iter().map(|c| self.condition(c, l, r)).collect();
+        // A nested loop join gives its condition as one expression over both
+        // sides' columns. Unread, the join would read as one on nothing.
+        let both: Vec<OutCol> = l.columns.iter().chain(&r.columns).cloned().collect();
+        on.extend(strings(info, "Condition").iter().flat_map(|c| self.pred(c, &both, false, false)));
         let columns = match kind {
             JoinType::LeftSemi | JoinType::LeftAnti => l.columns.clone(),
             JoinType::RightSemi | JoinType::RightAnti => r.columns.clone(),

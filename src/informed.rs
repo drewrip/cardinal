@@ -73,6 +73,8 @@ pub struct Informed {
     pub rejected: Vec<(String, String)>,
     /// Operator variables pinned to a known row count.
     pub pinned: Vec<(String, u64)>,
+    /// Operator variables capped by a known upper bound on their rows.
+    pub capped: Vec<(String, u64)>,
     /// Selectivities whose relation to the constraints could not be checked
     /// in time, and so is not among them.
     pub unchecked: Vec<String>,
@@ -202,8 +204,10 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         }
     }
 
-    // Pinned: every row count a fact gives, where consistent.
+    // Pinned: every row count a fact gives, and every upper bound on one,
+    // where consistent.
     let mut pinned = vec![];
+    let mut capped = vec![];
     if mode == FactMode::Pinned {
         for (var, n) in lookup.sizes() {
             let claim = Int::new_const(var.as_str()).eq(Int::from_u64(n));
@@ -213,6 +217,20 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
                     pinned.push((var, n));
                 }
                 Some(false) => rejected.push((var, format!("{n} rows contradicts the constraints"))),
+                None => {}
+            }
+        }
+        for (var, n) in lookup.caps() {
+            if pinned.iter().any(|(p, _)| *p == var) {
+                continue;
+            }
+            let claim = Int::new_const(var.as_str()).le(Int::from_u64(n));
+            match search.assume(&claim) {
+                Some(true) => {
+                    extra.push(claim);
+                    capped.push((var, n));
+                }
+                Some(false) => rejected.push((var, format!("at most {n} rows contradicts the constraints"))),
                 None => {}
             }
         }
@@ -256,6 +274,7 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         unmatched,
         rejected,
         pinned,
+        capped,
         unchecked,
         report: report.clone(),
         constraints,
@@ -434,6 +453,25 @@ impl<'a> Lookup<'a> {
             }
             Kind::Limit => Err("a limit".into()),
         }
+    }
+
+    /// Every operator's upper bound on its rows that a bound gives, by
+    /// variable.
+    fn caps(&self) -> Vec<(String, u64)> {
+        let mut out = vec![];
+        for (i, node) in self.nodes.iter().enumerate() {
+            let Ok(ctx) = &self.logical.contexts[i] else { continue };
+            let kind = match ctx {
+                Context::Derived { op, args, inputs } if op == "group" => {
+                    FactKind::Distinct { keys: args.iter().cloned().collect(), over: inputs[0].clone() }
+                }
+                ctx => FactKind::Cardinality(ctx.clone()),
+            };
+            if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
+                out.push((node.var.clone(), n));
+            }
+        }
+        out
     }
 
     /// Every operator's row count that a fact gives, by variable.

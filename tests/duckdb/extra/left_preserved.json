@@ -1,0 +1,129 @@
+{
+    "total_memory_allocated": 4194304,
+    "total_bytes_written": 0,
+    "total_bytes_read": 524288,
+    "system_peak_temp_dir_size": 0,
+    "system_peak_buffer_memory": 5308416,
+    "rows_returned": 0,
+    "result_set_size": 0,
+    "latency": 0.001811625,
+    "wal_replay_entry_count": 0,
+    "extra_info": {},
+    "commit_local_storage_latency": 0.0,
+    "attach_load_storage_latency": 0.0,
+    "query_name": "EXPLAIN (ANALYZE, FORMAT JSON)\nselect c_custkey, o_orderkey from customer left join orders on c_custkey = o_custkey and o_totalprice > 300000 where c_acctbal > 5000\n;",
+    "cpu_time": 0.000261706,
+    "checkpoint_latency": 0.0,
+    "cumulative_cardinality": 2313,
+    "waiting_to_attach_latency": 0.0,
+    "write_to_wal_latency": 0.0,
+    "attach_replay_wal_latency": 0.0,
+    "blocked_thread_time": 0.0,
+    "cumulative_rows_scanned": 16500,
+    "children": [
+        {
+            "system_peak_temp_dir_size": 0,
+            "result_set_size": 0,
+            "operator_type": "EXPLAIN_ANALYZE",
+            "operator_timing": 1.25e-7,
+            "operator_rows_scanned": 0,
+            "extra_info": {},
+            "system_peak_buffer_memory": 0,
+            "cumulative_rows_scanned": 16500,
+            "cpu_time": 0.000261706,
+            "operator_name": "EXPLAIN_ANALYZE",
+            "cumulative_cardinality": 2313,
+            "operator_cardinality": 0,
+            "children": [
+                {
+                    "cumulative_cardinality": 2313,
+                    "operator_cardinality": 715,
+                    "cumulative_rows_scanned": 16500,
+                    "operator_name": "PROJECTION",
+                    "cpu_time": 0.000261581,
+                    "operator_rows_scanned": 0,
+                    "system_peak_buffer_memory": 0,
+                    "extra_info": {
+                        "Projections": [
+                            "c_custkey",
+                            "o_orderkey"
+                        ],
+                        "Estimated Cardinality": "3000"
+                    },
+                    "operator_timing": 3.7400000000000004e-7,
+                    "system_peak_temp_dir_size": 0,
+                    "result_set_size": 11440,
+                    "operator_type": "PROJECTION",
+                    "children": [
+                        {
+                            "system_peak_temp_dir_size": 0,
+                            "result_set_size": 11440,
+                            "operator_type": "HASH_JOIN",
+                            "operator_timing": 0.00011029200000000001,
+                            "operator_rows_scanned": 0,
+                            "extra_info": {
+                                "Join Type": "RIGHT",
+                                "Conditions": "o_custkey = c_custkey",
+                                "Estimated Cardinality": "3000"
+                            },
+                            "system_peak_buffer_memory": 0,
+                            "cumulative_rows_scanned": 16500,
+                            "cpu_time": 0.000261207,
+                            "operator_name": "HASH_JOIN",
+                            "cumulative_cardinality": 1598,
+                            "operator_cardinality": 715,
+                            "children": [
+                                {
+                                    "cumulative_cardinality": 224,
+                                    "operator_cardinality": 224,
+                                    "cumulative_rows_scanned": 15000,
+                                    "operator_name": "SEQ_SCAN",
+                                    "cpu_time": 0.00009587300000000001,
+                                    "operator_rows_scanned": 15000,
+                                    "system_peak_buffer_memory": 0,
+                                    "extra_info": {
+                                        "Table": "tpch.main.orders",
+                                        "Type": "Sequential Scan",
+                                        "Projections": [
+                                            "o_custkey",
+                                            "o_orderkey"
+                                        ],
+                                        "Filters": "o_totalprice>300000.00",
+                                        "Dynamic Filters": "optional: o_custkey>=3 AND optional: o_custkey<=1500 AND optional: o_custkey IN BF(c_custkey)",
+                                        "Estimated Cardinality": "3000"
+                                    },
+                                    "operator_timing": 0.00009587300000000001,
+                                    "system_peak_temp_dir_size": 0,
+                                    "result_set_size": 3584,
+                                    "operator_type": "TABLE_SCAN",
+                                    "children": []
+                                },
+                                {
+                                    "cumulative_cardinality": 659,
+                                    "operator_cardinality": 659,
+                                    "cumulative_rows_scanned": 1500,
+                                    "operator_name": "SEQ_SCAN",
+                                    "cpu_time": 0.000055042,
+                                    "operator_rows_scanned": 1500,
+                                    "system_peak_buffer_memory": 0,
+                                    "extra_info": {
+                                        "Table": "tpch.main.customer",
+                                        "Type": "Sequential Scan",
+                                        "Projections": "c_custkey",
+                                        "Filters": "c_acctbal>5000.00",
+                                        "Estimated Cardinality": "300"
+                                    },
+                                    "operator_timing": 0.000055042,
+                                    "system_peak_temp_dir_size": 0,
+                                    "result_set_size": 5272,
+                                    "operator_type": "TABLE_SCAN",
+                                    "children": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

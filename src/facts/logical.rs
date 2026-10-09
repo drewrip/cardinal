@@ -19,7 +19,7 @@ use datafusion::logical_expr::logical_plan::{Distinct, LogicalPlan};
 use datafusion::logical_expr::utils::split_conjunction_owned;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, Taint, Term};
+use super::context::{Context, ExistsKind, Taint, Term};
 use super::FactKind;
 use crate::analyzer::Node;
 use crate::observed::{base_table, normalize, qualified};
@@ -266,16 +266,14 @@ fn group(input: Result<Context, Taint>, keys: Option<BTreeSet<Term>>) -> Result<
 }
 
 /// A join's rows, as `context::state` names them. A null-aware anti join is
-/// `NOT IN`, which an executed plan shows as an unmarked mark join.
+/// `NOT IN`, which an executed plan shows as a mark join filtered on its mark.
 fn join_context(kind: JoinType, null_aware: bool, l: Context, r: Context, on: &BTreeSet<Term>) -> Result<Context, Taint> {
     if !l.tables().is_disjoint(&r.tables()) {
         return Err(Taint::SelfJoin);
     }
     Ok(match kind {
         JoinType::Inner => l.cross(&r).unwrap().filter(on),
-        JoinType::LeftAnti if null_aware => {
-            Context::Derived { op: "LeftMark join, unmarked".into(), args: on.iter().cloned().collect(), inputs: vec![l, r] }
-        }
+        JoinType::LeftAnti if null_aware => l.exists(ExistsKind::NotIn, on.clone(), r),
         kind => Context::join(kind, on.clone(), l, r),
     })
 }

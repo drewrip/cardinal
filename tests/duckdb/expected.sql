@@ -25,4 +25,8 @@ UNION ALL SELECT 'having sum>200', count(*) FROM (SELECT l_orderkey FROM lineite
 UNION ALL SELECT 'price>avg', count(*) FROM lineitem WHERE l_extendedprice > (SELECT avg(l_extendedprice) FROM lineitem)
 UNION ALL SELECT 'ndv(year|orders,price>100000)', count(DISTINCT extract(year FROM o_orderdate)) FROM orders WHERE o_totalprice > 100000
 UNION ALL SELECT 'orders|price>100000', count(*) FROM orders WHERE o_totalprice > 100000
-UNION ALL SELECT 'ndv(o_custkey|orders)', count(DISTINCT o_custkey) FROM orders;
+UNION ALL SELECT 'ndv(o_custkey|orders)', count(DISTINCT o_custkey) FROM orders
+UNION ALL SELECT 'customer⟕orders>300000|acctbal>5000', count(*) FROM customer LEFT JOIN orders ON c_custkey = o_custkey AND o_totalprice > 300000 WHERE c_acctbal > 5000
+UNION ALL SELECT 'customer⋈orders|price>300000', count(*) FROM customer, orders WHERE c_custkey = o_custkey AND o_totalprice > 300000
+UNION ALL SELECT 'nation⋈customer⟕orders>300000|region=1', count(*) FROM nation JOIN customer ON n_nationkey = c_nationkey LEFT JOIN orders ON c_custkey = o_custkey AND o_totalprice > 300000 WHERE n_regionkey = 1
+UNION ALL SELECT 'ndv(l_suppkey|lineitem,l_suppkey<50)', count(DISTINCT l_suppkey) FROM lineitem WHERE l_suppkey < 50;

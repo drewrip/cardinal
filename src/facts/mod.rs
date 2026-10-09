@@ -11,10 +11,13 @@ mod canonical;
 mod context;
 mod derive;
 pub(crate) mod logical;
+mod rewrite;
 mod rules;
+mod sql;
 
-pub use context::{Context, Pending, State, Taint, Term, states};
+pub use context::{Context, Exists, ExistsKind, Pending, State, Taint, Term, Value, states};
 pub use rules::{FactRule, Observation, RULES};
+pub use sql::Counts;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -183,10 +186,15 @@ pub struct Conflict {
     pub origins: (Vec<Origin>, Vec<Origin>),
 }
 
-/// Facts, one per kind.
+/// Facts, one per kind, and upper bounds on what no fact gives exactly.
 #[derive(Debug, Clone, Default)]
 pub struct FactSet {
     facts: BTreeMap<FactKind, Fact>,
+    /// The least upper bound seen on each size or distinct count: the rows
+    /// of an operator that may have let through more than its context's.
+    bounds: BTreeMap<FactKind, Fact>,
+    /// What each aggregate value the facts read is, by name.
+    values: BTreeMap<String, Value>,
     pub conflicts: Vec<Conflict>,
 }
 
@@ -222,20 +230,87 @@ impl FactSet {
         }
     }
 
-    /// Adds every fact the rules read off `plan`.
+    /// Adds an upper bound, keeping the least known. A bound below the
+    /// exact value is recorded as a conflict.
+    pub fn insert_bound(&mut self, bound: Fact) {
+        match self.bounds.get_mut(&bound.kind) {
+            Some(known) if known.value < bound.value => {}
+            Some(known) if known.value == bound.value => {
+                for o in bound.origins {
+                    if !known.origins.contains(&o) {
+                        known.origins.push(o);
+                    }
+                }
+            }
+            _ => {
+                self.bounds.insert(bound.kind.clone(), bound);
+            }
+        }
+    }
+
+    /// Adds every fact and bound the rules read off `plan`.
     pub fn observe(&mut self, plan: &ObservedPlan) {
-        for fact in rules::observe(plan) {
+        let (facts, bounds, values) = rules::observe(plan);
+        for fact in facts {
             self.insert(fact);
+        }
+        for bound in bounds {
+            self.insert_bound(bound);
+        }
+        for value in values {
+            self.insert_value(value);
         }
     }
 
     /// Adds everything that follows from the facts, until nothing new does.
     pub fn close(&mut self) {
         derive::close(self);
+        self.check_bounds();
     }
 
     pub fn get(&self, kind: &FactKind) -> Option<&Fact> {
         self.facts.get(kind)
+    }
+
+    /// Records what an aggregate value is. A name says what it is, so two
+    /// definitions of one name agree.
+    pub fn insert_value(&mut self, value: Value) {
+        self.values.entry(value.name.clone()).or_insert(value);
+    }
+
+    /// What the value read as `"value"."{name}"` is.
+    pub fn value(&self, name: &str) -> Option<&Value> {
+        self.values.get(name)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.values.values()
+    }
+
+    /// The least upper bound known on `kind`, a size or distinct count.
+    pub fn bound(&self, kind: &FactKind) -> Option<&Fact> {
+        self.bounds.get(kind)
+    }
+
+    pub fn bounds(&self) -> impl Iterator<Item = &Fact> {
+        self.bounds.values()
+    }
+
+    /// Records as a conflict each bound below its kind's exact value: the
+    /// rows were named wrongly, or the data changed.
+    fn check_bounds(&mut self) {
+        for (kind, bound) in &self.bounds {
+            if let Some(exact) = self.facts.get(kind)
+                && exact.value > bound.value
+                && !self.conflicts.iter().any(|c| c.kind == *kind && c.values == (exact.value, bound.value))
+            {
+                self.conflicts.push(Conflict {
+                    kind: kind.clone(),
+                    values: (exact.value, bound.value),
+                    origins: (exact.origins.clone(), bound.origins.clone()),
+                });
+            }
+        }
     }
 
     /// The fact printed as `text` (without its value), e.g. `|lineitem|`.
@@ -260,6 +335,9 @@ impl fmt::Display for FactSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for fact in self.facts.values() {
             writeln!(f, "{fact}")?;
+        }
+        for bound in self.bounds.values() {
+            writeln!(f, "{} <= {}", bound.kind, bound.value)?;
         }
         for c in &self.conflicts {
             writeln!(f, "CONFLICT {} = {} vs {}", c.kind, c.values.0, c.values.1)?;

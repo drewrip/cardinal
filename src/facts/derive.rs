@@ -3,13 +3,15 @@
 //! Rows counted in one plan and a filter measured in another combine: a
 //! filtered size over a base size is a selectivity, a selectivity times its
 //! input's size is a size, a join's size over the sizes of its inputs is a
-//! join selectivity, and a semi join's over its kept side's is a match share. These are applied
-//! until nothing new follows. Every fact is exact, so this terminates: the
-//! contexts it can reach are combinations of ones already known.
+//! join selectivity, and a semi join's over its kept side's is a match share.
+//! These are applied until nothing new follows. Every fact is exact, so this
+//! terminates: the contexts it can reach are combinations of ones already
+//! known.
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::{Context, Fact, FactKind, FactSet, Origin, Ratio, Term};
+use super::rewrite::Spj;
+use super::{Context, Exists, ExistsKind, Fact, FactKind, FactSet, Origin, Ratio, Term};
 
 pub(super) fn close(set: &mut FactSet) {
     loop {
@@ -23,6 +25,16 @@ pub(super) fn close(set: &mut FactSet) {
     }
 }
 
+/// An SPJ's parts: its tables, atoms, predicates and conditions.
+type Parts<'a> = (&'a BTreeSet<String>, &'a BTreeSet<Context>, &'a BTreeSet<Term>, &'a BTreeSet<Exists>);
+
+fn parts(c: &Context) -> Option<Parts<'_>> {
+    match c {
+        Context::Spj { tables, atoms, preds, exists } => Some((tables, atoms, preds, exists)),
+        _ => None,
+    }
+}
+
 fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
     let mut out = vec![];
     let cards: HashMap<&Context, Ratio> = set
@@ -32,40 +44,36 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
             _ => None,
         })
         .collect();
-    let spj: Vec<(&BTreeSet<String>, &BTreeSet<_>, &Context, Ratio)> = cards
-        .iter()
-        .filter_map(|(c, v)| match c {
-            Context::Spj { tables, preds } => Some((tables, preds, *c, *v)),
-            _ => None,
-        })
-        .collect();
-    let mut by_tables: HashMap<&BTreeSet<String>, Vec<usize>> = HashMap::new();
-    for (i, (tables, ..)) in spj.iter().enumerate() {
-        by_tables.entry(*tables).or_default().push(i);
+    let spj: Vec<(Parts, &Context, Ratio)> = cards.iter().filter_map(|(c, v)| Some((parts(c)?, *c, *v))).collect();
+    // By inputs: tables and atoms.
+    let mut by_inputs: HashMap<(&BTreeSet<String>, &BTreeSet<Context>), Vec<usize>> = HashMap::new();
+    for (i, ((tables, atoms, ..), ..)) in spj.iter().enumerate() {
+        by_inputs.entry((*tables, *atoms)).or_default().push(i);
     }
 
-    // Ratio: |C ∧ p| / |C| = s(p | C).
-    for group in by_tables.values() {
+    // Ratio: |C ∧ p| / |C| = s(p | C), where C ∧ p has C's inputs and
+    // conditions, and predicates that are C's with p.
+    for group in by_inputs.values() {
         for &i in group {
             for &j in group {
-                let ((_, p1, c1, v1), (_, p2, _, v2)) = (spj[i], spj[j]);
-                if p1.len() < p2.len() && p1.is_subset(p2) {
-                    let pred = p2.difference(p1).cloned().collect();
-                    if let Some(s) = v2.over(v1) {
-                        out.push((FactKind::Selectivity { pred, over: c1.clone() }, s, "ratio"));
-                    }
+                let (((_, _, p1, e1), c1, v1), ((_, _, p2, e2), c2, v2)) = (&spj[i], &spj[j]);
+                if i == j || e1 != e2 || p1.len() > p2.len() || c1.filter(p2) != **c2 {
+                    continue;
+                }
+                let pred: BTreeSet<Term> = p2.difference(p1).cloned().collect();
+                if let (false, Some(s)) = (pred.is_empty(), v2.over(*v1)) {
+                    out.push((FactKind::Selectivity { pred, over: (*c1).clone() }, s, "ratio"));
                 }
             }
         }
     }
-    for (c, v) in &cards {
-        if let Context::Derived { op, args, inputs } = c
-            && op == "σ"
-            && let Some(input) = cards.get(&inputs[0])
-            && let Some(s) = v.over(*input)
-        {
-            let pred = args.iter().cloned().collect();
-            out.push((FactKind::Selectivity { pred, over: inputs[0].clone() }, s, "ratio"));
+    // A filter over one atom: |σp(G)| / |G|.
+    for &((tables, atoms, preds, exists), _, v) in &spj {
+        if tables.is_empty() && atoms.len() == 1 && exists.is_empty() && !preds.is_empty() {
+            let atom = atoms.first().unwrap();
+            if let Some(s) = cards.get(atom).and_then(|n| v.over(*n)) {
+                out.push((FactKind::Selectivity { pred: preds.clone(), over: atom.clone() }, s, "ratio"));
+            }
         }
     }
 
@@ -77,7 +85,7 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
         if let Some(n) = cards.get(over).and_then(|n| n.times(f.value)).filter(|n| n.as_int().is_some()) {
             out.push((FactKind::Cardinality(target.clone()), n, "product"));
         }
-        let cross = matches!(over, Context::Spj { tables, .. } if tables.len() > 1);
+        let cross = matches!(parts(over), Some((tables, atoms, ..)) if tables.len() + atoms.len() > 1);
         if let (false, Some(n)) = (cross, cards.get(&target).and_then(|n| n.over(f.value)))
             && n.as_int().is_some()
         {
@@ -85,85 +93,103 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
         }
     }
 
-    // Join: s(rest | L × R) = |C| / (|L| · |R|), where C draws on the tables
-    // of L and R and satisfies their predicates, and `rest` are its other
-    // predicates, at least one of which relates the two sides.
-    for &(tables, preds, _, cv) in &spj {
-        if tables.len() < 2 {
+    // Join: s(rest | L × R) = |C| / (|L| · |R|), where C's inputs are L's
+    // and R's, C is L × R with more predicates, `rest`, and at least one of
+    // them relates the two sides.
+    for &((tables, atoms, preds, exists), c, cv) in &spj {
+        if tables.len() + atoms.len() < 2 {
             continue;
         }
-        for &(lt, lp, l, lv) in &spj {
-            if lt.len() >= tables.len() || !lt.is_subset(tables) || !lp.is_subset(preds) {
+        for &((lt, la, _, le), l, lv) in &spj {
+            if lt.len() + la.len() >= tables.len() + atoms.len()
+                || !lt.is_subset(tables)
+                || !la.is_subset(atoms)
+                || !le.is_subset(exists)
+            {
                 continue;
             }
             let rt: BTreeSet<String> = tables.difference(lt).cloned().collect();
-            for &k in by_tables.get(&rt).into_iter().flatten() {
-                let (_, rp, r, rv) = spj[k];
-                if !rp.is_subset(preds) || l > r {
+            let ra: BTreeSet<Context> = atoms.difference(la).cloned().collect();
+            for &k in by_inputs.get(&(&rt, &ra)).into_iter().flatten() {
+                let ((_, _, _, re), r, rv) = spj[k];
+                if !re.is_subset(exists) || l > r {
                     continue;
                 }
-                let rest: BTreeSet<Term> = preds.iter().filter(|p| !lp.contains(p) && !rp.contains(p)).cloned().collect();
+                let Some(over) = l.cross(r) else { continue };
+                if over.filter(preds) != *c {
+                    continue;
+                }
+                let Some((_, _, op, _)) = parts(&over) else { continue };
+                let rest: BTreeSet<Term> = preds.difference(op).cloned().collect();
+                let (ls, rs) = (l.tables(), r.tables());
                 let relates = rest.iter().any(|p| {
                     let used: BTreeSet<String> = p.expr.column_refs().iter().filter_map(|c| c.relation.as_ref().map(|r| r.table().to_string())).collect();
-                    !used.is_disjoint(lt) && !used.is_disjoint(&rt)
+                    !used.is_disjoint(&ls) && !used.is_disjoint(&rs)
                 });
-                if let (true, Some(over), Some(s)) = (relates, l.cross(r), lv.times(rv).and_then(|lr| cv.over(lr))) {
+                if let (true, Some(s)) = (relates, lv.times(rv).and_then(|lr| cv.over(lr))) {
                     out.push((FactKind::Selectivity { pred: rest, over }, s, "join"));
                 }
             }
         }
     }
 
-    // Match: a semi or anti join's size over its kept side's, the first
-    // (`Context::join` names a right one as a left one).
-    for (c, v) in &cards {
-        let Context::Derived { op, args, inputs } = c else { continue };
-        let semi = match op.as_str() {
-            "LeftSemi join" => true,
-            "LeftAnti join" => false,
-            _ => continue,
-        };
-        let (kept, other) = (&inputs[0], &inputs[1]);
-        // Named as a fact of its own, kept may read differently.
-        let Some(n) = cards.get(&kept.canonical()).and_then(|k| k.as_int()) else { continue };
-        let Some(rows) = v.as_int() else { continue };
-        let matched = if semi { Some(rows) } else { n.checked_sub(rows) };
-        if let Some(m) = matched.and_then(|m| Ratio::new(m, n)) {
-            let on = args.iter().cloned().collect();
-            out.push((FactKind::Match { on, kept: kept.clone(), other: other.clone() }, m, "match"));
+    // Match: a context with a semi or anti condition, over the same without
+    // it, is the share of its rows with a partner.
+    for &((tables, atoms, preds, exists), _, v) in &spj {
+        for e in exists {
+            let semi = match e.kind {
+                ExistsKind::Semi => true,
+                ExistsKind::Anti => false,
+                ExistsKind::NotIn => continue,
+            };
+            let mut rest = exists.clone();
+            rest.remove(e);
+            let kept = Spj { tables: tables.clone(), atoms: atoms.clone(), preds: preds.clone(), exists: rest }.build();
+            // Named as a fact of its own, kept may read differently.
+            let Some(n) = cards.get(&kept.canonical()).and_then(|k| k.as_int()) else { continue };
+            let Some(rows) = v.as_int() else { continue };
+            let matched = if semi { Some(rows) } else { n.checked_sub(rows) };
+            if let Some(m) = matched.and_then(|m| Ratio::new(m, n)) {
+                let kind = FactKind::Match { on: e.on.clone(), kept, other: e.other.clone() };
+                out.push((kind.canonical(), m, "match"));
+            }
         }
     }
 
     // Redundant: s(P | C) = 1 says every row of C satisfies each term of P,
-    // so a context with C's tables and predicates names the same rows with
+    // so a context with C's inputs and conditions names the same rows with
     // or without it. Engines add such terms (DuckDB filters a join's side by
     // the other's key range), and a query that does not spell them out
     // finds the facts without them. One term goes at a time: which can go
     // next may depend on which went first.
-    let always: Vec<(&BTreeSet<String>, &BTreeSet<Term>, &Term)> = set
+    let always: Vec<(Parts, &Term)> = set
         .iter()
         .filter(|f| f.value == Ratio::int(1))
         .filter_map(|f| match &f.kind {
-            FactKind::Selectivity { pred, over: Context::Spj { tables, preds } } => Some((tables, preds, pred)),
+            FactKind::Selectivity { pred, over } => Some((parts(over)?, pred)),
             _ => None,
         })
-        .flat_map(|(tables, preds, pred)| pred.iter().map(move |p| (tables, preds, p)))
+        .flat_map(|(parts, pred)| pred.iter().map(move |p| (parts, p)))
         .collect();
     if !always.is_empty() {
-        // Whether `p` holds on every row of the cross product of `tables`
-        // satisfying `preds`.
-        let implied = |p: &Term, tables: &BTreeSet<String>, preds: &BTreeSet<Term>| {
-            always.iter().any(|(t, c, q)| *q == p && t.is_subset(tables) && c.is_subset(preds) && !c.contains(p))
+        // Whether `p` holds on every row of a context with these parts. A
+        // row of it is, on C's inputs, a row of C.
+        let implied = |p: &Term, (tables, atoms, preds, exists): Parts| {
+            always.iter().any(|((t, a, c, e), q)| {
+                *q == p && t.is_subset(tables) && a.is_subset(atoms) && c.is_subset(preds) && e.is_subset(exists) && !c.contains(p)
+            })
         };
         // `c` without each term it implies otherwise.
         let reduced = |c: &Context| -> Vec<Context> {
-            let Context::Spj { tables, preds } = c else { return vec![] };
+            let Some((tables, atoms, preds, exists)) = parts(c) else { return vec![] };
             preds
                 .iter()
                 .filter_map(|p| {
                     let mut rest = preds.clone();
                     rest.remove(p);
-                    implied(p, tables, &rest).then(|| Context::Spj { tables: tables.clone(), preds: rest })
+                    implied(p, (tables, atoms, &rest, exists)).then(|| {
+                        Spj { tables: tables.clone(), atoms: atoms.clone(), preds: rest, exists: exists.clone() }.build()
+                    })
                 })
                 .collect()
         };
@@ -175,8 +201,8 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
                         .into_iter()
                         .map(|over| FactKind::Selectivity { pred: pred.clone(), over })
                         .collect();
-                    if let Context::Spj { tables, preds } = over {
-                        for p in pred.iter().filter(|p| pred.len() > 1 && implied(p, tables, preds)) {
+                    if let Some(p_over) = parts(over) {
+                        for p in pred.iter().filter(|p| pred.len() > 1 && implied(p, p_over)) {
                             let mut rest = pred.clone();
                             rest.remove(p);
                             out.push(FactKind::Selectivity { pred: rest, over: over.clone() });

@@ -52,6 +52,9 @@ pub struct ONode {
     pub ordered: bool,
     /// The engine's own name for the operator, e.g. `PERFECT_HASH_GROUP_BY`.
     pub engine_op: String,
+    /// A scan that reported reading fewer rows than it output: the engine
+    /// stopped it before it finished, and did not count what it read.
+    pub cut_short: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +209,11 @@ impl Catalog {
     /// Every table's columns, qualified by table name.
     pub fn schema(&self) -> &Arc<DFSchema> {
         &self.all
+    }
+
+    /// The columns of `table`, in order.
+    pub fn columns(&self, table: &str) -> Option<Vec<String>> {
+        self.tables.get(table).map(|s| s.fields().iter().map(|f| f.name().clone()).collect())
     }
 
     pub fn has_column(&self, table: &str, column: &str) -> bool {

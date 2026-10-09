@@ -7,7 +7,7 @@ mod fixtures;
 
 use std::collections::{BTreeMap, HashMap};
 
-use cardinal::facts::{FactSet, State, derive_facts, states};
+use cardinal::facts::{Fact, FactKind, FactSet, Origin, Ratio, State, derive_facts, states};
 use cardinal::observed::{ObservedPlan, from_duckdb};
 use fixtures::{DIR, catalog, json, plans};
 use serde_json::{Value, json};
@@ -32,6 +32,16 @@ fn value(facts: &FactSet, text: &str) -> f64 {
     match facts.find(text) {
         Some(f) => f.value.as_f64(),
         None => panic!("no fact {text} among:\n{facts}"),
+    }
+}
+
+/// The bound printed as `text` (without its value), as an integer, and
+/// that no fact gives it exactly.
+fn bound(facts: &FactSet, text: &str) -> u64 {
+    assert!(facts.find(text).is_none(), "{text} is exact among:\n{facts}");
+    match facts.bounds().find(|b| b.kind.to_string() == text) {
+        Some(b) => b.value.as_int().unwrap(),
+        None => panic!("no bound {text} among:\n{facts}"),
     }
 }
 
@@ -75,40 +85,56 @@ async fn all_facts() -> FactSet {
     derive_facts(&all)
 }
 
-/// Writes a query counting each fact that counts rows of base tables, for
+/// Each fact (`=`) and bound (`<=`) as written in `fact_checks.json`.
+fn label(f: &Fact, bound: bool) -> String {
+    format!("{} {}", if bound { "<=" } else { "=" }, f.kind)
+}
+
+/// Writes a query counting what each fact and bound counts, for
 /// `scripts/duckdb_fixtures.sh` to run into `fact_checks.json`.
 #[tokio::test]
 async fn dump_fact_queries() {
     let facts = all_facts().await;
-    let rows: Vec<String> = facts
-        .iter()
-        .filter_map(|f| {
-            let sql = f.kind.count_sql()?;
-            Some(format!("SELECT '{}' AS fact, ({sql}) AS value", f.kind.to_string().replace('\'', "''")))
+    let catalog = catalog().await;
+    let all = facts.iter().map(|f| (f, false)).chain(facts.bounds().map(|f| (f, true)));
+    let rows: Vec<String> = all
+        .filter_map(|(f, bound)| {
+            let c = f.kind.count_sql(&catalog, &facts)?;
+            let of = c.of.map(|q| format!("({q})")).unwrap_or("NULL".into());
+            Some(format!("SELECT '{}' AS fact, ({}) AS value, {of} AS of", label(f, bound).replace('\'', "''"), c.value))
         })
         .collect();
     std::fs::write(format!("{DIR}/fact_checks.sql"), rows.join("\nUNION ALL ") + ";\n").unwrap();
 }
 
-/// Every fact that counts rows of base tables, against DuckDB's count.
+/// Every fact and bound, against DuckDB's count of what it counts: a fact
+/// equal to it, a bound at least it.
 #[tokio::test]
 async fn facts_match_duckdb() {
-    let counted: HashMap<String, u64> = json("fact_checks.json")
+    let counted: HashMap<String, (u64, Option<u64>)> = json("fact_checks.json")
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["fact"].as_str().unwrap().to_string(), r["value"].as_u64().unwrap()))
+        .map(|r| (r["fact"].as_str().unwrap().to_string(), (r["value"].as_u64().unwrap(), r["of"].as_u64())))
         .collect();
     let facts = all_facts().await;
+    let catalog = catalog().await;
     let mut checked = 0;
-    for f in facts.iter().filter(|f| f.kind.count_sql().is_some()) {
-        let Some(&n) = counted.get(&f.kind.to_string()) else {
-            panic!("{} is not in fact_checks.json: run scripts/duckdb_fixtures.sh", f.kind)
+    let all = facts.iter().map(|f| (f, false)).chain(facts.bounds().map(|f| (f, true)));
+    for (f, bound) in all.filter(|(f, _)| f.kind.count_sql(&catalog, &facts).is_some()) {
+        let Some(&(n, of)) = counted.get(&label(f, bound)) else {
+            panic!("{} is not in fact_checks.json: run scripts/duckdb_fixtures.sh", label(f, bound))
         };
-        assert_eq!(f.value.as_int(), Some(n), "{} from {:?}", f.kind, f.origins);
+        let ok = match (bound, &f.kind, of) {
+            (true, _, _) => f.value.as_int().is_some_and(|b| b >= n),
+            (false, FactKind::Unique { .. }, Some(of)) => n == of,
+            (false, _, Some(of)) => Ratio::new(n, of) == Some(f.value),
+            (false, _, None) => f.value.as_int() == Some(n),
+        };
+        assert!(ok, "{} is {n}{}, from {:?}", label(f, bound), of.map(|o| format!("/{o}")).unwrap_or_default(), f.origins);
         checked += 1;
     }
-    assert!(checked > 50, "only {checked} facts checked");
+    assert!(checked > 100, "only {checked} facts and bounds checked");
 }
 
 #[tokio::test]
@@ -120,18 +146,22 @@ async fn every_fixture_converts() {
     }
 }
 
-/// The same context seen in different plans must have one value: the main
-/// check that the contexts name the rows they claim to.
+/// The same context seen in different plans must have one value, and no
+/// bound may be below it: the main check that the contexts name the rows
+/// they claim to.
 #[tokio::test]
 async fn no_conflicts() {
     let mut all = plans("extra").await;
     all.extend(plans("tpch").await);
     let facts = derive_facts(&all);
     assert!(facts.conflicts.is_empty(), "{:#?}", facts.conflicts);
-    assert!(facts.len() > 100, "{facts}");
+    assert!(facts.len() + facts.bounds().count() > 100, "{facts}");
 }
 
-/// Every fact of a hand-written query, against true counts.
+/// The facts of hand-written queries, against true counts. A filter pushed
+/// into a scan gives only a bound on its rows, and on what keeps them all
+/// above; the rows of unfiltered scans, and what is computed from them
+/// alone, are exact.
 #[tokio::test]
 async fn extra_facts_are_true() {
     let e = expected();
@@ -141,52 +171,21 @@ async fn extra_facts_are_true() {
     }
     let facts = derive_facts(&all);
     assert!(facts.conflicts.is_empty(), "{:#?}", facts.conflicts);
-    let li = e["lineitem"];
-    let q10 = e["lineitem|l_quantity<10"];
-    assert_eq!(value(&facts, "|lineitem|"), li as f64);
-    assert_eq!(value(&facts, "|lineitem where lineitem.l_quantity < 10.00|"), q10 as f64);
-    assert_eq!(value(&facts, "s(lineitem.l_quantity < 10.00 | lineitem)"), ratio(q10, li));
-    assert_eq!(
-        value(&facts, "ndv(lineitem.l_suppkey | lineitem)"),
-        e["ndv(l_suppkey|lineitem)"] as f64
-    );
-    assert_eq!(
-        value(&facts, "ndv(lineitem.l_suppkey | lineitem where lineitem.l_quantity < 10.00)"),
-        e["ndv(l_suppkey|lineitem,l_quantity<10)"] as f64
-    );
-    assert_eq!(
-        value(&facts, "ndv(customer.c_mktsegment, customer.c_nationkey | customer)"),
-        e["ndv(c_nationkey,c_mktsegment|customer)"] as f64
-    );
+    assert_eq!(value(&facts, "|lineitem|"), e["lineitem"] as f64);
+    assert_eq!(value(&facts, "|orders|"), e["orders"] as f64);
+    assert_eq!(value(&facts, "ndv(customer.c_mktsegment, customer.c_nationkey | customer)"), e["ndv(c_nationkey,c_mktsegment|customer)"] as f64);
 
-    // The same predicate over a join's input is a different fact.
-    let (f, o) = (e["orders|o_orderstatus=F"], e["orders"]);
-    let joined = e["lineitem⋈orders|F,l_quantity<10"];
-    let join = "lineitem × orders where lineitem.l_orderkey = orders.o_orderkey \
-                and lineitem.l_quantity < 10.00 and orders.o_orderstatus = 'F'";
-    assert_eq!(value(&facts, &format!("|{join}|")), joined as f64);
-    // From one plan's join and filtered orders, and another's filtered
-    // lineitem: the join selectivity over both filtered inputs.
-    assert_eq!(
-        value(
-            &facts,
-            "s(lineitem.l_orderkey = orders.o_orderkey | lineitem × orders \
-             where lineitem.l_quantity < 10.00 and orders.o_orderstatus = 'F')"
-        ),
-        joined as f64 / (q10 * f) as f64
-    );
-    // |orders| comes from yet another plan; the semi join's probe side was
-    // pruned by a runtime filter, so its own count of orders says nothing.
-    assert_eq!(value(&facts, "|orders|"), o as f64);
-    assert_eq!(
-        value(
-            &facts,
-            "m(customer.c_custkey = orders.o_custkey | orders ⋉ customer \
-             where customer.c_custkey <= 1499 and customer.c_mktsegment = 'BUILDING')"
-        ),
-        ratio(e["orders semi customer BUILDING"], o)
-    );
-    println!("{facts}");
+    // The filter in the scan bounds its rows; no share of them is known.
+    assert_eq!(bound(&facts, "|lineitem where lineitem.l_quantity < 10.00|"), e["lineitem|l_quantity<10"]);
+    assert!(facts.iter().all(|f| !f.kind.to_string().starts_with("s(lineitem.l_quantity < 10.00")), "{facts}");
+
+    // A join and a semi join keep all the rows of a superset input.
+    let join = "|customer × orders where customer.c_custkey <= 1499 and customer.c_custkey = orders.o_custkey \
+                and customer.c_mktsegment = 'BUILDING'|";
+    assert_eq!(bound(&facts, join), e["orders⋈customer|BUILDING"]);
+    let semi = "|orders where exists[customer.c_custkey = orders.o_custkey](customer \
+                where customer.c_custkey <= 1499 and customer.c_mktsegment = 'BUILDING')|";
+    assert_eq!(bound(&facts, semi), e["orders semi customer BUILDING"]);
 }
 
 /// A DuckDB profile node.
@@ -215,13 +214,14 @@ async fn projections_pass_through() {
     }
 }
 
-/// Rows a scan may not have finished producing give no facts; the join
-/// above a runtime-filtered scan does.
+/// Rows a scan may not have finished producing give no facts or bounds;
+/// the join above a runtime-filtered scan does, bounded by its other side's
+/// pushed filter.
 #[tokio::test]
 async fn taint() {
     let e = expected();
     let limit = derive_facts(&[plan("limit").await]);
-    assert!(limit.is_empty(), "{limit}");
+    assert!(limit.is_empty() && limit.bounds().next().is_none(), "{limit}");
 
     let p = plan("join_filtered").await;
     let s = states(&p);
@@ -230,9 +230,9 @@ async fn taint() {
     let facts = derive_facts(&[p]);
     assert!(facts.find("|orders|").is_none(), "{facts}");
     let joined = facts
-        .iter()
+        .bounds()
         .find(|f| f.kind.to_string().starts_with("|customer × orders"))
-        .unwrap_or_else(|| panic!("no join cardinality in\n{facts}"));
+        .unwrap_or_else(|| panic!("no join bound in\n{facts}"));
     assert_eq!(joined.value.as_int(), Some(e["orders⋈customer|BUILDING"]));
 }
 
@@ -246,7 +246,10 @@ fn starting<'f>(facts: &'f FactSet, prefix: &str) -> &'f cardinal::facts::Fact {
     }
 }
 
-/// Correlated subqueries (delim joins) and IN / NOT IN (mark joins).
+/// Correlated subqueries (delim joins) and IN / NOT IN (mark joins). A
+/// semi join keeps every row with a partner among a superset of its other
+/// side's rows, so a filter pushed into that side bounds it; an anti join
+/// or NOT IN keeps fewer, so gives nothing.
 #[tokio::test]
 async fn subqueries() {
     let e = expected();
@@ -256,16 +259,50 @@ async fn subqueries() {
     }
     let facts = derive_facts(&all);
     assert!(facts.conflicts.is_empty(), "{:#?}", facts.conflicts);
-    // EXISTS and NOT EXISTS over the same subquery share one match share.
-    let exists = starting(&facts, "m((\"orders@1\".o_orderkey IS NOT DISTINCT FROM \"orders@2\".o_orderkey) | orders@1 ⋉");
-    assert_eq!(exists.value.as_f64(), ratio(e["orders semi lineitem>49"], e["orders"]));
-    assert_eq!(exists.origins.len(), 2, "{:?}", exists.origins);
-    // A semi join's probe side is pruned by its runtime filter; |part| is
-    // from the NOT IN plan, which scans all of it.
-    let semi = starting(&facts, "m(\"part\".p_partkey = partsupp.ps_partkey | part ⋉ partsupp");
-    assert_eq!(semi.value.as_f64(), ratio(e["part semi partsupp<100"], 2000));
-    let not_in = starting(&facts, "|LeftMark join, unmarked");
-    assert_eq!(not_in.value.as_int(), Some(e["part not in partsupp<100"]));
+    // EXISTS decorrelated to read as the semi join a query would write.
+    let exists = "|orders where exists[lineitem.l_orderkey = orders.o_orderkey](lineitem where lineitem.l_quantity > 49.00)|";
+    assert_eq!(bound(&facts, exists), e["orders semi lineitem>49"]);
+    let anti = |f: &Fact| f.kind.to_string().contains("not exists[") || f.kind.to_string().contains("not in[");
+    assert!(!facts.iter().chain(facts.bounds()).any(anti), "{facts}");
+    assert!(!facts.iter().any(|f| matches!(f.kind, FactKind::Match { .. })), "{facts}");
+}
+
+/// Outer joins and filters on grouping keys, read the same however a plan
+/// placed them.
+#[tokio::test]
+async fn outer_joins_and_groups() {
+    let e = expected();
+    let mut all = vec![];
+    for name in ["left_preserved", "full_one_side", "left_rejected", "left_chain", "group_key_filter"] {
+        all.push(plan(name).await);
+    }
+    let facts = derive_facts(&all);
+    assert!(facts.conflicts.is_empty(), "{:#?}", facts.conflicts);
+    let observed = |f: &Fact, q: &str| f.origins.iter().any(|o| matches!(o, Origin::Observed { query, .. } if query == q));
+
+    // A full join filtered on one side's columns is the left join preserving
+    // it, and a filter on the preserved side reads above the join, as does
+    // the condition's term on the other side below it. Exact from the plan
+    // that filtered above the join; the one that pushed the filters into
+    // its scans says nothing of the join, whose padded side may be a
+    // superset.
+    let left = starting(
+        &facts,
+        "|Left join[customer.c_custkey = orders.o_custkey](customer, orders where orders.o_totalprice > 300000.00) \
+         where customer.c_acctbal > 5000.00|",
+    );
+    assert_eq!(left.value.as_int(), Some(e["customer⟕orders>300000|acctbal>5000"]));
+    assert!(observed(left, "full_one_side") && !observed(left, "left_preserved"), "{:?}", left.origins);
+    assert!(!facts.bounds().any(|b| b.kind.to_string().contains("Left join")), "{facts}");
+
+    // A filter rejecting the NULLs of the other side leaves the inner join.
+    let inner = "|customer × orders where customer.c_custkey <= 1499 and customer.c_custkey = orders.o_custkey \
+                 and orders.o_totalprice > 300000.00|";
+    assert_eq!(bound(&facts, inner), e["customer⋈orders|price>300000"]);
+
+    // HAVING on a grouping key filters the rows grouped.
+    let groups = "ndv(lineitem.l_suppkey | lineitem where lineitem.l_suppkey < 50)";
+    assert_eq!(bound(&facts, groups), e["ndv(l_suppkey|lineitem,l_suppkey<50)"]);
 }
 
 /// Plans whose operators do not resolve give no facts above them.
@@ -310,7 +347,7 @@ async fn other_shapes() {
     let one = |name: &'static str| async move { derive_facts(&[plan(name).await]) };
 
     let f = one("self_join").await;
-    let join = starting(&f, "|lineitem@1 × lineitem@2 where");
+    let join = f.bounds().find(|b| b.kind.to_string().starts_with("|lineitem@1 × lineitem@2 where")).unwrap_or_else(|| panic!("{f}"));
     assert_eq!(join.value.as_int(), Some(e["self join"]));
 
     let f = one("cte").await;
@@ -322,10 +359,10 @@ async fn other_shapes() {
     assert_eq!(having.value.as_f64(), ratio(e["having sum>200"], e["ndv(l_orderkey|lineitem)"]));
 
     let f = one("scalar_subquery").await;
-    let price = f.iter().find(|f| f.kind.to_string().starts_with("|σ")).unwrap_or_else(|| panic!("{f}"));
+    let price = starting(&f, "|lineitem@1 × aggregate(");
     assert_eq!(price.value.as_int(), Some(e["price>avg"]));
 
     let f = one("alias").await;
-    let years = starting(&f, "ndv(date_part(");
+    let years = f.bounds().find(|b| b.kind.to_string().starts_with("ndv(date_part(")).unwrap_or_else(|| panic!("{f}"));
     assert_eq!(years.value.as_int(), Some(e["ndv(year|orders,price>100000)"]));
 }
