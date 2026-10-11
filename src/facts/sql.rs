@@ -389,7 +389,7 @@ impl Render<'_> {
             .data;
         let sql = Unparser::default().expr_to_sql(&e).ok()?.to_string();
         // Aggregates DuckDB names otherwise.
-        Some(sql.replace("first_value(", "first(").replace("last_value(", "last("))
+        Some(sql.replace("first_value(", "first(").replace("last_value(", "last(").replace("btrim(", "trim("))
     }
 }
 

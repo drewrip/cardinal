@@ -7,9 +7,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// How long one DuckDB call may take: a generated query may be a cross
-/// product of large tables.
-pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long one DuckDB call may take, in seconds (`CARDINAL_LIVE_TIMEOUT`,
+/// default 20): a generated query may be a cross product of large tables.
+fn timeout() -> std::time::Duration {
+    let secs = std::env::var("CARDINAL_LIVE_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
 pub const TIMED_OUT: &str = "timed out";
 
 pub fn duckdb_available() -> bool {
@@ -32,7 +35,8 @@ pub fn database() -> PathBuf {
 }
 
 /// Runs `sql` on `db` with `args`, returning standard output. A call that
-/// takes longer than [`TIMEOUT`] is killed, and fails with [`TIMED_OUT`].
+/// takes longer than `CARDINAL_LIVE_TIMEOUT` is killed, and fails with
+/// [`TIMED_OUT`].
 pub fn run(db: &PathBuf, sql: &str, args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("duckdb")
         .arg(db)
@@ -59,7 +63,7 @@ pub fn run(db: &PathBuf, sql: &str, args: &[&str]) -> Result<String, String> {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status;
         }
-        if start.elapsed() > TIMEOUT {
+        if start.elapsed() > timeout() {
             let _ = child.kill();
             let _ = child.wait();
             return Err(TIMED_OUT.into());
