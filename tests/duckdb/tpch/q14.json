@@ -1,0 +1,172 @@
+{
+    "total_memory_allocated": 8388608,
+    "total_bytes_written": 0,
+    "total_bytes_read": 1048576,
+    "system_peak_temp_dir_size": 0,
+    "system_peak_buffer_memory": 9940992,
+    "rows_returned": 0,
+    "result_set_size": 0,
+    "latency": 0.001436667,
+    "wal_replay_entry_count": 0,
+    "extra_info": {},
+    "commit_local_storage_latency": 0.0,
+    "attach_load_storage_latency": 0.0,
+    "query_name": "EXPLAIN (ANALYZE, FORMAT JSON)\nselect 100.00 * sum(case when p_type like 'PROMO%'\n    then l_extendedprice * (1 - l_discount) else 0 end)\n  / sum(l_extendedprice * (1 - l_discount)) as promo_revenue\nfrom lineitem, part\nwhere l_partkey = p_partkey and l_shipdate >= date '1995-09-01'\n  and l_shipdate < date '1995-09-01' + interval '1' month\n;",
+    "cpu_time": 0.0005932050000000001,
+    "checkpoint_latency": 0.0,
+    "cumulative_cardinality": 4168,
+    "waiting_to_attach_latency": 0.0,
+    "write_to_wal_latency": 0.0,
+    "attach_replay_wal_latency": 0.0,
+    "blocked_thread_time": 0.0,
+    "cumulative_rows_scanned": 62175,
+    "children": [
+        {
+            "system_peak_temp_dir_size": 0,
+            "result_set_size": 0,
+            "operator_type": "EXPLAIN_ANALYZE",
+            "operator_timing": 1.25e-7,
+            "operator_rows_scanned": 0,
+            "extra_info": {},
+            "system_peak_buffer_memory": 0,
+            "cumulative_rows_scanned": 62175,
+            "cpu_time": 0.0005932050000000001,
+            "operator_name": "EXPLAIN_ANALYZE",
+            "cumulative_cardinality": 4168,
+            "operator_cardinality": 0,
+            "children": [
+                {
+                    "cumulative_cardinality": 4168,
+                    "operator_cardinality": 1,
+                    "cumulative_rows_scanned": 62175,
+                    "operator_name": "PROJECTION",
+                    "cpu_time": 0.0005930800000000001,
+                    "operator_rows_scanned": 0,
+                    "system_peak_buffer_memory": 0,
+                    "extra_info": {
+                        "Projections": "promo_revenue",
+                        "Estimated Cardinality": "1"
+                    },
+                    "operator_timing": 0.000003542,
+                    "system_peak_temp_dir_size": 0,
+                    "result_set_size": 8,
+                    "operator_type": "PROJECTION",
+                    "children": [
+                        {
+                            "system_peak_temp_dir_size": 0,
+                            "result_set_size": 32,
+                            "operator_type": "UNGROUPED_AGGREGATE",
+                            "operator_timing": 0.000001708,
+                            "operator_rows_scanned": 0,
+                            "extra_info": {
+                                "Aggregates": [
+                                    "sum(#0)",
+                                    "sum(#1)"
+                                ]
+                            },
+                            "system_peak_buffer_memory": 0,
+                            "cumulative_rows_scanned": 62175,
+                            "cpu_time": 0.000589538,
+                            "operator_name": "UNGROUPED_AGGREGATE",
+                            "cumulative_cardinality": 4167,
+                            "operator_cardinality": 1,
+                            "children": [
+                                {
+                                    "cumulative_cardinality": 4166,
+                                    "operator_cardinality": 722,
+                                    "cumulative_rows_scanned": 62175,
+                                    "operator_name": "PROJECTION",
+                                    "cpu_time": 0.00058783,
+                                    "operator_rows_scanned": 0,
+                                    "system_peak_buffer_memory": 0,
+                                    "extra_info": {
+                                        "Projections": [
+                                            "CASE  WHEN (prefix(p_type, 'PROMO')) THEN ((l_extendedprice * (1.00 - l_discount))) ELSE 0.0000 END",
+                                            "(l_extendedprice * (1.00 - l_discount))"
+                                        ],
+                                        "Estimated Cardinality": "10071"
+                                    },
+                                    "operator_timing": 0.00000675,
+                                    "system_peak_temp_dir_size": 0,
+                                    "result_set_size": 11552,
+                                    "operator_type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "system_peak_temp_dir_size": 0,
+                                            "result_set_size": 23104,
+                                            "operator_type": "HASH_JOIN",
+                                            "operator_timing": 0.00013883,
+                                            "operator_rows_scanned": 0,
+                                            "extra_info": {
+                                                "Join Type": "INNER",
+                                                "Conditions": "l_partkey = p_partkey",
+                                                "Estimated Cardinality": "10071"
+                                            },
+                                            "system_peak_buffer_memory": 0,
+                                            "cumulative_rows_scanned": 62175,
+                                            "cpu_time": 0.00058108,
+                                            "operator_name": "HASH_JOIN",
+                                            "cumulative_cardinality": 3444,
+                                            "operator_cardinality": 722,
+                                            "children": [
+                                                {
+                                                    "cumulative_cardinality": 722,
+                                                    "operator_cardinality": 722,
+                                                    "cumulative_rows_scanned": 60175,
+                                                    "operator_name": "SEQ_SCAN",
+                                                    "cpu_time": 0.00039133299999999995,
+                                                    "operator_rows_scanned": 60175,
+                                                    "system_peak_buffer_memory": 0,
+                                                    "extra_info": {
+                                                        "Table": "tpch.main.lineitem",
+                                                        "Type": "Sequential Scan",
+                                                        "Projections": [
+                                                            "l_partkey",
+                                                            "l_extendedprice",
+                                                            "l_discount"
+                                                        ],
+                                                        "Filters": "l_shipdate>='1995-09-01'::DATE AND (CAST(l_shipdate AS TIMESTAMP) < '1995-10-01 00:00:00'::TIMESTAMP)",
+                                                        "Dynamic Filters": "optional: l_partkey>=1 AND optional: l_partkey<=2000",
+                                                        "Estimated Cardinality": "12035"
+                                                    },
+                                                    "operator_timing": 0.00039133299999999995,
+                                                    "system_peak_temp_dir_size": 0,
+                                                    "result_set_size": 17328,
+                                                    "operator_type": "TABLE_SCAN",
+                                                    "children": []
+                                                },
+                                                {
+                                                    "cumulative_cardinality": 2000,
+                                                    "operator_cardinality": 2000,
+                                                    "cumulative_rows_scanned": 2000,
+                                                    "operator_name": "SEQ_SCAN",
+                                                    "cpu_time": 0.000050917,
+                                                    "operator_rows_scanned": 2000,
+                                                    "system_peak_buffer_memory": 0,
+                                                    "extra_info": {
+                                                        "Table": "tpch.main.part",
+                                                        "Type": "Sequential Scan",
+                                                        "Projections": [
+                                                            "p_partkey",
+                                                            "p_type"
+                                                        ],
+                                                        "Estimated Cardinality": "2000"
+                                                    },
+                                                    "operator_timing": 0.000050917,
+                                                    "system_peak_temp_dir_size": 0,
+                                                    "result_set_size": 48000,
+                                                    "operator_type": "TABLE_SCAN",
+                                                    "children": []
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,106 @@
+{
+    "total_memory_allocated": 0,
+    "total_bytes_written": 0,
+    "total_bytes_read": 786432,
+    "system_peak_temp_dir_size": 0,
+    "system_peak_buffer_memory": 1114112,
+    "rows_returned": 0,
+    "result_set_size": 0,
+    "latency": 0.001163208,
+    "wal_replay_entry_count": 0,
+    "extra_info": {},
+    "commit_local_storage_latency": 0.0,
+    "attach_load_storage_latency": 0.0,
+    "query_name": "EXPLAIN (ANALYZE, FORMAT JSON)\nselect sum(l_extendedprice * l_discount) as revenue\nfrom lineitem\nwhere l_shipdate >= date '1994-01-01'\n  and l_shipdate < date '1994-01-01' + interval '1' year\n  and l_discount between 0.06 - 0.01 and 0.06 + 0.01\n  and l_quantity < 24\n;",
+    "cpu_time": 0.000347124,
+    "checkpoint_latency": 0.0,
+    "cumulative_cardinality": 2383,
+    "waiting_to_attach_latency": 0.0,
+    "write_to_wal_latency": 0.0,
+    "attach_replay_wal_latency": 0.0,
+    "blocked_thread_time": 0.0,
+    "cumulative_rows_scanned": 60175,
+    "children": [
+        {
+            "system_peak_temp_dir_size": 0,
+            "result_set_size": 0,
+            "operator_type": "EXPLAIN_ANALYZE",
+            "operator_timing": 1.67e-7,
+            "operator_rows_scanned": 0,
+            "extra_info": {},
+            "system_peak_buffer_memory": 0,
+            "cumulative_rows_scanned": 60175,
+            "cpu_time": 0.000347124,
+            "operator_name": "EXPLAIN_ANALYZE",
+            "cumulative_cardinality": 2383,
+            "operator_cardinality": 0,
+            "children": [
+                {
+                    "cumulative_cardinality": 2383,
+                    "operator_cardinality": 1,
+                    "cumulative_rows_scanned": 60175,
+                    "operator_name": "UNGROUPED_AGGREGATE",
+                    "cpu_time": 0.000346957,
+                    "operator_rows_scanned": 0,
+                    "system_peak_buffer_memory": 0,
+                    "extra_info": {
+                        "Aggregates": "sum_no_overflow(#0)"
+                    },
+                    "operator_timing": 0.000004162000000000001,
+                    "system_peak_temp_dir_size": 0,
+                    "result_set_size": 16,
+                    "operator_type": "UNGROUPED_AGGREGATE",
+                    "children": [
+                        {
+                            "system_peak_temp_dir_size": 0,
+                            "result_set_size": 9528,
+                            "operator_type": "PROJECTION",
+                            "operator_timing": 0.000007626000000000004,
+                            "operator_rows_scanned": 0,
+                            "extra_info": {
+                                "Projections": "(l_extendedprice * l_discount)",
+                                "Estimated Cardinality": "12035"
+                            },
+                            "system_peak_buffer_memory": 0,
+                            "cumulative_rows_scanned": 60175,
+                            "cpu_time": 0.000342795,
+                            "operator_name": "PROJECTION",
+                            "cumulative_cardinality": 2382,
+                            "operator_cardinality": 1191,
+                            "children": [
+                                {
+                                    "cumulative_cardinality": 1191,
+                                    "operator_cardinality": 1191,
+                                    "cumulative_rows_scanned": 60175,
+                                    "operator_name": "SEQ_SCAN",
+                                    "cpu_time": 0.000335169,
+                                    "operator_rows_scanned": 60175,
+                                    "system_peak_buffer_memory": 0,
+                                    "extra_info": {
+                                        "Table": "tpch.main.lineitem",
+                                        "Type": "Sequential Scan",
+                                        "Projections": [
+                                            "l_discount",
+                                            "l_extendedprice"
+                                        ],
+                                        "Filters": [
+                                            "l_shipdate>='1994-01-01'::DATE AND (CAST(l_shipdate AS TIMESTAMP) < '1995-01-01 00:00:00'::TIMESTAMP)",
+                                            "l_discount>=0.05 AND l_discount<=0.07",
+                                            "l_quantity<24.00"
+                                        ],
+                                        "Estimated Cardinality": "12035"
+                                    },
+                                    "operator_timing": 0.000335169,
+                                    "system_peak_temp_dir_size": 0,
+                                    "result_set_size": 19056,
+                                    "operator_type": "TABLE_SCAN",
+                                    "children": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

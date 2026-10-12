@@ -1,0 +1,286 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "ORDER_BY",
+                "children": [
+                    {
+                        "name": "PROJECTION",
+                        "children": [
+                            {
+                                "name": "PROJECTION",
+                                "children": [
+                                    {
+                                        "name": "PROJECTION",
+                                        "children": [
+                                            {
+                                                "name": "PERFECT_HASH_GROUP_BY",
+                                                "children": [
+                                                    {
+                                                        "name": "PROJECTION",
+                                                        "children": [
+                                                            {
+                                                                "name": "PROJECTION",
+                                                                "children": [
+                                                                    {
+                                                                        "name": "PROJECTION",
+                                                                        "children": [
+                                                                            {
+                                                                                "name": "HASH_JOIN",
+                                                                                "children": [
+                                                                                    {
+                                                                                        "name": "SEQ_SCAN",
+                                                                                        "children": [],
+                                                                                        "extra_info": {
+                                                                                            "Table": "tpch.main.nation",
+                                                                                            "Type": "Sequential Scan",
+                                                                                            "Projections": [
+                                                                                                "n_nationkey",
+                                                                                                "n_name"
+                                                                                            ],
+                                                                                            "Estimated Cardinality": "25"
+                                                                                        }
+                                                                                    },
+                                                                                    {
+                                                                                        "name": "HASH_JOIN",
+                                                                                        "children": [
+                                                                                            {
+                                                                                                "name": "SEQ_SCAN",
+                                                                                                "children": [],
+                                                                                                "extra_info": {
+                                                                                                    "Table": "tpch.main.supplier",
+                                                                                                    "Type": "Sequential Scan",
+                                                                                                    "Projections": [
+                                                                                                        "s_suppkey",
+                                                                                                        "s_nationkey"
+                                                                                                    ],
+                                                                                                    "Estimated Cardinality": "100"
+                                                                                                }
+                                                                                            },
+                                                                                            {
+                                                                                                "name": "HASH_JOIN",
+                                                                                                "children": [
+                                                                                                    {
+                                                                                                        "name": "HASH_JOIN",
+                                                                                                        "children": [
+                                                                                                            {
+                                                                                                                "name": "SEQ_SCAN",
+                                                                                                                "children": [],
+                                                                                                                "extra_info": {
+                                                                                                                    "Table": "tpch.main.customer",
+                                                                                                                    "Type": "Sequential Scan",
+                                                                                                                    "Projections": [
+                                                                                                                        "c_custkey",
+                                                                                                                        "c_nationkey"
+                                                                                                                    ],
+                                                                                                                    "Filters": "c_custkey<=1499",
+                                                                                                                    "Estimated Cardinality": "1500"
+                                                                                                                }
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "name": "HASH_JOIN",
+                                                                                                                "children": [
+                                                                                                                    {
+                                                                                                                        "name": "SEQ_SCAN",
+                                                                                                                        "children": [],
+                                                                                                                        "extra_info": {
+                                                                                                                            "Table": "tpch.main.orders",
+                                                                                                                            "Type": "Sequential Scan",
+                                                                                                                            "Projections": [
+                                                                                                                                "o_orderkey",
+                                                                                                                                "o_custkey",
+                                                                                                                                "o_orderdate"
+                                                                                                                            ],
+                                                                                                                            "Filters": "o_orderdate>='1995-01-01'::DATE AND o_orderdate<='1996-12-31'::DATE",
+                                                                                                                            "Estimated Cardinality": "3000"
+                                                                                                                        }
+                                                                                                                    },
+                                                                                                                    {
+                                                                                                                        "name": "HASH_JOIN",
+                                                                                                                        "children": [
+                                                                                                                            {
+                                                                                                                                "name": "SEQ_SCAN",
+                                                                                                                                "children": [],
+                                                                                                                                "extra_info": {
+                                                                                                                                    "Table": "tpch.main.lineitem",
+                                                                                                                                    "Type": "Sequential Scan",
+                                                                                                                                    "Projections": [
+                                                                                                                                        "l_partkey",
+                                                                                                                                        "l_suppkey",
+                                                                                                                                        "l_orderkey",
+                                                                                                                                        "l_extendedprice",
+                                                                                                                                        "l_discount"
+                                                                                                                                    ],
+                                                                                                                                    "Estimated Cardinality": "60175"
+                                                                                                                                }
+                                                                                                                            },
+                                                                                                                            {
+                                                                                                                                "name": "SEQ_SCAN",
+                                                                                                                                "children": [],
+                                                                                                                                "extra_info": {
+                                                                                                                                    "Table": "tpch.main.part",
+                                                                                                                                    "Type": "Sequential Scan",
+                                                                                                                                    "Projections": "p_partkey",
+                                                                                                                                    "Filters": "p_type='ECONOMY ANODIZED STEEL'",
+                                                                                                                                    "Estimated Cardinality": "6"
+                                                                                                                                }
+                                                                                                                            }
+                                                                                                                        ],
+                                                                                                                        "extra_info": {
+                                                                                                                            "Join Type": "INNER",
+                                                                                                                            "Conditions": "l_partkey = p_partkey",
+                                                                                                                            "Estimated Cardinality": "151"
+                                                                                                                        }
+                                                                                                                    }
+                                                                                                                ],
+                                                                                                                "extra_info": {
+                                                                                                                    "Join Type": "INNER",
+                                                                                                                    "Conditions": "o_orderkey = l_orderkey",
+                                                                                                                    "Estimated Cardinality": "41"
+                                                                                                                }
+                                                                                                            }
+                                                                                                        ],
+                                                                                                        "extra_info": {
+                                                                                                            "Join Type": "INNER",
+                                                                                                            "Conditions": "c_custkey = o_custkey",
+                                                                                                            "Estimated Cardinality": "41"
+                                                                                                        }
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "name": "HASH_JOIN",
+                                                                                                        "children": [
+                                                                                                            {
+                                                                                                                "name": "SEQ_SCAN",
+                                                                                                                "children": [],
+                                                                                                                "extra_info": {
+                                                                                                                    "Table": "tpch.main.nation",
+                                                                                                                    "Type": "Sequential Scan",
+                                                                                                                    "Projections": [
+                                                                                                                        "n_nationkey",
+                                                                                                                        "n_regionkey"
+                                                                                                                    ],
+                                                                                                                    "Estimated Cardinality": "25"
+                                                                                                                }
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "name": "SEQ_SCAN",
+                                                                                                                "children": [],
+                                                                                                                "extra_info": {
+                                                                                                                    "Table": "tpch.main.region",
+                                                                                                                    "Type": "Sequential Scan",
+                                                                                                                    "Projections": "r_regionkey",
+                                                                                                                    "Filters": "r_name='AMERICA'",
+                                                                                                                    "Estimated Cardinality": "1"
+                                                                                                                }
+                                                                                                            }
+                                                                                                        ],
+                                                                                                        "extra_info": {
+                                                                                                            "Join Type": "INNER",
+                                                                                                            "Conditions": "n_regionkey = r_regionkey",
+                                                                                                            "Estimated Cardinality": "5"
+                                                                                                        }
+                                                                                                    }
+                                                                                                ],
+                                                                                                "extra_info": {
+                                                                                                    "Join Type": "INNER",
+                                                                                                    "Conditions": "c_nationkey = n_nationkey",
+                                                                                                    "Estimated Cardinality": "7"
+                                                                                                }
+                                                                                            }
+                                                                                        ],
+                                                                                        "extra_info": {
+                                                                                            "Join Type": "INNER",
+                                                                                            "Conditions": "s_suppkey = l_suppkey",
+                                                                                            "Estimated Cardinality": "8"
+                                                                                        }
+                                                                                    }
+                                                                                ],
+                                                                                "extra_info": {
+                                                                                    "Join Type": "INNER",
+                                                                                    "Conditions": "n_nationkey = s_nationkey",
+                                                                                    "Estimated Cardinality": "7"
+                                                                                }
+                                                                            }
+                                                                        ],
+                                                                        "extra_info": {
+                                                                            "Projections": [
+                                                                                "o_year",
+                                                                                "volume",
+                                                                                "nation"
+                                                                            ],
+                                                                            "Estimated Cardinality": "7"
+                                                                        }
+                                                                    }
+                                                                ],
+                                                                "extra_info": {
+                                                                    "Projections": [
+                                                                        "__internal_compress_integral_utinyint(#0, 1992)",
+                                                                        "#1",
+                                                                        "#2"
+                                                                    ],
+                                                                    "Estimated Cardinality": "7"
+                                                                }
+                                                            }
+                                                        ],
+                                                        "extra_info": {
+                                                            "Projections": [
+                                                                "o_year",
+                                                                "CASE  WHEN ((nation = 'BRAZIL')) THEN (volume) ELSE 0.0000 END",
+                                                                "volume"
+                                                            ],
+                                                            "Estimated Cardinality": "7"
+                                                        }
+                                                    }
+                                                ],
+                                                "extra_info": {
+                                                    "Groups": "#0",
+                                                    "Aggregates": [
+                                                        "sum(#1)",
+                                                        "sum(#2)"
+                                                    ]
+                                                }
+                                            }
+                                        ],
+                                        "extra_info": {
+                                            "Projections": [
+                                                "__internal_decompress_integral_bigint(#0, 1992)",
+                                                "#1",
+                                                "#2"
+                                            ],
+                                            "Estimated Cardinality": "6"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Projections": [
+                                        "o_year",
+                                        "mkt_share"
+                                    ],
+                                    "Estimated Cardinality": "6"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Projections": [
+                                "__internal_compress_integral_utinyint(#0, 1992)",
+                                "#1"
+                            ],
+                            "Estimated Cardinality": "6"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Order By": "all_nations.o_year ASC"
+                }
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "__internal_decompress_integral_bigint(#0, 1992)",
+                "#1"
+            ],
+            "Estimated Cardinality": "0"
+        }
+    }
+]

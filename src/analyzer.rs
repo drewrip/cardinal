@@ -20,6 +20,8 @@ use z3::{Params, Solver};
 
 use crate::domain::{self, Dom, Facts};
 use crate::origin::{self, Origin};
+use crate::ForeignKey;
+use crate::selectivity::auxiliary_joins;
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,10 @@ pub(crate) struct Analyzer<'a> {
     counter: usize,
     /// Most NDV factors multiplied in one constraint.
     max_product: usize,
+    /// Declared foreign keys.
+    foreign_keys: &'a [ForeignKey],
+    /// The last join visited's [`Node::at_most_once`], for its node to take.
+    at_most_once: (bool, bool),
 }
 
 /// One plan node and the variables describing its output.
@@ -127,6 +133,9 @@ pub(crate) struct Node {
     /// For a base scan with pushed-down filters: the raw scan's cardinality and
     /// NDV variables, and the scan without filters or fetch.
     pub(crate) raw_scan: Option<(String, Vec<String>, LogicalPlan)>,
+    /// For an equi-join: whether each left row matches at most one right row
+    /// (a unique right key, or a foreign key from the left), and the mirror.
+    pub(crate) at_most_once: (bool, bool),
 }
 
 /// How long Z3 may spend on one check before answering unknown.
@@ -180,7 +189,11 @@ fn product(factors: &[&Int], cap: usize) -> Option<Int> {
 }
 
 impl<'a> Analyzer<'a> {
-    pub(crate) fn new(resolve: &'a dyn Fn(&TableScan) -> ScanKind, max_product: usize) -> Self {
+    pub(crate) fn new(
+        resolve: &'a dyn Fn(&TableScan) -> ScanKind,
+        max_product: usize,
+        foreign_keys: &'a [ForeignKey],
+    ) -> Self {
         Self {
             solver: new_solver(),
             resolve,
@@ -192,6 +205,8 @@ impl<'a> Analyzer<'a> {
             counter: 0,
             origins: Vec::new(),
             max_product,
+            foreign_keys,
+            at_most_once: (false, false),
         }
     }
 
@@ -302,6 +317,7 @@ impl<'a> Analyzer<'a> {
         // Subquery nodes stand on their own; they are not inputs of this node.
         self.frontier.truncate(mark);
         let (out, raw_scan) = self.visit_node(plan);
+        let at_most_once = std::mem::take(&mut self.at_most_once);
         self.apply_domains(plan, &out);
         if let Some(o) = &out.origin
             && o.informative()
@@ -318,6 +334,7 @@ impl<'a> Analyzer<'a> {
             plan: plan.clone(),
             inputs,
             raw_scan,
+            at_most_once,
         });
         self.frontier.push(self.nodes.len() - 1);
         out
@@ -864,6 +881,9 @@ impl<'a> Analyzer<'a> {
         // most once.
         let ru = equi && key_is_unique(&join.right, &rk);
         let lu = equi && key_is_unique(&join.left, &lk);
+        // A foreign key from one side to every row of the other's table: each
+        // of the first side's rows matches exactly once.
+        let (fl, fr) = self.foreign_key(join);
         let kind = format!(
             "{:?}{}Join",
             join.join_type,
@@ -881,10 +901,10 @@ impl<'a> Analyzer<'a> {
         let lr = Int::mul(&[&l.card, &r.card]);
         // Bound on the rows the join's matching produces.
         let mut inner = lr.clone();
-        if ru {
+        if ru || fl {
             inner = min(&inner, &l.card);
         }
-        if lu {
+        if lu || fr {
             inner = min(&inner, &r.card);
         }
         match join.join_type {
@@ -894,12 +914,18 @@ impl<'a> Analyzer<'a> {
                 } else {
                     self.assert(o.card.le(&inner));
                 }
+                if fl {
+                    self.assert(o.card.eq(&l.card));
+                }
+                if fr {
+                    self.assert(o.card.eq(&r.card));
+                }
             }
             // An outer join emits its inner join's rows plus each unmatched row of
             // the preserved side. If each preserved row matches at most once, it
             // appears exactly once.
-            JoinType::Left if ru => self.assert(o.card.eq(&l.card)),
-            JoinType::Right if lu => self.assert(o.card.eq(&r.card)),
+            JoinType::Left if ru || fl => self.assert(o.card.eq(&l.card)),
+            JoinType::Right if lu || fr => self.assert(o.card.eq(&r.card)),
             JoinType::Left | JoinType::Right => {
                 let preserved = if join.join_type == JoinType::Left {
                     &l.card
@@ -919,11 +945,18 @@ impl<'a> Analyzer<'a> {
                     self.assert(o.card.le(Int::add(&[&l.card, &r.card])));
                 }
             }
+            // Every row of the referencing side has a partner.
+            JoinType::LeftSemi if fl => self.assert(o.card.eq(&l.card)),
+            JoinType::LeftAnti if fl => self.assert(o.card.eq(int(0))),
+            JoinType::RightSemi if fr => self.assert(o.card.eq(&r.card)),
+            JoinType::RightAnti if fr => self.assert(o.card.eq(int(0))),
             JoinType::LeftSemi | JoinType::LeftAnti => self.assert(o.card.le(&l.card)),
             JoinType::RightSemi | JoinType::RightAnti => self.assert(o.card.le(&r.card)),
             JoinType::LeftMark => self.assert(o.card.eq(&l.card)),
             JoinType::RightMark => self.assert(o.card.eq(&r.card)),
         }
+        self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
+        self.at_most_once = (ru || fl, lu || fr);
         self.join_ndv(join, &o, &l, &r);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
@@ -968,6 +1001,176 @@ impl<'a> Analyzer<'a> {
         }
         .map(|x| x.with_width(width).narrow(&o.facts, plan.schema()));
         o
+    }
+
+    /// An outer or anti join's rows, in terms of its inner join's rows
+    /// (`{o}_inner`) and the rows of each side with a partner (`{o}_left`,
+    /// `{o}_right`): the counts `validate` measures its selectivities with
+    /// (`selectivity::auxiliary_joins`). `inner` bounds the inner join's rows;
+    /// `keys` says whether the right and left keys are unique, and whether a
+    /// foreign key goes from the left or the right side to all of the other.
+    fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: (bool, bool, bool, bool)) {
+        let parts = auxiliary_joins(join);
+        if parts.is_empty() {
+            return;
+        }
+        let (ru, lu, fl, fr) = keys;
+        let name = self.name_of(&o.card);
+        let mut count = |suffix: &str| {
+            parts.iter().any(|(s, _)| *s == suffix).then(|| self.new_var(format!("{name}_{suffix}")))
+        };
+        let (i, ml, mr) = (count("inner"), count("left"), count("right"));
+        if let Some(i) = &i {
+            self.assert(i.le(inner));
+        }
+        // Each side's rows with a partner. Each matches at most once if the
+        // other side's key is unique, and exactly once on a foreign key.
+        for (m, side, unique, foreign) in [(&ml, &l.card, ru, fl), (&mr, &r.card, lu, fr)] {
+            if let (Some(i), true) = (&i, foreign) {
+                self.assert(i.eq(side));
+            }
+            let Some(m) = m else { continue };
+            self.assert(m.le(side));
+            if foreign {
+                self.assert(m.eq(side));
+            }
+            let Some(i) = &i else { continue };
+            self.assert(m.le(i));
+            // A matched pair has a row on each side.
+            self.assert(i.ge(int(1)).implies(m.ge(int(1))));
+            if unique {
+                self.assert(i.eq(m));
+            }
+        }
+        let unmatched = |side: &Int, m: &Option<Int>| m.as_ref().map(|m| Int::sub(&[side, m]));
+        let (ul, ur) = (unmatched(&l.card, &ml), unmatched(&r.card, &mr));
+        let rows = match (join.join_type, &i, &ul, &ur) {
+            (JoinType::Left, Some(i), Some(ul), _) => Int::add(&[i, ul]),
+            (JoinType::Right, Some(i), _, Some(ur)) => Int::add(&[i, ur]),
+            (JoinType::Full, Some(i), Some(ul), Some(ur)) => Int::add(&[i, ul, ur]),
+            (JoinType::LeftAnti, _, Some(ul), _) => ul.clone(),
+            (JoinType::RightAnti, _, _, Some(ur)) => ur.clone(),
+            _ => return,
+        };
+        self.assert(o.card.eq(&rows));
+    }
+
+    /// Whether `join` is on exactly a declared foreign key's columns, from the
+    /// left side's values to every row of the table they reference, and from
+    /// the right's.
+    fn foreign_key(&self, join: &Join) -> (bool, bool) {
+        if join.on.is_empty() || join.filter.is_some() {
+            return (false, false);
+        }
+        let from_left = self.references(&join.left, &join.right, join.on.iter().map(|(a, b)| (a, b)));
+        let from_right = self.references(&join.right, &join.left, join.on.iter().map(|(a, b)| (b, a)));
+        (from_left, from_right)
+    }
+
+    /// True if each pair `(f, t)` compares a column of `from` with one of
+    /// `to`, together exactly a foreign key's columns: `from`'s hold one row's
+    /// values of the referencing columns, and `to` holds every row of the
+    /// referenced table once.
+    fn references<'e>(
+        &self,
+        from: &LogicalPlan,
+        to: &LogicalPlan,
+        pairs: impl Iterator<Item = (&'e Expr, &'e Expr)>,
+    ) -> bool {
+        let mut source: Option<(String, String)> = None;
+        let mut target: Option<String> = None;
+        let mut cols = vec![];
+        for (f, t) in pairs {
+            let (Some(fc), Some(tc)) = (key_column(from, f), key_column(to, t)) else {
+                return false;
+            };
+            let (Some((ft, row, fname)), Some((tt, tname))) =
+                (self.values(from, &fc, String::new()), self.every_row(to, &tc))
+            else {
+                return false;
+            };
+            if *source.get_or_insert((ft.clone(), row.clone())) != (ft, row)
+                || *target.get_or_insert(tt.clone()) != tt
+            {
+                return false;
+            }
+            cols.push((fname, tname));
+        }
+        let (Some((from_table, _)), Some(to_table)) = (source, target) else {
+            return false;
+        };
+        cols.sort();
+        cols.dedup();
+        self.foreign_keys.iter().any(|fk| {
+            let pairs: Vec<(String, String)> =
+                fk.pairs().into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+            fk.table == from_table && fk.references == to_table && pairs == cols
+        })
+    }
+
+    /// The stored column whose values column `c` of `plan` holds on every
+    /// row: `(table, row, column)`, where columns with the same `row` hold
+    /// values of one row of the table. `path` names the scan by the join
+    /// sides leading to it, so two reads of one table stay apart.
+    fn values(&self, plan: &LogicalPlan, c: &Column, path: String) -> Option<(String, String, String)> {
+        let i = plan.schema().index_of_column(c).ok()?;
+        let through = |child: &LogicalPlan, path: String| self.values(child, &child_column(child, i)?, path);
+        match plan {
+            LogicalPlan::TableScan(scan) => match (self.resolve)(scan) {
+                ScanKind::Base { display, .. } => Some((display, path, c.name.clone())),
+                ScanKind::NonBase => None,
+            },
+            LogicalPlan::Projection(p) => self.values(&p.input, &key_column(&p.input, &p.expr[i])?, path),
+            LogicalPlan::Aggregate(a) => {
+                let key = a.group_expr.get(i)?;
+                self.values(&a.input, &key_column(&a.input, key)?, path)
+            }
+            LogicalPlan::Filter(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Subquery(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Distinct(Distinct::All(_)) => through(plan.inputs()[0], path),
+            // A padded side's columns may be NULL.
+            LogicalPlan::Join(join) => {
+                let nl = join.left.schema().fields().len();
+                match join.join_type {
+                    JoinType::Inner | JoinType::Left if i < nl => through(&join.left, path + "L"),
+                    JoinType::Inner | JoinType::Right if i >= nl => {
+                        let child = &join.right;
+                        self.values(child, &child_column(child, i - nl)?, path + "R")
+                    }
+                    JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => through(&join.left, path),
+                    JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => through(&join.right, path),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The stored table and column, if `plan` holds each of the table's rows
+    /// exactly once and column `c` holds that column.
+    fn every_row(&self, plan: &LogicalPlan, c: &Column) -> Option<(String, String)> {
+        let i = plan.schema().index_of_column(c).ok()?;
+        let through = |child: &LogicalPlan| self.every_row(child, &child_column(child, i)?);
+        match plan {
+            LogicalPlan::TableScan(scan) if scan.filters.is_empty() && scan.fetch.is_none() => {
+                match (self.resolve)(scan) {
+                    ScanKind::Base { display, .. } => Some((display, c.name.clone())),
+                    ScanKind::NonBase => None,
+                }
+            }
+            LogicalPlan::Projection(p) => self.every_row(&p.input, &key_column(&p.input, &p.expr[i])?),
+            LogicalPlan::Sort(s) if s.fetch.is_none() => through(&s.input),
+            LogicalPlan::Repartition(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Subquery(_)
+            | LogicalPlan::Window(_) => through(plan.inputs()[0]),
+            _ => None,
+        }
     }
 
     /// NDVs of a join's output columns: values come from the inputs, plus NULL
@@ -1265,6 +1468,24 @@ fn same_positions(plan: &LogicalPlan, child: &LogicalPlan, cols: &[Column]) -> O
         .collect()
 }
 
+/// Columns `predicate` holds equal to a non-NULL constant on every row it keeps.
+fn pinned(predicate: &Expr) -> Vec<Column> {
+    split_conjunction(predicate)
+        .into_iter()
+        .filter_map(|e| match e {
+            Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
+                match (strip_alias(left), strip_alias(right)) {
+                    (Expr::Column(c), Expr::Literal(v, _)) | (Expr::Literal(v, _), Expr::Column(c)) if !v.is_null() => {
+                        Some(c.clone())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Positions of `cols` in `plan`'s output.
 fn output_indices(plan: &LogicalPlan, cols: &[Column]) -> Option<Vec<usize>> {
     cols.iter()
@@ -1293,14 +1514,54 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                 })
             })
         }
+        // A column the filter pins to one value adds nothing to tell its rows
+        // apart: if the input is unique on it with `cols`, the filter's rows
+        // are unique on `cols` alone, e.g. `rn = 1` over `row_number()`.
+        LogicalPlan::Filter(f) => {
+            let Some(cs) = same_positions(plan, &f.input, cols) else {
+                return false;
+            };
+            if covers_primary_key(&f.input, &cs) {
+                return true;
+            }
+            let mut with = cs.clone();
+            for c in pinned(&f.predicate) {
+                if f.input.schema().has_column(&c) && !with.contains(&c) {
+                    with.push(c);
+                }
+            }
+            with.len() > cs.len() && covers_primary_key(&f.input, &with)
+        }
+        // `row_number()` numbers each partition's rows 1, 2, ...: it is unique
+        // with its partition columns. Otherwise the window keeps its input's
+        // rows, so the input's keys among `cols` stay unique.
+        LogicalPlan::Window(w) => {
+            let Some(ix) = output_indices(plan, cols) else {
+                return false;
+            };
+            let n = w.input.schema().fields().len();
+            let numbered = ix.iter().filter(|&&i| i >= n).any(|&i| match strip_alias(&w.window_expr[i - n]) {
+                Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
+                    f.params.partition_by.iter().all(|p| match strip_alias(p) {
+                        Expr::Column(c) => w.input.schema().index_of_column(c).is_ok_and(|j| ix.contains(&j)),
+                        _ => false,
+                    })
+                }
+                _ => false,
+            });
+            let kept: Vec<Column> = ix
+                .iter()
+                .filter(|&&i| i < n)
+                .map(|&i| Column::from(w.input.schema().qualified_field(i)))
+                .collect();
+            numbered || (!kept.is_empty() && covers_primary_key(&w.input, &kept))
+        }
         // Operators whose output rows are a subset of their input's, with the
         // input's columns first and unchanged.
-        LogicalPlan::Filter(_)
-        | LogicalPlan::Sort(_)
+        LogicalPlan::Sort(_)
         | LogicalPlan::Limit(_)
         | LogicalPlan::Repartition(_)
-        | LogicalPlan::SubqueryAlias(_)
-        | LogicalPlan::Window(_) => {
+        | LogicalPlan::SubqueryAlias(_) => {
             let child = plan.inputs()[0];
             same_positions(plan, child, cols).is_some_and(|cs| covers_primary_key(child, &cs))
         }

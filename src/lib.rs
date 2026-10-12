@@ -8,12 +8,19 @@
 mod analyzer;
 mod bounds;
 mod domain;
+mod first;
+pub mod facts;
+mod informed;
+pub mod observed;
 mod origin;
 mod selectivity;
+mod simple;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};
+pub use informed::{FactMode, Informed, Matched};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
+pub use simple::{Simple, SimpleKind, SimpleSelectivity};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +48,9 @@ pub enum Error {
     /// A formula was evaluated without the row count of a table it mentions.
     #[error("no row count given for table {0}")]
     UnknownTable(String),
+    /// An engine's plan profile that could not be read.
+    #[error("unreadable plan profile: {0}")]
+    Observed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -164,39 +174,106 @@ impl Analysis {
                 self.assertions
             )));
         }
-        let constant = search.constant();
-        let scans: Vec<Int> = self
-            .scans
-            .iter()
-            .map(|(s, _)| Int::new_const(s.as_str()))
-            .collect();
-        let sum = if scans.is_empty() {
-            None
-        } else {
-            search.linear(&Int::add(&scans)).map(|(b, _)| b)
-        };
-        let tables = self
-            .tables
-            .iter()
-            .filter_map(|(name, symbol)| {
-                let (bound, exact) = search.linear(&Int::new_const(symbol.as_str()))?;
-                Some(TableBound {
-                    table: name.clone(),
-                    bound,
-                    exact,
-                })
+        let scans: Vec<String> = self.scans.iter().map(|(s, _)| s.clone()).collect();
+        Ok(prove_bounds(&search, &scans, &self.tables))
+    }
+
+    /// This analysis with what `facts` know put in place: each selectivity a
+    /// fact gives a value for is substituted in the formula, and its
+    /// operator's relation to its inputs joins the constraints, so
+    /// [`Informed::bounds`] can be tighter than [`Analysis::bounds`]. With
+    /// [`FactMode::Pinned`], row counts the facts give are used too. Needs
+    /// [`Options::selectivity`].
+    ///
+    /// The facts must describe the data the bounds are for: a fact read off
+    /// a plan of other data gives bounds about that data.
+    pub fn with_facts(&self, facts: &facts::FactSet, mode: FactMode) -> Result<Informed> {
+        informed::inform(self, facts, mode)
+    }
+
+    /// The fact each selectivity of [`Analysis::selectivity`]'s `required`
+    /// is looked up as, canonically named, by selectivity name; or why it is
+    /// none (a term that did not resolve, a limit, ...).
+    pub fn selectivity_facts(&self) -> Vec<(String, std::result::Result<facts::FactKind, String>)> {
+        informed::kinds(self)
+    }
+
+    /// Each selectivity of [`Analysis::selectivity`]'s `required`, and
+    /// whether it is *simple*: a filter's share of one stored table's rows, a
+    /// join's of two tables' pairs, a semi join's of one table's rows with a
+    /// partner in another, or a distinct count per row of one table. Views,
+    /// CTEs and projections are seen through, and operators the constraints
+    /// prove keep their input's rows one for one are too. Needs
+    /// [`Options::selectivity`].
+    pub fn simple_selectivities(&self) -> Result<Vec<SimpleSelectivity>> {
+        simple::simple(self)
+    }
+}
+
+/// The bounds `search` proves on its output: a constant, relative to the sum
+/// of the scans' variables, and relative to each table's symbol.
+pub(crate) fn prove_bounds(search: &bounds::Search, scans: &[String], tables: &[(String, String)]) -> Bounds {
+    let constant = search.constant();
+    let scans: Vec<Int> = scans.iter().map(|s| Int::new_const(s.as_str())).collect();
+    let sum = if scans.is_empty() {
+        None
+    } else {
+        search.linear(&Int::add(&scans)).map(|(b, _)| b)
+    };
+    let tables = tables
+        .iter()
+        .filter_map(|(name, symbol)| {
+            let (bound, exact) = search.linear(&Int::new_const(symbol.as_str()))?;
+            Some(TableBound {
+                table: name.clone(),
+                bound,
+                exact,
             })
-            .collect();
-        Ok(Bounds {
-            constant,
-            sum,
-            tables,
         })
+        .collect();
+    Bounds {
+        constant,
+        sum,
+        tables,
+    }
+}
+
+/// A foreign key: each row of `table` has `columns` never NULL and equal to
+/// `referenced` of exactly one row of `references`. Tables are named as the
+/// analysis shows them (bare in the default schema). Declared keys are
+/// trusted, like primary keys: data that breaks one can break a bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub references: String,
+    pub referenced: Vec<String>,
+}
+
+impl ForeignKey {
+    /// `table(columns)` referencing `references(referenced)`, column for column.
+    pub fn new(table: &str, columns: &[&str], references: &str, referenced: &[&str]) -> ForeignKey {
+        assert_eq!(columns.len(), referenced.len(), "a foreign key pairs its columns");
+        let names = |cs: &[&str]| cs.iter().map(|c| c.to_string()).collect();
+        ForeignKey {
+            table: table.to_string(),
+            columns: names(columns),
+            references: references.to_string(),
+            referenced: names(referenced),
+        }
+    }
+
+    /// The pairs of referencing and referenced columns, in order.
+    pub(crate) fn pairs(&self) -> Vec<(&str, &str)> {
+        let mut pairs: Vec<(&str, &str)> =
+            self.columns.iter().map(String::as_str).zip(self.referenced.iter().map(String::as_str)).collect();
+        pairs.sort();
+        pairs
     }
 }
 
 /// Settings for an analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The most distinct-count factors multiplied in one constraint, e.g. the
     /// columns of a GROUP BY or DISTINCT. Such products are nonlinear, so a
@@ -208,6 +285,11 @@ pub struct Options {
     /// operator selectivities ([`Analysis::selectivity`]). This runs a few
     /// solver checks per filter, join and GROUP BY. Defaults to false.
     pub selectivity: bool,
+    /// Foreign keys the data satisfies. A join on exactly one, against every
+    /// row of the table it references, keeps each referencing row exactly
+    /// once. DataFusion has no foreign key constraints, so they are declared
+    /// here. Defaults to none.
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 impl Default for Options {
@@ -215,6 +297,7 @@ impl Default for Options {
         Options {
             max_product: analyzer::DEFAULT_MAX_PRODUCT,
             selectivity: false,
+            foreign_keys: Vec::new(),
         }
     }
 }
@@ -297,6 +380,25 @@ pub fn analyze_plan_with(plan: &LogicalPlan, options: Options) -> Analysis {
     analyze_with(plan, &resolve, options)
 }
 
+/// Analyzes `plan`, the plan an engine chose for a query, in place of the
+/// plan DataFusion would choose, with explicit [`Options`]. Its operators keep
+/// the engine's order, so its selectivities are the ones the engine's
+/// profiles count: see [`observed::Catalog::to_logical`]. The plan's row
+/// counts, if any, are not read.
+pub fn analyze_observed(catalog: &observed::Catalog, plan: &observed::ObservedPlan, options: Options) -> Result<Analysis> {
+    let plan = catalog.to_logical(plan)?;
+    // Every scan is of a table in the catalog, by its bare name.
+    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
+    Ok(analyze_with(&plan, &resolve, options))
+}
+
+/// [`analyze_observed`] on DuckDB's plan for `sql`, as printed by `EXPLAIN
+/// (FORMAT JSON)` (or by `EXPLAIN (ANALYZE, FORMAT JSON)`).
+pub fn analyze_duckdb(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
+    let plan = observed::from_duckdb_explain(catalog, "", json, sql)?;
+    analyze_observed(catalog, &plan, options)
+}
+
 /// Identity of a provider object. An address, not a pointer, so futures holding
 /// it stay `Send`.
 fn provider_ptr(p: &Arc<dyn TableProvider>) -> usize {
@@ -320,7 +422,7 @@ fn analyze_with(
     resolve: &dyn Fn(&TableScan) -> ScanKind,
     options: Options,
 ) -> Analysis {
-    let mut a = Analyzer::new(resolve, options.max_product);
+    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys);
     let root = a.visit(plan).card;
     a.assert_partitions();
     let root_name = a.name_of(&root);

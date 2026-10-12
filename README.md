@@ -56,18 +56,24 @@ Every relation also gets:
 | Aggregate, no GROUP BY | `X = 1` | |
 | GROUP BY | `X <= l`, `X <= Π ndv(keys)`, `l >= 1 → X >= 1`. Keys cover a unique key: `X = l` | Keys: `=` expression's NDV |
 | ROLLUP / CUBE / GROUPING SETS | none | |
-| Inner join | `X <= l·r`. Right key unique: `X <= l`. Left key unique: `X <= r`. Cross join: `X = l·r` | Columns `<=` input. Equi-keys `<=` the other side's key NDV |
-| Left join | Right key unique: `X = l`. Else `l <= X <= inner + l` | Left `=`, right `<= ndv + 1` |
+| Inner join | `X <= l·r`. Right key unique: `X <= l`. Left key unique: `X <= r`. Cross join: `X = l·r`. On a foreign key from the left: `X = l` (mirror) | Columns `<=` input. Equi-keys `<=` the other side's key NDV |
+| Left join | Right key unique: `X = l`. Else `l <= X <= inner + l`. Exactly `X = i + l − mₗ` (below) | Left `=`, right `<= ndv + 1` |
 | Right join | Mirror of left | Mirror |
-| Full join | `X >= l`, `X >= r`, `X <= inner + l + r`. Either key unique: `X <= l + r` | Both sides `<= ndv + 1` |
-| Semi / anti join | `X <=` kept side | `<=`. Semi: equi-key `<=` other side |
+| Full join | `X >= l`, `X >= r`, `X <= inner + l + r`. Either key unique: `X <= l + r`. Exactly `X = i + l − mₗ + r − mᵣ` | Both sides `<= ndv + 1` |
+| Semi / anti join | `X <=` kept side. On a foreign key from the kept side: semi `X =` kept side, anti `X = 0`. Anti: `X = l − mₗ` | `<=`. Semi: equi-key `<=` other side |
 | Mark join | `X =` kept side | `=` |
 | Union | `X = Σ inputs` | `<= Σ`, `>=` each input |
 | Values | `X = rows` | Domain: the literals |
 | Empty relation | `X = 0`, or `1` if it produces a row | |
 | Anything else (Unnest, recursive CTE, …) | none | |
 
-`inner` is the bound on an inner join with the same inputs.
+`inner` is the bound on an inner join with the same inputs. An outer or anti
+join also gets variables for what its selectivities measure (`validate`
+counts them): its inner join's rows `i` (`{op}_inner`), and the rows of each
+side with a partner `mₗ`, `mᵣ` (`{op}_left`, `{op}_right`). `i <= inner`,
+`m <= i` and `m <=` its side, `i >= 1 → m >= 1`; if the other side's key is
+unique, `m = i`, and on a foreign key from a side, `m =` the side and `i =` the
+side.
 
 **Unique keys.** A set of columns is unique if it covers one of these:
 
@@ -87,6 +93,25 @@ A key stays unique:
 
 `UNIQUE` constraints are not trusted (DataFusion doesn't enforce them), and
 ROLLUP / CUBE / GROUPING SETS outputs are not keys, since they repeat key values.
+
+**Foreign keys.** DataFusion has none, so they are declared in
+`Options::foreign_keys`: `ForeignKey::new("orders", &["cust"], "customers",
+&["id"])` says every order's `cust` is non-NULL and equals the `id` of exactly
+one customer. A join on exactly a foreign key's columns (no other condition),
+where one side's columns hold one row's referencing values and the other side
+holds every row of the referenced table once, matches each row of the first
+side exactly once:
+
+- The referencing side may be filtered, joined, grouped by the key, or
+  deduplicated: its values are still some row's. Not padded by an outer join,
+  whose NULLs match nothing.
+- The referenced side must be the whole table: a scan without filters, through
+  projections, aliases, sorts without a limit, and windows.
+
+So `orders ⋈ customers` on the key has `X = |orders|`, and its selectivity is
+resolved: no fact needed. So is any part of an outer or anti join's formula
+the constraints determine: in `customers LEFT JOIN orders` on the key, the
+inner join has `|orders|` rows, so `X = |orders| + (1 − m)·|customers|`.
 
 **Value domains.** Rows above a filter or join condition all satisfy it, so
 every relation also carries, per expression, a *domain*: an integer range or a
@@ -165,7 +190,7 @@ verdict, the portfolio gets a turn on a fresh solver.
 - Equality-based NDV rules skip floats: `-0.0 = 0.0` in SQL, but the two differ as bits.
 - Products of NDVs are nonlinear and capped at `Options::max_product` factors
   (default 3). Larger products are dropped, which is sound but weaker.
-- Declared keys are trusted. DataFusion does not enforce them.
+- Declared keys, primary and foreign, are trusted. DataFusion does not enforce them.
 
 ## Selectivities
 
@@ -236,6 +261,360 @@ relative to its direct input. Facts that span operators (`HAVING count(*) > 1`
 keeps at most half of the *grouped* rows; a join on a key outputs at most the
 other side's rows) show up in `bounds()` but not in a selectivity's range, so
 `evaluate` without values can give a wider range than `bounds()` proves.
+
+## Facts
+
+Selectivities are unknowns; watching queries run fills them in. A *fact* is a
+number known exactly from an executed plan: `|lineitem| = 60175`,
+`s(l_quantity < 10 | lineitem) = 10816/60175`, `ndv(l_suppkey | lineitem) = 100`.
+
+```rust
+let catalog = Catalog::from_context(&ctx).await?;           // schemas only
+let plan = observed::from_duckdb(&catalog, "q1", &json)?;   // EXPLAIN (ANALYZE, FORMAT JSON)
+let facts = facts::derive_facts(&[plan, ...]);
+println!("{facts}");
+```
+
+**Observed plans.** `observed::ObservedPlan` is an engine-neutral operator
+tree, with each operator's output rows. Its predicates and keys are DataFusion
+`Expr`s over base-table columns, whatever projections sit in between: each
+output column carries its lineage (exactly an expression, a one-to-one
+encoding of one, or unknown). Columns are qualified by *table instance*
+(`lineitem#3`, the scan's operator), so two scans of a table stay apart. An
+aggregate's output is a column of the aggregate itself (`@7.sum(l_quantity)`),
+so HAVING and scalar-subquery comparisons read too.
+
+Every expression is written as DataFusion's optimizer writes it, so that a
+predicate reads the same in a profile and in the query it is matched against
+(see [Bounds from facts](#bounds-from-facts)): types are coerced as for
+execution, so a literal takes its column's type (`l_quantity < 10.00` is
+`Decimal128(10.00,15,2)`, an aggregate's value its aggregate's type), and
+constants are folded. DuckDB computes `date '1998-12-01' - interval '90' day`
+as a timestamp, and DataFusion as a date, so a date compared with a timestamp
+at midnight is compared with that date. DuckDB prints `LIKE 'abc%'`,
+`'%abc'` and `'%abc%'` as `starts_with`, `ends_with` and `contains`, so they
+are written that way.
+
+`from_duckdb` reads DuckDB's profile, resolving names only when one column
+has the name, and positions (`#2`) only where the column order is known (not
+above a join, which drops and reorders columns unseen). What does not resolve
+is kept as text and gives no facts. It also reads the query text the profile
+includes, for two things the plan does not print reliably:
+
+- *Aliases.* A projection may print only `nation` or `o_year`; the alias's
+  row-level expression in the query (`extract(year from o_orderdate)`) is
+  read in its place, unless the alias names two expressions.
+- *Tables read twice.* Above a self-join DuckDB prints both instances'
+  columns by one name (TPC-H q07's `n_name`s). Each alias of such a table
+  (`n1`) is matched to the one instance whose join conditions are all
+  equalities its columns take part in with tables read once
+  (`s_nationkey = n1.n_nationkey`). A predicate or alias that does not
+  resolve by name is then read as the one query expression printed the
+  same without qualifiers, its aliases' columns as their instances'.
+- *Join conditions.* After decorrelating a subquery, DuckDB may print a
+  condition's column under the other side's name. A condition is read only
+  if the query compares those base columns: equal under its equalities
+  (taken transitively, as DuckDB derives join conditions), or in one
+  comparison. Without query text, conditions are taken as printed.
+
+Some operators read another's output again. A materialized CTE's scans, and a
+delim join's (DuckDB's plan for a correlated subquery) reads of its input and
+of the input's distinct keys, become `Reuse` operators, each an independent
+copy of the rows with renamed instances (`lineitem#3~r9`). A delim join is the
+join below it, over those copies. A filter on a mark join's mark (`IN`,
+`EXISTS`, `NOT IN`) keeps the rows of a semi join, or for `NOT IN` of its own
+operator. An `IN` over a constant list, planned as a mark join against a
+table of the constants, is read as the `IN` predicate DuckDB also pushes into
+the scan.
+
+**Contexts.** A fact holds for the rows it was measured over: its *context*.
+Contexts are built in a normal form (`facts::rewrite`), so that plans that
+compute the same rows in a different order name them the same. Filters,
+inner joins, and semi and anti joins over any inputs give one `Spj` context:
+the cross product of its tables and *atoms* (inputs that are not themselves
+SPJs, like a GROUP BY or an outer join), with a set of canonical predicates
+and of existence conditions (`exists[on](other)`, `not exists[...]`,
+`not in[...]`). Other operators give a `Derived` context, named by the
+operator, its keys and its inputs' contexts. Each rewrite into the normal
+form holds for any data, and fires only when that can be read off the terms:
+
+- Inner joins and filters flatten, over atoms too: join order does not matter.
+- A semi or anti join is a condition on its kept side's rows, so it commutes
+  with the inner joins and filters around it, and with other such joins.
+- Equal columns (`a = b ∧ b = c`) are written as a star from the least, and
+  a semi or anti join's condition reads each side's least.
+- DuckDB's decorrelation, a semi join against `σP(X × group_k'(K'))` where
+  `K'` is a copy of the kept rows, reads as the semi join of `X` it computes.
+- A left join's preserved side is only the inputs its condition reads; the
+  rest applies outside it, and a term of the condition on the other side alone
+  filters that side. A predicate rejecting the padded side's NULLs makes the
+  inner join (a full join, the left join preserving the other side).
+
+A predicate on a GROUP BY's keys stays above it: a value the GROUP BY
+computes is named by the rows it ran over, and what reads it above would no
+longer name a GROUP BY of the rows. Engines move such predicates below the
+GROUP BY themselves.
+
+| Operator | Output context |
+|---|---|
+| Scan of `T`, filters `p` | `T where p` |
+| Project, Sort, Window | the input's |
+| Filter `p` | input `where p` |
+| Inner join on `c` | `L × R where c` |
+| Semi, anti join | `kept where exists[c](other)`, `not exists[c](other)` |
+| Left, full join | `Derived`; a right join as the left join with its inputs swapped |
+| Filter on a mark | `kept where exists[...]` (`IN`), or `not in[...]` |
+| Group by / distinct, aggregate, top-n, union | `Derived` |
+| Reuse (CTE scan, delim join input) | the read operator's, over copied instances |
+| Limit | tainted, with everything below it |
+| Anything else | tainted |
+
+A fact's instances are then named canonically: a table's only instance by
+the table's name, several by `lineitem@1`, `lineitem@2`, ..., numbered to make
+the fact least, so the same fact from two plans reads the same. A value of an
+aggregate reads as `"value"."sum(lineitem.l_quantity) of group[...](...)"`:
+the aggregate and the rows it ran over.
+
+Some counts are not exactly a function of the context, and give no fact:
+
+- *Pushed filters.* A filter pushed into a scan, required or optional, may be
+  applied loosely (only to skip blocks, say), so the scan's rows are the
+  context's and maybe more. Its count, and the count of each operator above
+  that keeps all of a superset input's rows (filters, inner and semi joins,
+  an anti join's kept side, a left join's preserved side), is only an upper
+  bound: `|ctx| <= rows`, and for a GROUP BY over such rows,
+  `ndv(k | input) <= rows`. An anti join's other side, an outer join's padded
+  side, a mark join, a GROUP BY's values, a top-n and a union cannot take
+  extra rows, and taint. A filter above that checks the same predicate makes
+  the rows exact again.
+- *Runtime filters.* DuckDB pushes a join's build-side keys into the probe
+  side's scan as filters, which remove real rows of the context. The rows
+  stay pending, with no fact nor bound, until the join on that column (the
+  highest one, should several join on it), whose output they cannot change.
+- *Early stops.* Below a `LIMIT`, on the probe side of a join that output
+  nothing (its build side empty, or with no key that can match), and in a
+  scan that reports reading fewer rows than it output, operators may not
+  have run to completion.
+- *Volatile* (`random()`) and unresolved predicates. Names stay unresolved
+  above a self-join where both instances' columns share them and the query
+  does not tell them apart (see *Tables read twice*), and aggregates named
+  only by an alias (`total_revenue`, `c_count`) stay unknown.
+
+**Rules.** `facts::RULES` read facts off each operator with clean inputs:
+
+| Rule | Fact |
+|---|---|
+| Cardinality | `\|ctx\| = rows` |
+| Filter selectivity | `s(p \| input) = rows / input`, without conjuncts the input already satisfies |
+| Join selectivity | inner: `s(c \| L × R) = rows / (l·r)`; semi/anti: the kept side's share with a partner `m` |
+| Distinct count | group by / distinct on `k`: `ndv(k \| input) = rows` |
+| Upper bound | pending only on pushed filters: `\|ctx\| <= rows`; a GROUP BY over such rows: `ndv(k \| input) <= rows` |
+
+**Closure.** `FactSet::close` combines facts from every plan until nothing new
+follows. A filtered size over an unfiltered one is a selectivity (`ratio`); a
+selectivity times its input's size is a size (`product`). A join's size over
+its inputs' sizes is a join selectivity, even when the inputs were counted in
+other plans (`join`). The same goes for a semi join's size over its kept
+side's (`match`). A distinct count equal to its context's size makes the keys
+unique there (`unique`). A selectivity of 1 says every row of its context
+satisfies the predicate, so a context containing that one names the same rows
+without it (`redundant`): DuckDB filters a join's side by the other's key
+range (`c_custkey <= 1499`), which a query never spells out. The same fact
+with two values is a `Conflict`: the data changed, or a context names the
+wrong rows. So is a bound below its context's exact value. Bounds keep the
+least seen, and do not combine.
+
+The fixtures under `tests/duckdb` are DuckDB profiles of TPC-H (scale factor
+0.01) and some hand-written queries, regenerated by
+`scripts/duckdb_fixtures.sh`. It also checks the facts themselves:
+`FactKind::count_sql` writes what any fact or bound counts as SQL, from what
+its context means rather than how a plan computed it (each instance a
+subquery with uniquely named columns, existence conditions as `EXISTS`,
+groups as `GROUP BY`, outer joins as outer joins). An aggregate's value is
+computed by the GROUP BY among the fact's rows whose context it names, by the
+definition the `FactSet` recorded when it read the plan. DuckDB counts
+each into `fact_checks.json`, which `facts_match_duckdb` compares against: a
+fact must equal its count, a bound be at least it. Rerun the script whenever
+the derived facts change.
+
+`tests/fact_truth.rs` does the same live, on many more queries: TPC-H, the
+fixtures, the larger queries in `tests/truth/queries.sql`, and generated ones
+(joins of every kind, grouped subqueries, nested and correlated semi and anti
+joins, `NOT IN` against NULLs), each profiled with one thread and with four.
+Every fact and bound is counted, no two plans may disagree, and each query's
+bounds with the facts must hold its true count. It needs the `duckdb` CLI.
+
+```sh
+scripts/duckdb_fixtures.sh                          # profiles, true counts, fact checks
+cargo test --test facts                             # including facts_match_duckdb
+cargo test --test facts print_facts -- --nocapture  # every plan's contexts and facts
+CARDINAL_TRUTH_N=300 CARDINAL_TRUTH_SEED=11 \
+  cargo test --release --test fact_truth -- --nocapture
+```
+
+## Bounds from facts
+
+Facts fill in selectivities. Each operator of a query gets the context facts
+would name its rows by (`facts::logical`), built by the same rules from the
+DataFusion plan: scans are instances (`lineitem#4`, by node), predicates are
+read through projections and aliases to base columns, and expressions are
+normalized as a profile's are. A selectivity's value is then a lookup:
+
+| Selectivity | Fact | Or, from sizes |
+|---|---|---|
+| Filter `p` over input `I` | `s(p \| I)`, without conjuncts `I` satisfies | `\|I where p\| / \|I\|` |
+| Inner join on `c` of `L`, `R` | `s(c \| L × R)` | `\|L × R where c\| / (\|L\|·\|R\|)` |
+| Semi / anti join share `m` | `m(c \| kept ⋉ other)` | the semi or anti join's size over the kept side's |
+| `NOT IN` | | its size over its input's |
+| Distinct, GROUP BY on `k` | `ndv(k \| I) / \|I\|`, or 1 if `unique(k \| I)` | |
+
+```rust
+let facts = facts::derive_facts(&plans);
+let informed = analysis.with_facts(&facts, FactMode::Ratios)?;
+informed.output;   // s1·|lineitem|: the filter is pushed into the scan
+informed.matched;  // the selectivities with a value from a fact
+informed.bounds()?;  // as Analysis::bounds, with the facts among the constraints
+informed.range()?;   // the proven lo <= X <= hi
+```
+
+A matched value replaces its selectivity in the formula, and its operator's
+relation to its inputs (`X = 10816/60175 · l`, over reals) joins the
+constraints, where it combines with what they already know (keys, domains,
+disjoint subsets). Two modes:
+
+- `FactMode::Ratios` uses only selectivities. Table sizes stay unknowns, so
+  the bounds hold as the tables grow, as long as the shares do (a GROUP BY's
+  groups are the least likely to keep their share).
+- `FactMode::Pinned` also fixes every row count a fact gives: tables, and any
+  operator whose context has a known size (a GROUP BY's from its distinct
+  count), and caps every operator whose context has an upper bound
+  (`capped`). This holds a join's size even where it was joined in another
+  order, and is exact for the data the facts were read from only.
+
+A value outside its selectivity's proven range, or contradicting the
+constraints, is `rejected`: a fact matched to the wrong rows, or data that
+changed. A relation the solver cannot check in time is left out (`unchecked`).
+A conflicting fact is never used.
+
+The fixture queries test this against DuckDB's profiles of themselves: with
+every fact, and with only the other queries', no fact is rejected and every
+bound holds the true count. With TPC-H's foreign keys declared, 91
+selectivities remain to find (23 fewer than without), and with every fact 38
+have a value. Most of the rest were never counted: DuckDB joined in another
+order, or a runtime filter pruned the scan.
+
+```sh
+cargo test --test fact_bounds                                  # bounds hold, match rates
+cargo test --test fact_bounds print_matches -- --nocapture     # each query's matches, and why not
+cargo test --test fact_bounds print_bounds -- --nocapture      # bounds before and after
+```
+
+### Plans from an engine
+
+A fact matches only an operator whose rows it names, and DataFusion may plan
+a query in another order than the engine whose profiles gave the facts. So a
+query can also be analyzed as the engine planned it:
+
+```rust
+let a = cardinal::analyze_duckdb(&catalog, &explain_json, Some(sql), options)?;
+// or, from a plan already read:
+let plan = observed::from_duckdb_explain(&catalog, "q1", &explain_json, Some(sql))?;
+let a = cardinal::analyze_observed(&catalog, &plan, options)?;
+```
+
+`from_duckdb_explain` reads `EXPLAIN (FORMAT JSON)` output, or a profile
+with its counts ignored. A plain plan has no query text, so `sql` names what
+it prints only by alias and vouches for join conditions. Its plan is not
+counted (`ObservedPlan::counted`), and gives no facts.
+
+`Catalog::to_logical` writes the plan as an unoptimized DataFusion plan of
+the same shape, which the analysis reads as it reads any other. Each
+operator outputs its input's instance columns, which is what predicates and
+keys read, so projections, sorts and windows are left out:
+
+| Observed | Logical |
+|---|---|
+| Scan, with filters | `TableScan` with its required filters pushed, aliased as its instance. Optional and runtime filters are dropped: neither changes the rows above |
+| Filter, join | Filter, join. Equalities across the sides are keys (all `IS NOT DISTINCT FROM`: keys equal on NULL), the rest a filter |
+| Filter on a mark | Semi join, or for `NOT IN` a null-aware anti join |
+| Group by | `Aggregate`. Keys that are not columns, and values, are columns of `@node` |
+| Reuse (CTE scan, delim join input) | The read operator again, its instances renamed: an independent copy |
+| Top-n (`fetch`, `offset`) | `Sort` with fetch `offset + fetch`, then a limit skipping `offset` |
+| Limit | A filter on an opaque predicate, then a limit of `at_most` rows if known |
+| Union | Each input as one column: nothing traces a union's columns |
+
+DuckDB prints no limit's count, in any `EXPLAIN` format, so it is read off
+the query: when the plan has as many limit and top-n operators as the query
+has `LIMIT` clauses, each with a constant count, every limit outputs at most
+the largest (`Op::Limit { at_most }`). An offset only drops rows.
+
+DuckDB materializes a limit's rows late: the limit (or top-n) picks rows of
+a scan of `T`, and a semi join on `rowid = rowid` reads their columns from a
+second, unfiltered scan of `T`. That join outputs exactly the picked rows,
+so it reads as the picking side, with the second scan's columns read as the
+first's. `tests/plan_truth.rs` checks limits and offsets against a live
+DuckDB: every bound holds the true count, and limits bound what they should.
+
+What does not translate is opaque, and bounds nothing: a predicate or key
+that did not resolve is a volatile `opaque('<text>')`, and an operator
+without a model, or one DataFusion rejects, an extension node over its
+inputs.
+
+On the fixtures, with every fact, pinned bounds cap 35 of the 45 queries
+DataFusion also plans at their true count, against 30 when DataFusion plans
+them. DuckDB's plan does better on join orders (TPC-H q05: `X <= 5`, not 25)
+and the filters it pushes, and no worse on any. `explain_plans` checks that each TPC-H query's plain
+`EXPLAIN` asks for the same selectivities as its profile.
+
+## Simple selectivities
+
+A selectivity is a share of its operator's input, and that input is often
+other operators' output. A *simple* selectivity is a share of the rows of
+stored tables alone, whole:
+
+| Kind | Fact | Over |
+|---|---|---|
+| Filter | `s(p \| T)` | one table |
+| Join | `s(c \| T × U)` | two tables (a table read twice counts twice) |
+| Semi join | `m(c \| T ⋉ U)` | a kept table, and the other |
+| Distinct | `ndv(k \| T)`, over `\|T\|` | one table |
+
+```rust
+for s in analysis.simple_selectivities()? {
+    println!("{s}");
+    // s1 = s(orders.amount > 10 | orders): filter on orders
+    // s2: not simple (over filtered rows: items × orders where orders.amount > 10)
+}
+```
+
+An operator's input is named as a fact names it (see [Contexts](#facts)), so
+views, CTEs, subqueries, projections and aliases read as the stored tables'
+scans below them, and predicates and keys as expressions over their columns.
+Only scans of tables count: a view is inlined, and its definition read. A
+join's share whose condition reads one table only is that table's filter
+share, `s(p | T × U) = s(p | T)`.
+
+Where an input is more than whole tables, the constraints may prove it holds
+the same rows as one. Each operator that does is seen through, and listed in
+`Simple::proof`:
+
+- a filter, or a scan's pushed filters, or a semi or anti join, whose rows the
+  constraints prove are all of its input's;
+- an inner equi-join where each row of one side has at most one partner (the
+  other side's key is unique, or a foreign key goes to it) and the join
+  provably has as many rows as that side, so each has exactly one; or a left
+  join whose preserved rows each have at most one. Its rows are that side's,
+  one for one, and if nothing above reads the other side's columns, the other
+  side is dropped.
+
+So `SELECT i.part, count(*) FROM items i JOIN orders o ON i.order_id = o.id
+GROUP BY i.part`, with a foreign key from `items` to `orders`, needs
+`ndv(items.part | items)`. A filter on `o.amount` above reads the order, and
+the join's share stays one of pairs of filtered rows. `tests/simple.rs`
+executes every query and checks that each simple selectivity's fact, counted
+over its tables alone, gives the value the execution measured. On TPC-H with
+its foreign keys, 18 of the 67 selectivities DataFusion's plans need are
+simple, and 33 of 101 for DuckDB's.
 
 ## Validation
 
