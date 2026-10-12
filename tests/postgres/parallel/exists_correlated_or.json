@@ -1,0 +1,79 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "customer",
+          "Schema": "public",
+          "Alias": "customer",
+          "Actual Rows": 142.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"],
+          "Filter": "((customer.c_acctbal > '9000'::numeric) OR (ANY (customer.c_custkey = (hashed SubPlan 2).col1)))",
+          "Rows Removed by Filter": 1358,
+          "Plans": [
+            {
+              "Node Type": "Gather",
+              "Parent Relationship": "SubPlan",
+              "Subplan Name": "SubPlan 2",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 16.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_custkey"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Single Copy": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 5.33,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["orders.o_custkey"],
+                  "Filter": "(orders.o_totalprice > '400000'::numeric)",
+                  "Rows Removed by Filter": 4995,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

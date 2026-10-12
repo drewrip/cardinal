@@ -13,7 +13,9 @@
 //! (and on the keys), and DuckDB's decorrelated `EXISTS`, exactly and
 //! nearly.
 //!
-//! Needs the `duckdb` CLI; skipped without it. `CARDINAL_REWRITE_N` sets the
+//! Needs the `duckdb` CLI, and for PostgreSQL a server with the database
+//! `scripts/postgres_fixtures.sh` loads; each is skipped without.
+//! `CARDINAL_REWRITE_N` sets the
 //! number of trees (default 2000), `CARDINAL_REWRITE_SEED` their seed.
 
 mod fixtures;
@@ -29,7 +31,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator, when};
 use datafusion::prelude::lit;
 use datafusion::sql::unparser::Unparser;
 use fixtures::catalog;
-use live::{Rng, TIMED_OUT, database, duckdb_available, values};
+use live::{Engine, Rng, TIMED_OUT};
 
 /// A column a tree reads: its instance, name, and what values it holds.
 #[derive(Clone, Debug)]
@@ -485,11 +487,23 @@ impl Gen {
 
 #[tokio::test]
 async fn rewrites_keep_rows() {
-    if !duckdb_available() {
-        eprintln!("skipped: no duckdb CLI");
-        return;
+    match Engine::duckdb() {
+        Some(engine) => check(engine).await,
+        None => eprintln!("skipped: no duckdb CLI"),
     }
-    let db = database();
+}
+
+/// The same trees, counted by PostgreSQL, each context's count written in
+/// its dialect.
+#[tokio::test]
+async fn rewrites_keep_rows_in_postgres() {
+    match Engine::postgres() {
+        Some(engine) => check(engine).await,
+        None => eprintln!("skipped: no PostgreSQL with the fixtures' database"),
+    }
+}
+
+async fn check(engine: Engine) {
     let catalog = catalog().await;
     let n: usize = std::env::var("CARDINAL_REWRITE_N").ok().and_then(|n| n.parse().ok()).unwrap_or(2000);
     let seed: u64 = std::env::var("CARDINAL_REWRITE_SEED").ok().and_then(|n| n.parse().ok()).unwrap_or(3);
@@ -501,18 +515,18 @@ async fn rewrites_keep_rows() {
         let tree = g.tree(3);
         let mut facts = FactSet::default();
         let context = tree.context(&mut facts);
-        let Some(counts) = FactKind::Cardinality(context.clone()).canonical().count_sql(&catalog, &facts) else {
+        let Some(counts) = FactKind::Cardinality(context.clone()).canonical().count_sql_in(&catalog, &facts, engine.dialect()) else {
             if std::env::var("CARDINAL_REWRITE_SHOW").is_ok() {
                 eprintln!("not writable: {}\n  values: {:?}\n  tree: {tree:?}", context.canonical(), facts.values().map(|v| &v.name).collect::<Vec<_>>());
             }
             unwritten += 1;
             continue;
         };
-        queries.push(format!("SELECT count(*) FROM ({})", tree.sql(&mut 0)));
+        queries.push(format!("SELECT count(*) FROM ({}) AS \"_s0\"", tree.sql(&mut 0)));
         queries.push(counts.value);
         cases.push((tree, context));
     }
-    let counted = values(&db, &queries);
+    let counted = engine.values(&queries);
     let mut failures = vec![];
     let (mut checked, mut slow) = (0, 0);
     for (i, (tree, context)) in cases.iter().enumerate() {
@@ -528,6 +542,6 @@ async fn rewrites_keep_rows() {
             (Err(e), _) | (_, Err(e)) => failures.push(format!("does not count: {e}\n  {}\n  {}", queries[2 * i], queries[2 * i + 1])),
         }
     }
-    println!("{n} trees: {checked} agree, {unwritten} contexts not writable, {slow} timed out");
+    println!("{}: {n} trees: {checked} agree, {unwritten} contexts not writable, {slow} timed out", engine.name());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n\n"));
 }

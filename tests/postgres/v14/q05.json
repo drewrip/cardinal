@@ -1,0 +1,263 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 5,
+      "Actual Loops": 1,
+      "Output": ["nation.n_name", "(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))"],
+      "Sort Key": ["(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))) DESC"],
+      "Sort Method": "quicksort",
+      "Sort Space Used": 25,
+      "Sort Space Type": "Memory",
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Sorted",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 5,
+          "Actual Loops": 1,
+          "Output": ["nation.n_name", "sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))"],
+          "Group Key": ["nation.n_name"],
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 103,
+              "Actual Loops": 1,
+              "Output": ["nation.n_name", "lineitem.l_extendedprice", "lineitem.l_discount"],
+              "Sort Key": ["nation.n_name"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 32,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Actual Rows": 103,
+                  "Actual Loops": 1,
+                  "Output": ["nation.n_name", "lineitem.l_extendedprice", "lineitem.l_discount"],
+                  "Inner Unique": true,
+                  "Hash Cond": "((lineitem.l_suppkey = supplier.s_suppkey) AND (customer.c_nationkey = supplier.s_nationkey))",
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Actual Rows": 1824,
+                      "Actual Loops": 1,
+                      "Output": ["customer.c_nationkey", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "nation.n_name", "nation.n_nationkey"],
+                      "Inner Unique": false,
+                      "Plans": [
+                        {
+                          "Node Type": "Hash Join",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Actual Rows": 454,
+                          "Actual Loops": 1,
+                          "Output": ["customer.c_nationkey", "orders.o_orderkey", "nation.n_name", "nation.n_nationkey"],
+                          "Inner Unique": false,
+                          "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "orders",
+                              "Schema": "public",
+                              "Alias": "orders",
+                              "Actual Rows": 2303,
+                              "Actual Loops": 1,
+                              "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                              "Recheck Cond": "((orders.o_orderdate >= '1994-01-01'::date) AND (orders.o_orderdate < '1995-01-01 00:00:00'::timestamp without time zone))",
+                              "Rows Removed by Index Recheck": 0,
+                              "Exact Heap Blocks": 267,
+                              "Lossy Heap Blocks": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "Bitmap Index Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Index Name": "orders_o_orderdate_idx",
+                                  "Actual Rows": 2303,
+                                  "Actual Loops": 1,
+                                  "Index Cond": "((orders.o_orderdate >= '1994-01-01'::date) AND (orders.o_orderdate < '1995-01-01 00:00:00'::timestamp without time zone))"
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Hash",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Actual Rows": 309,
+                              "Actual Loops": 1,
+                              "Output": ["customer.c_custkey", "customer.c_nationkey", "nation.n_name", "nation.n_nationkey"],
+                              "Hash Buckets": 1024,
+                              "Original Hash Buckets": 1024,
+                              "Hash Batches": 1,
+                              "Original Hash Batches": 1,
+                              "Peak Memory Usage": 26,
+                              "Plans": [
+                                {
+                                  "Node Type": "Nested Loop",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Join Type": "Inner",
+                                  "Actual Rows": 309,
+                                  "Actual Loops": 1,
+                                  "Output": ["customer.c_custkey", "customer.c_nationkey", "nation.n_name", "nation.n_nationkey"],
+                                  "Inner Unique": false,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Hash Join",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Join Type": "Inner",
+                                      "Actual Rows": 5,
+                                      "Actual Loops": 1,
+                                      "Output": ["nation.n_name", "nation.n_nationkey"],
+                                      "Inner Unique": true,
+                                      "Hash Cond": "(nation.n_regionkey = region.r_regionkey)",
+                                      "Plans": [
+                                        {
+                                          "Node Type": "Seq Scan",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Relation Name": "nation",
+                                          "Schema": "public",
+                                          "Alias": "nation",
+                                          "Actual Rows": 25,
+                                          "Actual Loops": 1,
+                                          "Output": ["nation.n_nationkey", "nation.n_name", "nation.n_regionkey", "nation.n_comment"]
+                                        },
+                                        {
+                                          "Node Type": "Hash",
+                                          "Parent Relationship": "Inner",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Actual Rows": 1,
+                                          "Actual Loops": 1,
+                                          "Output": ["region.r_regionkey"],
+                                          "Hash Buckets": 1024,
+                                          "Original Hash Buckets": 1024,
+                                          "Hash Batches": 1,
+                                          "Original Hash Batches": 1,
+                                          "Peak Memory Usage": 9,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Seq Scan",
+                                              "Parent Relationship": "Outer",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Relation Name": "region",
+                                              "Schema": "public",
+                                              "Alias": "region",
+                                              "Actual Rows": 1,
+                                              "Actual Loops": 1,
+                                              "Output": ["region.r_regionkey"],
+                                              "Filter": "((region.r_name)::text = 'ASIA'::text)",
+                                              "Rows Removed by Filter": 4
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Index Scan",
+                                      "Parent Relationship": "Inner",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Scan Direction": "Forward",
+                                      "Index Name": "customer_c_nationkey_idx",
+                                      "Relation Name": "customer",
+                                      "Schema": "public",
+                                      "Alias": "customer",
+                                      "Actual Rows": 62,
+                                      "Actual Loops": 5,
+                                      "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"],
+                                      "Index Cond": "(customer.c_nationkey = nation.n_nationkey)",
+                                      "Rows Removed by Index Recheck": 0
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "lineitem_pkey",
+                          "Relation Name": "lineitem",
+                          "Schema": "public",
+                          "Alias": "lineitem",
+                          "Actual Rows": 4,
+                          "Actual Loops": 454,
+                          "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                          "Index Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+                          "Rows Removed by Index Recheck": 0
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Actual Rows": 100,
+                      "Actual Loops": 1,
+                      "Output": ["supplier.s_suppkey", "supplier.s_nationkey"],
+                      "Hash Buckets": 1024,
+                      "Original Hash Buckets": 1024,
+                      "Hash Batches": 1,
+                      "Original Hash Batches": 1,
+                      "Peak Memory Usage": 13,
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "supplier",
+                          "Schema": "public",
+                          "Alias": "supplier",
+                          "Actual Rows": 100,
+                          "Actual Loops": 1,
+                          "Output": ["supplier.s_suppkey", "supplier.s_nationkey"]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

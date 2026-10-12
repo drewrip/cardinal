@@ -17,7 +17,7 @@ mod sql;
 
 pub use context::{Context, Exists, ExistsKind, Pending, State, Taint, Term, Value, states};
 pub use rules::{FactRule, Observation, RULES};
-pub use sql::Counts;
+pub use sql::{CountDialect, Counts};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -134,6 +134,21 @@ pub enum FactKind {
     Unique { keys: BTreeSet<Term>, over: Context },
 }
 
+impl FactKind {
+    /// This fact, with the value its queries counted ([`Counts`]): `value`,
+    /// and for a share or a uniqueness, `of`. `None` if they give it no
+    /// value: a share of no rows, or keys that are not unique.
+    pub fn counted(&self, value: u64, of: Option<u64>) -> Option<Fact> {
+        let value = match (self, of) {
+            (FactKind::Cardinality(_) | FactKind::Distinct { .. }, _) => Ratio::int(value),
+            (FactKind::Unique { .. }, Some(of)) if value == of => Ratio::int(1),
+            (FactKind::Selectivity { .. } | FactKind::Match { .. }, Some(of)) => Ratio::new(value, of)?,
+            _ => return None,
+        };
+        Some(Fact { kind: self.clone(), value, origins: vec![Origin::Counted] })
+    }
+}
+
 impl fmt::Display for FactKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -153,6 +168,8 @@ pub enum Origin {
     Observed { query: String, node: usize, rule: &'static str },
     /// Inferred from other facts by `rule`.
     Derived { rule: &'static str },
+    /// Counted by a query of its own (see [`FactKind::counted`]).
+    Counted,
 }
 
 impl fmt::Display for Origin {
@@ -160,6 +177,7 @@ impl fmt::Display for Origin {
         match self {
             Origin::Observed { query, node, rule } => write!(f, "{query}#{node} ({rule})"),
             Origin::Derived { rule } => write!(f, "derived ({rule})"),
+            Origin::Counted => write!(f, "counted"),
         }
     }
 }
@@ -195,6 +213,8 @@ pub struct FactSet {
     bounds: BTreeMap<FactKind, Fact>,
     /// What each aggregate value the facts read is, by name.
     values: BTreeMap<String, Value>,
+    /// The facts of operators whose rows were not counted.
+    unobserved: BTreeSet<FactKind>,
     pub conflicts: Vec<Conflict>,
 }
 
@@ -248,18 +268,31 @@ impl FactSet {
         }
     }
 
-    /// Adds every fact and bound the rules read off `plan`.
+    /// Adds every fact and bound the rules read off `plan`, and notes the
+    /// facts it could not give a value (see [`FactSet::unobserved`]).
     pub fn observe(&mut self, plan: &ObservedPlan) {
-        let (facts, bounds, values) = rules::observe(plan);
-        for fact in facts {
+        let observed = rules::observe(plan);
+        for fact in observed.facts {
             self.insert(fact);
         }
-        for bound in bounds {
+        for bound in observed.bounds {
             self.insert_bound(bound);
         }
-        for value in values {
+        for value in observed.values {
             self.insert_value(value);
         }
+        self.unobserved.extend(observed.unobserved);
+    }
+
+    /// The facts the observed plans have and did not count, that nothing
+    /// here gives either: of operators an engine stopped early or ran
+    /// several times, and of every operator of a plan that was not run.
+    /// Each is of rows its plan names, so a query can count it
+    /// ([`FactKind::count_sql_in`]), and its count be added
+    /// ([`FactKind::counted`], then [`FactSet::insert`] and
+    /// [`FactSet::close`]).
+    pub fn unobserved(&self) -> impl Iterator<Item = &FactKind> {
+        self.unobserved.iter().filter(|k| !self.facts.contains_key(*k))
     }
 
     /// Adds everything that follows from the facts, until nothing new does.

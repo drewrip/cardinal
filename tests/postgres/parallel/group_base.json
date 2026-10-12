@@ -1,0 +1,133 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 100.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["l_suppkey", "count(*)"],
+      "Group Key": ["lineitem.l_suppkey"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 300.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["l_suppkey", "(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 100.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["l_suppkey", "(PARTIAL count(*))"],
+              "Sort Key": ["lineitem.l_suppkey"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 28,
+              "Sort Space Type": "Memory",
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 100.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 28,
+                  "Sort Space Type": "Memory"
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 100.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 28,
+                  "Sort Space Type": "Memory"
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Partial",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 100.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["l_suppkey", "PARTIAL count(*)"],
+                  "Group Key": ["lineitem.l_suppkey"],
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 32,
+                  "Disk Usage": 0,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 100.00,
+                      "Actual Loops": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 100.00,
+                      "Actual Loops": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Index Only Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "lineitem",
+                      "Actual Rows": 20058.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["l_partkey", "l_suppkey"],
+                      "Heap Fetches": 0,
+                      "Index Searches": 1,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 8677.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 10893.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

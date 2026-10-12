@@ -159,12 +159,6 @@ impl Translator<'_> {
                 }
                 Built { plan, subst }
             }
-            // Only a cross product joins on nothing: a join that printed no
-            // condition has one.
-            (Op::Join { kind, on }, [_, _]) if on.is_empty() && node.engine_op != "CROSS_PRODUCT" => {
-                let on = [Pred { expr: None, text: node.engine_op.clone(), optional: false }];
-                self.join(*kind, false, &on, kids, suffix)?
-            }
             (Op::Join { kind, on }, [_, _]) => self.join(*kind, false, on, kids, suffix)?,
             (Op::Aggregate { keys, values }, [k]) => self.aggregate(i, keys, values, k, suffix)?,
             // A sort keeping the first `offset + fetch` rows, then a limit

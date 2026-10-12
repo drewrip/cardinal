@@ -1,0 +1,115 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Hashed",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE per_customer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1000,
+          "Actual Loops": 1,
+          "Output": ["orders.o_custkey", "count(*)"],
+          "Group Key": ["orders.o_custkey"],
+          "HashAgg Batches": 1,
+          "Peak Memory Usage": 193,
+          "Disk Usage": 0,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 15000,
+              "Actual Loops": 1,
+              "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"]
+            }
+          ]
+        },
+        {
+          "Node Type": "Merge Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 167,
+          "Actual Loops": 1,
+          "Inner Unique": false,
+          "Merge Cond": "(((b.o_custkey + 1)) = a.o_custkey)",
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 333,
+              "Actual Loops": 1,
+              "Output": ["b.o_custkey", "((b.o_custkey + 1))"],
+              "Sort Key": ["((b.o_custkey + 1))"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 40,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "CTE Name": "per_customer",
+                  "Alias": "b",
+                  "Actual Rows": 333,
+                  "Actual Loops": 1,
+                  "Output": ["b.o_custkey", "(b.o_custkey + 1)"],
+                  "Filter": "(b.o_custkey < 500)",
+                  "Rows Removed by Filter": 667
+                }
+              ]
+            },
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 335,
+              "Actual Loops": 1,
+              "Output": ["a.o_custkey"],
+              "Sort Key": ["a.o_custkey"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 71,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "CTE Name": "per_customer",
+                  "Alias": "a",
+                  "Actual Rows": 1000,
+                  "Actual Loops": 1,
+                  "Output": ["a.o_custkey"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

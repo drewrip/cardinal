@@ -1,0 +1,69 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Hash Join",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Inner",
+      "Actual Rows": 532.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["customer.c_custkey", "orders.o_orderkey"],
+      "Inner Unique": true,
+      "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "orders",
+          "Schema": "public",
+          "Alias": "orders",
+          "Actual Rows": 532.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+          "Filter": "(orders.o_totalprice > '300000'::numeric)",
+          "Rows Removed by Filter": 14468
+        },
+        {
+          "Node Type": "Hash",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1500.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["customer.c_custkey"],
+          "Hash Buckets": 2048,
+          "Original Hash Buckets": 2048,
+          "Hash Batches": 1,
+          "Original Hash Batches": 1,
+          "Peak Memory Usage": 75,
+          "Plans": [
+            {
+              "Node Type": "Index Only Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "customer_pkey",
+              "Relation Name": "customer",
+              "Schema": "public",
+              "Alias": "customer",
+              "Actual Rows": 1500.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["customer.c_custkey"],
+              "Heap Fetches": 0,
+              "Index Searches": 1
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

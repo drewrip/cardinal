@@ -1,0 +1,152 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Disabled": false,
+      "Output": ["customer.c_custkey", "customer.c_name", "(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))", "customer.c_acctbal", "nation.n_name", "customer.c_address", "customer.c_phone", "customer.c_comment"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["customer.c_custkey", "customer.c_name", "(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))", "customer.c_acctbal", "nation.n_name", "customer.c_address", "customer.c_phone", "customer.c_comment"],
+          "Sort Key": ["(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))) DESC"],
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Hashed",
+              "Partial Mode": "Simple",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Disabled": false,
+              "Output": ["customer.c_custkey", "customer.c_name", "sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))", "customer.c_acctbal", "nation.n_name", "customer.c_address", "customer.c_phone", "customer.c_comment"],
+              "Group Key": ["customer.c_custkey", "customer.c_name", "customer.c_acctbal", "customer.c_phone", "nation.n_name", "customer.c_address", "customer.c_comment"],
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Disabled": false,
+                  "Output": ["customer.c_custkey", "customer.c_name", "customer.c_acctbal", "nation.n_name", "customer.c_address", "customer.c_phone", "customer.c_comment", "lineitem.l_extendedprice", "lineitem.l_discount"],
+                  "Inner Unique": false,
+                  "Hash Cond": "(customer.c_nationkey = nation.n_nationkey)",
+                  "Plans": [
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Disabled": false,
+                      "Output": ["customer.c_custkey", "customer.c_name", "customer.c_acctbal", "customer.c_address", "customer.c_phone", "customer.c_comment", "customer.c_nationkey", "lineitem.l_extendedprice", "lineitem.l_discount"],
+                      "Inner Unique": false,
+                      "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+                      "Plans": [
+                        {
+                          "Node Type": "Hash Join",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Disabled": false,
+                          "Output": ["orders.o_custkey", "lineitem.l_extendedprice", "lineitem.l_discount"],
+                          "Inner Unique": false,
+                          "Hash Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "lineitem",
+                              "Schema": "public",
+                              "Alias": "lineitem",
+                              "Disabled": false,
+                              "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                              "Filter": "((lineitem.l_returnflag)::text = 'R'::text)"
+                            },
+                            {
+                              "Node Type": "Hash",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Disabled": false,
+                              "Output": ["orders.o_custkey", "orders.o_orderkey"],
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "orders",
+                                  "Schema": "public",
+                                  "Alias": "orders",
+                                  "Disabled": false,
+                                  "Output": ["orders.o_custkey", "orders.o_orderkey"],
+                                  "Filter": "((orders.o_orderdate >= '1993-10-01'::date) AND (orders.o_orderdate < '1994-01-01 00:00:00'::timestamp without time zone))"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Disabled": false,
+                          "Output": ["customer.c_custkey", "customer.c_name", "customer.c_acctbal", "customer.c_address", "customer.c_phone", "customer.c_comment", "customer.c_nationkey"],
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "customer",
+                              "Schema": "public",
+                              "Alias": "customer",
+                              "Disabled": false,
+                              "Output": ["customer.c_custkey", "customer.c_name", "customer.c_acctbal", "customer.c_address", "customer.c_phone", "customer.c_comment", "customer.c_nationkey"]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Disabled": false,
+                      "Output": ["nation.n_name", "nation.n_nationkey"],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "nation",
+                          "Schema": "public",
+                          "Alias": "nation",
+                          "Disabled": false,
+                          "Output": ["nation.n_name", "nation.n_nationkey"]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

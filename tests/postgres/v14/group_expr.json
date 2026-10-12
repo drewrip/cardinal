@@ -1,0 +1,48 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 10,
+      "Actual Loops": 1,
+      "Output": ["((o_custkey % '10'::bigint))", "count(*)", "count(DISTINCT o_orderstatus)"],
+      "Group Key": ["((orders.o_custkey % '10'::bigint))"],
+      "Filter": "(count(*) > 1400)",
+      "Rows Removed by Filter": 0,
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 15000,
+          "Actual Loops": 1,
+          "Output": ["((o_custkey % '10'::bigint))", "o_orderstatus"],
+          "Sort Key": ["((orders.o_custkey % '10'::bigint))"],
+          "Sort Method": "quicksort",
+          "Sort Space Used": 1088,
+          "Sort Space Type": "Memory",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 15000,
+              "Actual Loops": 1,
+              "Output": ["(o_custkey % '10'::bigint)", "o_orderstatus"]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

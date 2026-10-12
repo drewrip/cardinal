@@ -1,0 +1,79 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "partsupp",
+          "Schema": "public",
+          "Alias": "partsupp",
+          "Actual Rows": 3712.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey", "partsupp.ps_availqty", "partsupp.ps_supplycost", "partsupp.ps_comment"],
+          "Filter": "(NOT (ANY ((partsupp.ps_partkey = (hashed SubPlan 1).col1) AND (partsupp.ps_suppkey = (hashed SubPlan 1).col2))))",
+          "Rows Removed by Filter": 4288,
+          "Plans": [
+            {
+              "Node Type": "Gather",
+              "Parent Relationship": "SubPlan",
+              "Subplan Name": "SubPlan 1",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 6086.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Single Copy": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Actual Rows": 2028.67,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+                  "Filter": "(lineitem.l_quantity > '45'::numeric)",
+                  "Rows Removed by Filter": 18030,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 876.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 1455.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

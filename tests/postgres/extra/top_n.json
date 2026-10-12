@@ -1,0 +1,48 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 10.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["o_orderkey", "o_totalprice"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 15.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["o_orderkey", "o_totalprice"],
+          "Sort Key": ["orders.o_totalprice DESC"],
+          "Sort Method": "top-N heapsort",
+          "Sort Space Used": 26,
+          "Sort Space Type": "Memory",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 7304.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["o_orderkey", "o_totalprice"],
+              "Filter": "((orders.o_orderstatus)::text = 'F'::text)",
+              "Rows Removed by Filter": 7696
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

@@ -584,15 +584,16 @@ pub(crate) fn stopped(plan: &ObservedPlan) -> Vec<bool> {
             // A join that keeps only matched probe rows and output none may
             // have stopped probing: its build side was empty, or had no key
             // that could match (all NULL).
-            Op::Join { kind, .. } if (plan.nodes[node.children[1]].rows == 0 || node.rows == 0) && !preserves_probe(*kind) => {
+            Op::Join { kind, .. } if (empty(&plan.nodes[node.children[1]]) || empty(node)) && !preserves_probe(*kind) => {
                 vec![node.children[0]]
             }
             _ => vec![],
         };
         stopped[i] |= node.cut_short;
-        // A reused result was materialized in full before it was read: a
-        // read cut short leaves it whole.
-        if matches!(node.op, Op::Reuse { .. }) {
+        // A reused result was materialized in full before it was read, and
+        // a blocking operator read all of its input: a read cut short leaves
+        // it whole.
+        if matches!(node.op, Op::Reuse { .. }) || node.blocking {
             continue;
         }
         for c in node.children.iter().copied() {
@@ -600,6 +601,11 @@ pub(crate) fn stopped(plan: &ObservedPlan) -> Vec<bool> {
         }
     }
     stopped
+}
+
+/// Whether `node` was counted, and output nothing.
+fn empty(node: &crate::observed::ONode) -> bool {
+    node.counted && node.rows == 0
 }
 
 /// The state of every operator of `plan`, by index.
@@ -634,7 +640,11 @@ pub(crate) fn states_hidden(plan: &ObservedPlan) -> (Vec<State>, Vec<Hidden>) {
         let values = Values { plan, states: &states, stopped: &stopped, hidden: &hidden };
         let mut h: Hidden = node.children.iter().flat_map(|&c| hidden[c].clone()).collect();
         let mut f = None;
-        let s = if let Some(keys) = first_rows(plan, i, &values) {
+        let s = if let Some((keys, true)) = first_rows(plan, i, &values) {
+            // The same filter again, over its own rows: all of them.
+            f = Some(keys);
+            inputs[0].clone()
+        } else if let Some((keys, false)) = first_rows(plan, i, &values) {
             // As many rows as a GROUP BY on the partition, and only its
             // partition columns name anything of them.
             let s = match inputs[0].clone().settle() {
@@ -694,19 +704,13 @@ pub(crate) fn states_hidden(plan: &ObservedPlan) -> (Vec<State>, Vec<Hidden>) {
 /// The partition of operator `i`'s `row_number()`, if it is a filter on
 /// only `rn = 1` (or `rn <= 1`) of one computed over its input's rows: only
 /// projections, sorts and windows, which keep every row, are in between.
-fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<Vec<Expr>> {
+/// And whether the same filter is in between too (PostgreSQL stops a window
+/// at `rn <= 1`, and checks `rn = 1` above it): then its input's rows are
+/// already the first ones.
+fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<(Vec<Expr>, bool)> {
     let node = &plan.nodes[i];
     let Op::Filter { predicate } = &node.op else { return None };
-    let [p] = &predicate[..] else { return None };
-    let Some(Expr::BinaryExpr(BinaryExpr { left, op, right })) = &p.expr else { return None };
-    let one = |e: &Expr| {
-        matches!(e, Expr::Literal(v, _) if v.cast_to(&datafusion::arrow::datatypes::DataType::Int64).is_ok_and(|v| v == datafusion::common::ScalarValue::Int64(Some(1))))
-    };
-    let w = match (op, left.as_ref(), right.as_ref()) {
-        (Operator::Eq | Operator::LtEq, w @ Expr::WindowFunction(_), l) if one(l) => w,
-        (Operator::Eq | Operator::GtEq, l, w @ Expr::WindowFunction(_)) if one(l) => w,
-        _ => return None,
-    };
+    let w = first_row_test(predicate)?;
     let Expr::WindowFunction(f) = w else { return None };
     if f.fun.name() != "row_number" || f.params.filter.is_some() || f.params.partition_by.is_empty() {
         return None;
@@ -715,16 +719,35 @@ fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<Vec<Expr
         return None;
     }
     let mut c = *node.children.first()?;
+    let mut again = false;
     loop {
         let n = &plan.nodes[c];
-        match n.op {
+        match &n.op {
             Op::Window if n.columns.iter().any(|col| matches!(&col.lineage, crate::observed::Lineage::Exact(e) if e == w)) => break,
             Op::Window | Op::Project | Op::Sort => c = *n.children.first()?,
+            Op::Filter { predicate } if first_row_test(predicate) == Some(w) => {
+                again = true;
+                c = *n.children.first()?;
+            }
             _ => return None,
         }
     }
     let keys = f.params.partition_by.clone();
-    keys.iter().all(|k| values.settle(i, k).as_ref() == Some(k)).then_some(keys)
+    keys.iter().all(|k| values.settle(i, k).as_ref() == Some(k)).then_some((keys, again))
+}
+
+/// The window function `predicate` tests, if it is only `w = 1` or `w <= 1`.
+fn first_row_test(predicate: &[Pred]) -> Option<&Expr> {
+    let [p] = predicate else { return None };
+    let Some(Expr::BinaryExpr(BinaryExpr { left, op, right })) = &p.expr else { return None };
+    let one = |e: &Expr| {
+        matches!(e, Expr::Literal(v, _) if v.cast_to(&datafusion::arrow::datatypes::DataType::Int64).is_ok_and(|v| v == datafusion::common::ScalarValue::Int64(Some(1))))
+    };
+    match (op, left.as_ref(), right.as_ref()) {
+        (Operator::Eq | Operator::LtEq, w @ Expr::WindowFunction(_), l) if one(l) => Some(w),
+        (Operator::Eq | Operator::GtEq, l, w @ Expr::WindowFunction(_)) if one(l) => Some(w),
+        _ => None,
+    }
 }
 
 /// True if `on` is equalities of exactly the columns `partition` (of one
@@ -783,7 +806,8 @@ fn state(
         Op::Project | Op::Sort | Op::Window => inputs[0].clone(),
         Op::Reuse { suffix, checked } => {
             let of = node.children[0];
-            if stopped[of] || (*checked && plan.nodes[of].rows != node.rows) {
+            let (read, whole) = (node, &plan.nodes[of]);
+            if stopped[of] || (*checked && read.counted && whole.counted && whole.rows != read.rows) {
                 return State::Tainted(Taint::Unsupported(format!("{} of a short input", node.engine_op)));
             }
             let f = |r: &str| base_table(r).map(|_| format!("{r}{suffix}"));

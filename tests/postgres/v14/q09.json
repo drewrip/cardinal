@@ -1,0 +1,232 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 173,
+      "Actual Loops": 1,
+      "Output": ["nation.n_name", "(EXTRACT(year FROM orders.o_orderdate))", "sum(((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)) - (partsupp.ps_supplycost * lineitem.l_quantity)))"],
+      "Group Key": ["nation.n_name", "(EXTRACT(year FROM orders.o_orderdate))"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 3223,
+          "Actual Loops": 1,
+          "Output": ["nation.n_name", "(EXTRACT(year FROM orders.o_orderdate))", "lineitem.l_extendedprice", "lineitem.l_discount", "partsupp.ps_supplycost", "lineitem.l_quantity"],
+          "Sort Key": ["nation.n_name", "(EXTRACT(year FROM orders.o_orderdate)) DESC"],
+          "Sort Method": "quicksort",
+          "Sort Space Used": 348,
+          "Sort Space Type": "Memory",
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Actual Rows": 3223,
+              "Actual Loops": 1,
+              "Output": ["nation.n_name", "EXTRACT(year FROM orders.o_orderdate)", "lineitem.l_extendedprice", "lineitem.l_discount", "partsupp.ps_supplycost", "lineitem.l_quantity"],
+              "Inner Unique": true,
+              "Hash Cond": "(supplier.s_nationkey = nation.n_nationkey)",
+              "Plans": [
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Actual Rows": 3223,
+                  "Actual Loops": 1,
+                  "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_quantity", "supplier.s_nationkey", "partsupp.ps_supplycost", "orders.o_orderdate"],
+                  "Inner Unique": true,
+                  "Plans": [
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Actual Rows": 3223,
+                      "Actual Loops": 1,
+                      "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_quantity", "lineitem.l_orderkey", "supplier.s_nationkey", "partsupp.ps_supplycost"],
+                      "Inner Unique": true,
+                      "Hash Cond": "(lineitem.l_suppkey = supplier.s_suppkey)",
+                      "Plans": [
+                        {
+                          "Node Type": "Nested Loop",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Actual Rows": 3223,
+                          "Actual Loops": 1,
+                          "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_quantity", "lineitem.l_suppkey", "lineitem.l_orderkey", "partsupp.ps_supplycost", "partsupp.ps_suppkey"],
+                          "Inner Unique": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Hash Join",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Join Type": "Inner",
+                              "Actual Rows": 428,
+                              "Actual Loops": 1,
+                              "Output": ["part.p_partkey", "partsupp.ps_supplycost", "partsupp.ps_suppkey", "partsupp.ps_partkey"],
+                              "Inner Unique": true,
+                              "Hash Cond": "(partsupp.ps_partkey = part.p_partkey)",
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "partsupp",
+                                  "Schema": "public",
+                                  "Alias": "partsupp",
+                                  "Actual Rows": 8000,
+                                  "Actual Loops": 1,
+                                  "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey", "partsupp.ps_availqty", "partsupp.ps_supplycost", "partsupp.ps_comment"]
+                                },
+                                {
+                                  "Node Type": "Hash",
+                                  "Parent Relationship": "Inner",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Actual Rows": 107,
+                                  "Actual Loops": 1,
+                                  "Output": ["part.p_partkey"],
+                                  "Hash Buckets": 1024,
+                                  "Original Hash Buckets": 1024,
+                                  "Hash Batches": 1,
+                                  "Original Hash Batches": 1,
+                                  "Peak Memory Usage": 13,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Seq Scan",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Relation Name": "part",
+                                      "Schema": "public",
+                                      "Alias": "part",
+                                      "Actual Rows": 107,
+                                      "Actual Loops": 1,
+                                      "Output": ["part.p_partkey"],
+                                      "Filter": "((part.p_name)::text ~~ '%green%'::text)",
+                                      "Rows Removed by Filter": 1893
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Index Scan",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Scan Direction": "Forward",
+                              "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                              "Relation Name": "lineitem",
+                              "Schema": "public",
+                              "Alias": "lineitem",
+                              "Actual Rows": 8,
+                              "Actual Loops": 428,
+                              "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                              "Index Cond": "((lineitem.l_partkey = partsupp.ps_partkey) AND (lineitem.l_suppkey = partsupp.ps_suppkey))",
+                              "Rows Removed by Index Recheck": 0
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Actual Rows": 100,
+                          "Actual Loops": 1,
+                          "Output": ["supplier.s_suppkey", "supplier.s_nationkey"],
+                          "Hash Buckets": 1024,
+                          "Original Hash Buckets": 1024,
+                          "Hash Batches": 1,
+                          "Original Hash Batches": 1,
+                          "Peak Memory Usage": 13,
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "supplier",
+                              "Schema": "public",
+                              "Alias": "supplier",
+                              "Actual Rows": 100,
+                              "Actual Loops": 1,
+                              "Output": ["supplier.s_suppkey", "supplier.s_nationkey"]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "orders_pkey",
+                      "Relation Name": "orders",
+                      "Schema": "public",
+                      "Alias": "orders",
+                      "Actual Rows": 1,
+                      "Actual Loops": 3223,
+                      "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                      "Index Cond": "(orders.o_orderkey = lineitem.l_orderkey)",
+                      "Rows Removed by Index Recheck": 0
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 25,
+                  "Actual Loops": 1,
+                  "Output": ["nation.n_name", "nation.n_nationkey"],
+                  "Hash Buckets": 1024,
+                  "Original Hash Buckets": 1024,
+                  "Hash Batches": 1,
+                  "Original Hash Batches": 1,
+                  "Peak Memory Usage": 10,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "nation",
+                      "Schema": "public",
+                      "Alias": "nation",
+                      "Actual Rows": 25,
+                      "Actual Loops": 1,
+                      "Output": ["nation.n_name", "nation.n_nationkey"]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

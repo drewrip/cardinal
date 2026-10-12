@@ -1,0 +1,283 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["supplier.s_suppkey", "supplier.s_name", "supplier.s_address", "supplier.s_phone", "revenue0.total_revenue"],
+      "Sort Key": ["supplier.s_suppkey"],
+      "Sort Method": "quicksort",
+      "Sort Space Used": 25,
+      "Sort Space Type": "Memory",
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Sorted",
+          "Partial Mode": "Finalize",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE revenue0",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 100.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["lineitem.l_suppkey", "sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))"],
+          "Group Key": ["lineitem.l_suppkey"],
+          "Plans": [
+            {
+              "Node Type": "Gather Merge",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 100.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem.l_suppkey", "(PARTIAL sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Plans": [
+                {
+                  "Node Type": "Sort",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 33.33,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["lineitem.l_suppkey", "(PARTIAL sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))"],
+                  "Sort Key": ["lineitem.l_suppkey"],
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 34,
+                  "Sort Space Type": "Memory",
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 25,
+                      "Sort Space Type": "Memory"
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 25,
+                      "Sort Space Type": "Memory"
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Aggregate",
+                      "Strategy": "Hashed",
+                      "Partial Mode": "Partial",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Actual Rows": 33.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["lineitem.l_suppkey", "PARTIAL sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))"],
+                      "Group Key": ["lineitem.l_suppkey"],
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 56,
+                      "Disk Usage": 0,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1,
+                          "HashAgg Batches": 1,
+                          "Peak Memory Usage": 32,
+                          "Disk Usage": 0
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1,
+                          "HashAgg Batches": 1,
+                          "Peak Memory Usage": 32,
+                          "Disk Usage": 0
+                        }
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Bitmap Heap Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "lineitem",
+                          "Schema": "public",
+                          "Alias": "lineitem",
+                          "Actual Rows": 761.33,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                          "Recheck Cond": "((lineitem.l_shipdate >= '1996-01-01'::date) AND (lineitem.l_shipdate < '1996-04-01 00:00:00'::timestamp without time zone))",
+                          "Rows Removed by Index Recheck": 0,
+                          "Exact Heap Blocks": 639,
+                          "Lossy Heap Blocks": 0,
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 0.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 0.00,
+                              "Actual Loops": 1
+                            }
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "lineitem_l_shipdate_idx",
+                              "Actual Rows": 2284.00,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "((lineitem.l_shipdate >= '1996-01-01'::date) AND (lineitem.l_shipdate < '1996-04-01 00:00:00'::timestamp without time zone))",
+                              "Index Searches": 1,
+                              "Workers": [
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Plain",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "InitPlan 2",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["max(revenue0_1.total_revenue)"],
+          "Plans": [
+            {
+              "Node Type": "CTE Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "revenue0",
+              "Alias": "revenue0_1",
+              "Actual Rows": 100.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["revenue0_1.supplier_no", "revenue0_1.total_revenue"],
+              "Storage": "Memory",
+              "Maximum Storage": 21
+            }
+          ]
+        },
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["supplier.s_suppkey", "supplier.s_name", "supplier.s_address", "supplier.s_phone", "revenue0.total_revenue"],
+          "Inner Unique": false,
+          "Hash Cond": "(supplier.s_suppkey = revenue0.supplier_no)",
+          "Plans": [
+            {
+              "Node Type": "Gather",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 100.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["supplier.s_suppkey", "supplier.s_name", "supplier.s_address", "supplier.s_phone"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Single Copy": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "supplier",
+                  "Schema": "public",
+                  "Alias": "supplier",
+                  "Actual Rows": 33.33,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["supplier.s_suppkey", "supplier.s_name", "supplier.s_address", "supplier.s_phone"],
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 8.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["revenue0.total_revenue", "revenue0.supplier_no"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 9,
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "CTE Name": "revenue0",
+                  "Alias": "revenue0",
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["revenue0.total_revenue", "revenue0.supplier_no"],
+                  "Filter": "(revenue0.total_revenue = (InitPlan 2).col1)",
+                  "Rows Removed by Filter": 99,
+                  "Storage": "Memory",
+                  "Maximum Storage": 21
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

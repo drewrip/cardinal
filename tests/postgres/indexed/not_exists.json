@@ -1,0 +1,81 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Merge Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Anti",
+          "Actual Rows": 13857.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Merge Cond": "(orders.o_orderkey = lineitem.l_orderkey)",
+          "Plans": [
+            {
+              "Node Type": "Index Only Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "orders_pkey",
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 15000.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_orderkey"],
+              "Heap Fetches": 0,
+              "Index Searches": 1
+            },
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1192.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem.l_orderkey"],
+              "Sort Key": ["lineitem.l_orderkey"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 49,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Actual Rows": 1192.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["lineitem.l_orderkey"],
+                  "Filter": "(lineitem.l_quantity > '49'::numeric)",
+                  "Rows Removed by Filter": 58983
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

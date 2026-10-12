@@ -1,0 +1,192 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 5.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["orders.o_orderpriority", "count(*)"],
+      "Group Key": ["orders.o_orderpriority"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 5.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_orderpriority", "(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.67,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["orders.o_orderpriority", "(PARTIAL count(*))"],
+              "Sort Key": ["orders.o_orderpriority"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 25,
+              "Sort Space Type": "Memory",
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory"
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory"
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Partial",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 1.67,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["orders.o_orderpriority", "PARTIAL count(*)"],
+                  "Group Key": ["orders.o_orderpriority"],
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 32,
+                  "Disk Usage": 0,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Actual Rows": 1235.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["orders.o_orderpriority"],
+                      "Inner Unique": true,
+                      "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        }
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "orders",
+                          "Schema": "public",
+                          "Alias": "orders",
+                          "Actual Rows": 15000.00,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                          "Workers": [
+                          ]
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Actual Rows": 112.33,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["customer.c_custkey"],
+                          "Hash Buckets": 1024,
+                          "Original Hash Buckets": 1024,
+                          "Hash Batches": 1,
+                          "Original Hash Batches": 1,
+                          "Peak Memory Usage": 40,
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 0.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 0.00,
+                              "Actual Loops": 1
+                            }
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": true,
+                              "Async Capable": false,
+                              "Relation Name": "customer",
+                              "Schema": "public",
+                              "Alias": "customer",
+                              "Actual Rows": 337.00,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": ["customer.c_custkey"],
+                              "Filter": "((customer.c_mktsegment)::text = 'BUILDING'::text)",
+                              "Rows Removed by Filter": 1163,
+                              "Workers": [
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

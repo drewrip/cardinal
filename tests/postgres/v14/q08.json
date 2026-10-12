@@ -1,0 +1,292 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 2,
+      "Actual Loops": 1,
+      "Output": ["(EXTRACT(year FROM orders.o_orderdate))", "(sum(CASE WHEN ((n2.n_name)::text = 'BRAZIL'::text) THEN (lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)) ELSE '0'::numeric END) / sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))"],
+      "Group Key": ["(EXTRACT(year FROM orders.o_orderdate))"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 29,
+          "Actual Loops": 1,
+          "Output": ["(EXTRACT(year FROM orders.o_orderdate))", "n2.n_name", "lineitem.l_extendedprice", "lineitem.l_discount"],
+          "Sort Key": ["(EXTRACT(year FROM orders.o_orderdate))"],
+          "Sort Method": "quicksort",
+          "Sort Space Used": 27,
+          "Sort Space Type": "Memory",
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Actual Rows": 29,
+              "Actual Loops": 1,
+              "Output": ["EXTRACT(year FROM orders.o_orderdate)", "n2.n_name", "lineitem.l_extendedprice", "lineitem.l_discount"],
+              "Inner Unique": true,
+              "Join Filter": "(supplier.s_nationkey = n2.n_nationkey)",
+              "Rows Removed by Join Filter": 475,
+              "Plans": [
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Actual Rows": 29,
+                  "Actual Loops": 1,
+                  "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "supplier.s_nationkey", "orders.o_orderdate"],
+                  "Inner Unique": true,
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Actual Rows": 29,
+                      "Actual Loops": 1,
+                      "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "orders.o_orderdate"],
+                      "Inner Unique": false,
+                      "Join Filter": "(n1.n_regionkey = region.r_regionkey)",
+                      "Rows Removed by Join Filter": 87,
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "region",
+                          "Schema": "public",
+                          "Alias": "region",
+                          "Actual Rows": 1,
+                          "Actual Loops": 1,
+                          "Output": ["region.r_regionkey", "region.r_name", "region.r_comment"],
+                          "Filter": "((region.r_name)::text = 'AMERICA'::text)",
+                          "Rows Removed by Filter": 4
+                        },
+                        {
+                          "Node Type": "Nested Loop",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Actual Rows": 116,
+                          "Actual Loops": 1,
+                          "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "orders.o_orderdate", "n1.n_regionkey"],
+                          "Inner Unique": true,
+                          "Plans": [
+                            {
+                              "Node Type": "Nested Loop",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Join Type": "Inner",
+                              "Actual Rows": 116,
+                              "Actual Loops": 1,
+                              "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "orders.o_orderdate", "customer.c_nationkey"],
+                              "Inner Unique": true,
+                              "Plans": [
+                                {
+                                  "Node Type": "Nested Loop",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Join Type": "Inner",
+                                  "Actual Rows": 116,
+                                  "Actual Loops": 1,
+                                  "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "orders.o_orderdate", "orders.o_custkey"],
+                                  "Inner Unique": true,
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Nested Loop",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Join Type": "Inner",
+                                      "Actual Rows": 366,
+                                      "Actual Loops": 1,
+                                      "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "lineitem.l_orderkey"],
+                                      "Inner Unique": false,
+                                      "Plans": [
+                                        {
+                                          "Node Type": "Seq Scan",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Relation Name": "part",
+                                          "Schema": "public",
+                                          "Alias": "part",
+                                          "Actual Rows": 12,
+                                          "Actual Loops": 1,
+                                          "Output": ["part.p_partkey", "part.p_name", "part.p_mfgr", "part.p_brand", "part.p_type", "part.p_size", "part.p_container", "part.p_retailprice", "part.p_comment"],
+                                          "Filter": "((part.p_type)::text = 'ECONOMY ANODIZED STEEL'::text)",
+                                          "Rows Removed by Filter": 1988
+                                        },
+                                        {
+                                          "Node Type": "Bitmap Heap Scan",
+                                          "Parent Relationship": "Inner",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Relation Name": "lineitem",
+                                          "Schema": "public",
+                                          "Alias": "lineitem",
+                                          "Actual Rows": 30,
+                                          "Actual Loops": 12,
+                                          "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                                          "Recheck Cond": "(lineitem.l_partkey = part.p_partkey)",
+                                          "Rows Removed by Index Recheck": 0,
+                                          "Exact Heap Blocks": 357,
+                                          "Lossy Heap Blocks": 0,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Bitmap Index Scan",
+                                              "Parent Relationship": "Outer",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                                              "Actual Rows": 30,
+                                              "Actual Loops": 12,
+                                              "Index Cond": "(lineitem.l_partkey = part.p_partkey)"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Index Scan",
+                                      "Parent Relationship": "Inner",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Scan Direction": "Forward",
+                                      "Index Name": "orders_pkey",
+                                      "Relation Name": "orders",
+                                      "Schema": "public",
+                                      "Alias": "orders",
+                                      "Actual Rows": 0,
+                                      "Actual Loops": 366,
+                                      "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                                      "Index Cond": "(orders.o_orderkey = lineitem.l_orderkey)",
+                                      "Rows Removed by Index Recheck": 0,
+                                      "Filter": "((orders.o_orderdate >= '1995-01-01'::date) AND (orders.o_orderdate <= '1996-12-31'::date))",
+                                      "Rows Removed by Filter": 1
+                                    }
+                                  ]
+                                },
+                                {
+                                  "Node Type": "Index Scan",
+                                  "Parent Relationship": "Inner",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Scan Direction": "Forward",
+                                  "Index Name": "customer_pkey",
+                                  "Relation Name": "customer",
+                                  "Schema": "public",
+                                  "Alias": "customer",
+                                  "Actual Rows": 1,
+                                  "Actual Loops": 116,
+                                  "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"],
+                                  "Index Cond": "(customer.c_custkey = orders.o_custkey)",
+                                  "Rows Removed by Index Recheck": 0
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Memoize",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Actual Rows": 1,
+                              "Actual Loops": 116,
+                              "Output": ["n1.n_nationkey", "n1.n_regionkey"],
+                              "Cache Key": "customer.c_nationkey",
+                              "Cache Mode": "logical",
+                              "Cache Hits": 91,
+                              "Cache Misses": 25,
+                              "Cache Evictions": 0,
+                              "Cache Overflows": 0,
+                              "Peak Memory Usage": 3,
+                              "Plans": [
+                                {
+                                  "Node Type": "Index Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Scan Direction": "Forward",
+                                  "Index Name": "nation_pkey",
+                                  "Relation Name": "nation",
+                                  "Schema": "public",
+                                  "Alias": "n1",
+                                  "Actual Rows": 1,
+                                  "Actual Loops": 25,
+                                  "Output": ["n1.n_nationkey", "n1.n_regionkey"],
+                                  "Index Cond": "(n1.n_nationkey = customer.c_nationkey)",
+                                  "Rows Removed by Index Recheck": 0
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "supplier_pkey",
+                      "Relation Name": "supplier",
+                      "Schema": "public",
+                      "Alias": "supplier",
+                      "Actual Rows": 1,
+                      "Actual Loops": 29,
+                      "Output": ["supplier.s_suppkey", "supplier.s_name", "supplier.s_address", "supplier.s_nationkey", "supplier.s_phone", "supplier.s_acctbal", "supplier.s_comment"],
+                      "Index Cond": "(supplier.s_suppkey = lineitem.l_suppkey)",
+                      "Rows Removed by Index Recheck": 0
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Materialize",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 17,
+                  "Actual Loops": 29,
+                  "Output": ["n2.n_name", "n2.n_nationkey"],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "nation",
+                      "Schema": "public",
+                      "Alias": "n2",
+                      "Actual Rows": 25,
+                      "Actual Loops": 1,
+                      "Output": ["n2.n_name", "n2.n_nationkey"]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

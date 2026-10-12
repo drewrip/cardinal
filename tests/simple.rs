@@ -198,3 +198,21 @@ async fn duckdb_plans() {
     }
     println!("{simple} of {required} selectivities are simple");
 }
+
+#[tokio::test]
+async fn postgres_plans() {
+    let catalog = fixtures::catalog().await;
+    let options = || Options { selectivity: true, foreign_keys: fixtures::foreign_keys(), ..Default::default() };
+    let (mut simple, mut required) = (0, 0);
+    for plan in fixtures::pg_plans("tpch").await {
+        let a = cardinal::analyze_observed(&catalog, &plan, options()).unwrap();
+        let out = a.simple_selectivities().unwrap();
+        println!("{}\n  {}", plan.name, a.selectivity.as_ref().unwrap());
+        for s in &out {
+            println!("    {s}");
+        }
+        simple += out.iter().filter(|s| s.simple.is_ok()).count();
+        required += out.len();
+    }
+    println!("{simple} of {required} selectivities are simple");
+}

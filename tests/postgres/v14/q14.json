@@ -1,0 +1,88 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["((100.00 * sum(CASE WHEN ((part.p_type)::text ~~ 'PROMO%'::text) THEN (lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)) ELSE '0'::numeric END)) / sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 722,
+          "Actual Loops": 1,
+          "Output": ["part.p_type", "lineitem.l_extendedprice", "lineitem.l_discount"],
+          "Inner Unique": true,
+          "Hash Cond": "(lineitem.l_partkey = part.p_partkey)",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Heap Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem",
+              "Actual Rows": 722,
+              "Actual Loops": 1,
+              "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+              "Recheck Cond": "((lineitem.l_shipdate >= '1995-09-01'::date) AND (lineitem.l_shipdate < '1995-10-01 00:00:00'::timestamp without time zone))",
+              "Rows Removed by Index Recheck": 0,
+              "Exact Heap Blocks": 413,
+              "Lossy Heap Blocks": 0,
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Index Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Index Name": "lineitem_l_shipdate_idx",
+                  "Actual Rows": 722,
+                  "Actual Loops": 1,
+                  "Index Cond": "((lineitem.l_shipdate >= '1995-09-01'::date) AND (lineitem.l_shipdate < '1995-10-01 00:00:00'::timestamp without time zone))"
+                }
+              ]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 2000,
+              "Actual Loops": 1,
+              "Output": ["part.p_type", "part.p_partkey"],
+              "Hash Buckets": 2048,
+              "Original Hash Buckets": 2048,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 143,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "part",
+                  "Schema": "public",
+                  "Alias": "part",
+                  "Actual Rows": 2000,
+                  "Actual Loops": 1,
+                  "Output": ["part.p_type", "part.p_partkey"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

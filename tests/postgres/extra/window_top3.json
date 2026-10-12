@@ -1,0 +1,65 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Subquery Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Alias": "s",
+      "Actual Rows": 2912.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["s.o_custkey", "s.o_orderkey", "s.rn"],
+      "Plans": [
+        {
+          "Node Type": "WindowAgg",
+          "Parent Relationship": "Subquery",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 2912.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_custkey", "orders.o_orderkey", "row_number() OVER w1", "orders.o_totalprice"],
+          "Window": "w1 AS (PARTITION BY orders.o_custkey ORDER BY orders.o_totalprice ROWS UNBOUNDED PRECEDING)",
+          "Run Condition": "(row_number() OVER w1 <= 3)",
+          "Storage": "Memory",
+          "Maximum Storage": 17,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 7304.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_custkey", "orders.o_totalprice", "orders.o_orderkey"],
+              "Sort Key": ["orders.o_custkey", "orders.o_totalprice DESC"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 533,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 7304.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["orders.o_custkey", "orders.o_totalprice", "orders.o_orderkey"],
+                  "Filter": "((orders.o_orderstatus)::text = 'F'::text)",
+                  "Rows Removed by Filter": 7696
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

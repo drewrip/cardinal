@@ -1,0 +1,170 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Hashed",
+          "Partial Mode": "Finalize",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE per_customer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1000.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_custkey", "count(*)"],
+          "Group Key": ["orders.o_custkey"],
+          "HashAgg Batches": 1,
+          "Peak Memory Usage": 121,
+          "Disk Usage": 0,
+          "Plans": [
+            {
+              "Node Type": "Gather",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1000.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_custkey", "(PARTIAL count(*))"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Single Copy": false,
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Sorted",
+                  "Partial Mode": "Partial",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 333.33,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["orders.o_custkey", "PARTIAL count(*)"],
+                  "Group Key": ["orders.o_custkey"],
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Index Only Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "orders_o_custkey_idx",
+                      "Relation Name": "orders",
+                      "Schema": "public",
+                      "Alias": "orders",
+                      "Actual Rows": 5000.00,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["orders.o_custkey"],
+                      "Heap Fetches": 0,
+                      "Index Searches": 1,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 167.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Hash Cond": "((b.o_custkey + 1) = a.o_custkey)",
+          "Plans": [
+            {
+              "Node Type": "CTE Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "per_customer",
+              "Alias": "b",
+              "Actual Rows": 333.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["b.o_custkey", "b.n"],
+              "Filter": "(b.o_custkey < 500)",
+              "Rows Removed by Filter": 667,
+              "Storage": "Memory",
+              "Maximum Storage": 56
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1000.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["a.o_custkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 48,
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "CTE Name": "per_customer",
+                  "Alias": "a",
+                  "Actual Rows": 1000.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["a.o_custkey"],
+                  "Storage": "Memory",
+                  "Maximum Storage": 56
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

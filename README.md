@@ -273,6 +273,8 @@ let catalog = Catalog::from_context(&ctx).await?;           // schemas only
 let plan = observed::from_duckdb(&catalog, "q1", &json)?;   // EXPLAIN (ANALYZE, FORMAT JSON)
 let facts = facts::derive_facts(&[plan, ...]);
 println!("{facts}");
+// or, from PostgreSQL's EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON):
+let plan = observed::from_postgres(&catalog, "q1", &json, Some(sql))?;
 ```
 
 **Observed plans.** `observed::ObservedPlan` is an engine-neutral operator
@@ -326,6 +328,94 @@ join below it, over those copies. A filter on a mark join's mark (`IN`,
 operator. An `IN` over a constant list, planned as a mark join against a
 table of the constants, is read as the `IN` predicate DuckDB also pushes into
 the scan.
+
+**PostgreSQL.** `from_postgres` reads PostgreSQL's profile (versions 14 to
+18), printed with `VERBOSE`: then every operator lists its output, and every
+column is printed with the alias of the relation it is read from, which
+PostgreSQL keeps unique in a plan (`n1.n_name`, `lineitem_1.l_partkey`). So a
+column reads the same wherever it is printed, with no help from the query,
+and an operator's expressions are read on their own; what an input computed,
+printed in parentheses (`(sum(l_quantity))`), is that input's column. A plan
+without `VERBOSE` is refused. PostgreSQL's spellings are read as the query's:
+`'1'::numeric` is `1`, `(c_mktsegment)::text` the column, `x = ANY
+('{a,b}'::text[])` is `x IN ('a', 'b')`, and `~~` is `LIKE`. The query text,
+which a PostgreSQL profile does not include, is passed for what the plan
+still leaves out: the column names of a subquery or CTE the plan reads by
+name (`s.rn`) and prints by position, its `LIMIT` counts and offsets, and
+whether a `Unique` is a `DISTINCT ON` (whose columns are not printed: no
+model).
+
+PostgreSQL's operators do more than one thing each, and run more than once:
+
+- *Filters.* A scan, join or aggregate applies its own `Filter` (a `HAVING`,
+  a `WHERE` above an outer join) and reports the rows left, and those
+  removed. Each is read as the operator and a filter above it, the rows
+  between them being the sum. So a sequential scan gives its table's size,
+  and its filter an exact share of it, where DuckDB's pushed filter gives a
+  bound. An index scan's condition is a filter too, over a scan whose rows
+  were not counted.
+- *Rows not counted.* An operator that a merge join, a semi or anti nested
+  loop, a window's run condition or a limit stopped reading early reports
+  what was read, and one that ran several times (`Actual Loops` other than
+  1) reports an average. Neither is a count (`ONode::counted`), but for the
+  averages that are one:
+  - the inner side of a nested loop that binds nothing in it outputs the
+    same rows each time, so their average is their count;
+  - the processes of a parallel plan split the rows of a parallel-aware
+    scan and of what reads it, and version 18 prints their average to two
+    decimals: times the runs, it is their sum, for fewer than 100 runs. The
+    rows a filter removed are rounded to a whole number, so a parallel
+    scan's filter counts the rows it kept and not its table's
+    (`max_parallel_workers_per_gather = 0` counts both). Groups aggregated
+    in part (`Partial Mode`) are no rows of the query until the aggregate
+    above finishes them.
+
+  An operator whose rows were not counted still has the rows its inputs
+  and predicates say. A sort, a hash table's build and a hash aggregate
+  read all of their input first, so below them rows are whole again
+  (`ONode::blocking`); and one that outputs its input's rows (a sort a
+  merge join left early, a `Hash`, which reports the rows it stored,
+  without those whose key is NULL) has as many as were counted there. A
+  hash join whose table came out empty reads at most one row of its other
+  side, unless it outputs that side's unmatched rows.
+- *Partial indexes.* A plan prints the index a scan reads, but neither a
+  partial index's predicate nor the query's conditions that the predicate
+  implies, which PostgreSQL drops: `WHERE priority = 'URGENT' AND day < d`
+  over an index `ON orders (day) WHERE priority = 'URGENT'` prints `Index
+  Cond: (day < d)` alone. So the catalog must have the partial indexes'
+  predicates (`Catalog::with_partial_indexes`, with the rows of `SELECT
+  c.relname, pg_get_expr(i.indpred, i.indrelid) FROM pg_index i JOIN
+  pg_class c ON c.oid = i.indexrelid WHERE i.indpred IS NOT NULL`: possibly
+  none), and a scan of one keeps the rows of its predicate too. Until it
+  has them, a scan of any index has a predicate that does not resolve: it
+  gives no fact, and bounds only that it keeps some of the table's rows.
+- *Index lookups.* A condition printed on the inner side of a nested loop
+  that reads the outer side's columns (`Index Cond: (l_orderkey =
+  orders.o_orderkey)`) is the join's condition, not the scan's. It goes up
+  to the join that binds it, through what keeps a filter's rows (inner
+  joins, the kept side of semi, anti and outer joins). Where it cannot (the
+  lookup is under an aggregate or a limit: a `LATERAL` subquery), the join
+  has no model.
+- *Subqueries.* An uncorrelated scalar subquery is an InitPlan, run once:
+  its one row (an aggregate without groups) is cross-joined to the rows of
+  the filter that reads it (`(InitPlan 1).col1`, or `$0` before version 17),
+  as DuckDB plans it. `x [NOT] IN (subquery)` that PostgreSQL did not make a
+  join is a hashed SubPlan: a mark join against it, and a filter on the
+  mark (since version 17, which prints what is compared; before, the
+  predicate does not resolve). A CTE scan is a `Reuse` of its definition; PostgreSQL computes a CTE
+  as it is read, so one read short (under a limit) is not counted either. A
+  SubPlan that reads the row it runs for (a correlated subquery PostgreSQL
+  did not decorrelate, as TPC-H q02, q17 and q20's) has no counts of its
+  own, and the predicate that reads it does not resolve.
+- *Anti joins.* PostgreSQL plans `a LEFT JOIN b ... WHERE b.key IS NULL` as
+  an anti join, and still prints `b`'s columns above it, where all are NULL:
+  above a semi or anti join, the other side's columns read as unknown.
+- *Windows.* A window's functions are read with its definition, its order's
+  directions from the sort below, which the definition leaves out. Before
+  version 18 no definition is printed (`row_number() OVER (?)`): it is the
+  query's, where the query and the plan each have one window function so
+  called. A run condition (`row_number() <= 1`, since version 15) is a
+  filter above the window.
 
 **Contexts.** A fact holds for the rows it was measured over: its *context*.
 Contexts are built in a normal form (`facts::rewrite`), so that plans that
@@ -424,6 +514,27 @@ with two values is a `Conflict`: the data changed, or a context names the
 wrong rows. So is a bound below its context's exact value. Bounds keep the
 least seen, and do not combine.
 
+**Facts not counted.** An operator whose rows an engine did not count (it
+stopped early, or ran several times and reported an average) still has the
+rows its context names, and a plan that was not run (`EXPLAIN` alone) has
+them all. So the rules name such an operator's facts without a value, and
+`FactSet::unobserved` lists those that nothing else gives: each is counted by
+the queries `FactKind::count_sql_in` writes, and added with
+`FactKind::counted` and `FactSet::insert` (its origin is `Origin::Counted`).
+
+```rust
+let mut facts = derive_facts(&plans);
+let missing: Vec<FactKind> = facts.unobserved().cloned().collect();
+for kind in missing {
+    let Some(counts) = kind.count_sql_in(&catalog, &facts, CountDialect::Postgres) else { continue };
+    let (value, of) = run(&counts.value, counts.of.as_deref()); // each a single count
+    if let Some(fact) = kind.counted(value, of) {
+        facts.insert(fact);
+    }
+}
+facts.close();
+```
+
 The fixtures under `tests/duckdb` are DuckDB profiles of TPC-H (scale factor
 0.01) and some hand-written queries, regenerated by
 `scripts/duckdb_fixtures.sh`. It also checks the facts themselves:
@@ -450,6 +561,32 @@ cargo test --test facts                             # including facts_match_duck
 cargo test --test facts print_facts -- --nocapture  # every plan's contexts and facts
 CARDINAL_TRUTH_N=300 CARDINAL_TRUTH_SEED=11 \
   cargo test --release --test fact_truth -- --nocapture
+```
+
+The fixtures under `tests/postgres` are PostgreSQL 18's profiles of the same
+queries over the same data, and of some more (`tests/postgres/extra`:
+windows, set operations, `LATERAL`, `DISTINCT ON`), regenerated by
+`scripts/postgres_fixtures.sh`. Under `indexed` are the same queries with
+primary keys and indexes: index scans, nested loops and merge joins. Under
+`parallel` they run in three processes, whose averages are read as counts.
+PostgreSQL counts every fact itself (`FactKind::count_sql_in` writes the
+counts in its dialect), into `fact_checks.json`, which `facts_match_postgres`
+compares against; `tests/postgres_bounds.rs` is `fact_bounds` with
+PostgreSQL as the engine. `fact_truth` runs live in PostgreSQL too, when a
+server has the script's database: each query profiled as PostgreSQL plans
+it, with hash joins over sequential scans only, with merge joins, and in
+parallel; then the facts no profile counted are counted (`Engine::fill`),
+and must agree with the rest. The
+script and the live tests connect as `psql` does (`PGHOST`, `PGPORT`,
+`PGUSER`, ...), to the database `CARDINAL_PG_DB` (default `cardinal_tpch`),
+which the script creates.
+
+```sh
+scripts/postgres_fixtures.sh                          # the database, profiles, fact checks
+cargo test --test postgres                            # including facts_match_postgres
+cargo test --test postgres print_facts -- --nocapture
+cargo test --test postgres_bounds
+cargo test --release --test fact_truth facts_are_true_in_postgres -- --nocapture
 ```
 
 ## Bounds from facts
@@ -520,6 +657,9 @@ let a = cardinal::analyze_duckdb(&catalog, &explain_json, Some(sql), options)?;
 // or, from a plan already read:
 let plan = observed::from_duckdb_explain(&catalog, "q1", &explain_json, Some(sql))?;
 let a = cardinal::analyze_observed(&catalog, &plan, options)?;
+// PostgreSQL's, from EXPLAIN (VERBOSE, FORMAT JSON):
+let a = cardinal::analyze_postgres(&catalog, &explain_json, Some(sql), options)?;
+let plan = observed::from_postgres_explain(&catalog, "q1", &explain_json, Some(sql))?;
 ```
 
 `from_duckdb_explain` reads `EXPLAIN (FORMAT JSON)` output, or a profile
@@ -535,7 +675,7 @@ keys read, so projections, sorts and windows are left out:
 | Observed | Logical |
 |---|---|
 | Scan, with filters | `TableScan` with its required filters pushed, aliased as its instance. Optional and runtime filters are dropped: neither changes the rows above |
-| Filter, join | Filter, join. Equalities across the sides are keys (all `IS NOT DISTINCT FROM`: keys equal on NULL), the rest a filter |
+| Filter, join | Filter, join. Equalities across the sides are keys (all `IS NOT DISTINCT FROM`: keys equal on NULL), the rest a filter. A join on no condition is a cross join |
 | Filter on a mark | Semi join, or for `NOT IN` a null-aware anti join |
 | Group by | `Aggregate`. Keys that are not columns, and values, are columns of `@node` |
 | Reuse (CTE scan, delim join input) | The read operator again, its instances renamed: an independent copy |
@@ -543,17 +683,21 @@ keys read, so projections, sorts and windows are left out:
 | Limit | A filter on an opaque predicate, then a limit of `at_most` rows if known |
 | Union | Each input as one column: nothing traces a union's columns |
 
-DuckDB prints no limit's count, in any `EXPLAIN` format, so it is read off
-the query: when the plan has as many limit and top-n operators as the query
-has `LIMIT` clauses, each with a constant count, every limit outputs at most
-the largest (`Op::Limit { at_most }`). An offset only drops rows.
+Neither DuckDB nor PostgreSQL prints a limit's count, in any `EXPLAIN`
+format, so it is read off the query: when the plan has as many limit and
+top-n operators as the query has `LIMIT` clauses, each with a constant count,
+every limit outputs at most the largest (`Op::Limit { at_most }`). An offset
+only drops rows. PostgreSQL plans a top-n as a limit over a sort: the one
+limit of a query with one `LIMIT` clause is that clause, and over a sort is
+read as the top-n it is, with the clause's count and offset.
 
 DuckDB materializes a limit's rows late: the limit (or top-n) picks rows of
 a scan of `T`, and a semi join on `rowid = rowid` reads their columns from a
 second, unfiltered scan of `T`. That join outputs exactly the picked rows,
 so it reads as the picking side, with the second scan's columns read as the
 first's. `tests/plan_truth.rs` checks limits and offsets against a live
-DuckDB: every bound holds the true count, and limits bound what they should.
+DuckDB, and a live PostgreSQL: every bound holds the true count, and limits
+bound what they should.
 
 What does not translate is opaque, and bounds nothing: a predicate or key
 that did not resolve is a volatile `opaque('<text>')`, and an operator
@@ -565,6 +709,12 @@ DataFusion also plans at their true count, against 30 when DataFusion plans
 them. DuckDB's plan does better on join orders (TPC-H q05: `X <= 5`, not 25)
 and the filters it pushes, and no worse on any. `explain_plans` checks that each TPC-H query's plain
 `EXPLAIN` asks for the same selectivities as its profile.
+
+PostgreSQL's facts are exact where DuckDB's pushed filters give bounds, so
+more of them match: on PostgreSQL's fixtures (`tests/postgres_bounds.rs`),
+with every fact, 122 selectivities of PostgreSQL's plans find one, and 86 of
+DataFusion's, and pinned bounds cap 60 of the 70 queries DataFusion also
+plans at their true count as PostgreSQL planned them, 57 as DataFusion does.
 
 ## Simple selectivities
 

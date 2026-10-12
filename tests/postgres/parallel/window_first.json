@@ -1,0 +1,109 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Subquery Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Alias": "s",
+      "Actual Rows": 1000.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["s.o_custkey", "s.o_orderkey"],
+      "Filter": "(s.rn = 1)",
+      "Rows Removed by Filter": 0,
+      "Plans": [
+        {
+          "Node Type": "WindowAgg",
+          "Parent Relationship": "Subquery",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1000.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_custkey", "orders.o_orderkey", "row_number() OVER w1", "orders.o_orderdate"],
+          "Window": "w1 AS (PARTITION BY orders.o_custkey ORDER BY orders.o_orderdate, orders.o_orderkey ROWS UNBOUNDED PRECEDING)",
+          "Run Condition": "(row_number() OVER w1 <= 1)",
+          "Storage": "Memory",
+          "Maximum Storage": 17,
+          "Plans": [
+            {
+              "Node Type": "Gather Merge",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 15000.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_custkey", "orders.o_orderkey", "orders.o_orderdate"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Plans": [
+                {
+                  "Node Type": "Sort",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 5000.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["orders.o_custkey", "orders.o_orderkey", "orders.o_orderdate"],
+                  "Sort Key": ["orders.o_custkey", "orders.o_orderdate DESC", "orders.o_orderkey"],
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 889,
+                  "Sort Space Type": "Memory",
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 965.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 62,
+                      "Sort Space Type": "Memory"
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 1131.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 93,
+                      "Sort Space Type": "Memory"
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Relation Name": "orders",
+                      "Schema": "public",
+                      "Alias": "orders",
+                      "Actual Rows": 5000.00,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["orders.o_custkey", "orders.o_orderkey", "orders.o_orderdate"],
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 965.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 1131.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

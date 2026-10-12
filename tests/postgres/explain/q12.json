@@ -1,0 +1,73 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Disabled": false,
+      "Output": ["lineitem.l_shipmode", "sum(CASE WHEN (((orders.o_orderpriority)::text = '1-URGENT'::text) OR ((orders.o_orderpriority)::text = '2-HIGH'::text)) THEN 1 ELSE 0 END)", "sum(CASE WHEN (((orders.o_orderpriority)::text <> '1-URGENT'::text) AND ((orders.o_orderpriority)::text <> '2-HIGH'::text)) THEN 1 ELSE 0 END)"],
+      "Group Key": ["lineitem.l_shipmode"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["lineitem.l_shipmode", "orders.o_orderpriority"],
+          "Sort Key": ["lineitem.l_shipmode"],
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Disabled": false,
+              "Output": ["lineitem.l_shipmode", "orders.o_orderpriority"],
+              "Inner Unique": false,
+              "Hash Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Disabled": false,
+                  "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                  "Filter": "(((lineitem.l_shipmode)::text = ANY ('{MAIL,SHIP}'::text[])) AND (lineitem.l_commitdate < lineitem.l_receiptdate) AND (lineitem.l_shipdate < lineitem.l_commitdate) AND (lineitem.l_receiptdate >= '1994-01-01'::date) AND (lineitem.l_receiptdate < '1995-01-01 00:00:00'::timestamp without time zone))"
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Output": ["orders.o_orderpriority", "orders.o_orderkey"],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "orders",
+                      "Schema": "public",
+                      "Alias": "orders",
+                      "Disabled": false,
+                      "Output": ["orders.o_orderpriority", "orders.o_orderkey"]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

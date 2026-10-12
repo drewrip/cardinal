@@ -10,16 +10,18 @@
 
 mod duckdb;
 mod plan;
+mod postgres;
 mod sql;
 
 pub use duckdb::{from_duckdb, from_duckdb_explain};
+pub use postgres::{from_postgres, from_postgres_explain};
 pub use sql::QueryText;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::catalog::TableProvider;
 use datafusion::common::{Column, DFSchema, JoinType, ScalarValue, TableReference};
@@ -47,14 +49,24 @@ pub struct ObservedPlan {
 #[derive(Debug, Clone)]
 pub struct ONode {
     pub op: Op,
-    /// Rows the operator output.
+    /// Rows the operator output, if `counted`.
     pub rows: u64,
+    /// Whether `rows` is the count of the operator's whole output, computed
+    /// once. Not for an operator an engine ran several times and reported an
+    /// average for, one it stopped reading before the end, or one whose rows
+    /// depended on another's (a parameterized scan): its rows are still what
+    /// its inputs and predicates say, only not counted.
+    pub counted: bool,
     pub children: Vec<usize>,
     /// The columns of its output.
     pub columns: Vec<OutCol>,
     /// Whether `columns` are in output order, so positional references
     /// resolve. An engine may drop or reorder a join's columns unseen.
     pub ordered: bool,
+    /// Whether the operator read all of its input before it output a row
+    /// (a sort, a hash table's build), as far as the engine says: then its
+    /// input is whole even where its own output was not read to the end.
+    pub blocking: bool,
     /// The engine's own name for the operator, e.g. `PERFECT_HASH_GROUP_BY`.
     pub engine_op: String,
     /// A scan that reported reading fewer rows than it output: the engine
@@ -170,7 +182,8 @@ impl fmt::Display for ObservedPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn go(p: &ObservedPlan, i: usize, depth: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let n = &p.nodes[i];
-            writeln!(f, "{:w$}#{i} {} ({}) rows={}", "", n.op, n.engine_op, n.rows, w = depth * 2)?;
+            let rows = if n.counted || !p.counted { n.rows.to_string() } else { "?".to_string() };
+            writeln!(f, "{:w$}#{i} {} ({}) rows={rows}", "", n.op, n.engine_op, w = depth * 2)?;
             for &c in &n.children {
                 go(p, c, depth + 1, f)?;
             }
@@ -189,6 +202,9 @@ pub struct Catalog {
     providers: HashMap<String, Arc<dyn TableProvider>>,
     /// Every table's columns, qualified by table name.
     all: Arc<DFSchema>,
+    /// The predicate of each partial index of the tables, by its name, if
+    /// known (see [`Catalog::with_partial_indexes`]).
+    partial_indexes: Option<HashMap<String, String>>,
 }
 
 impl Catalog {
@@ -218,7 +234,36 @@ impl Catalog {
             tables.insert(name.clone(), schema);
             providers.insert(name, provider);
         }
-        Ok(Catalog { state: ctx.state(), tables, providers, all: Arc::new(all) })
+        Ok(Catalog { state: ctx.state(), tables, providers, all: Arc::new(all), partial_indexes: None })
+    }
+
+    /// Every partial index (`CREATE INDEX ... WHERE ...`) of the tables,
+    /// by name, with its predicate: all of them, so possibly none.
+    /// PostgreSQL's plans print an index scan's index, but neither a
+    /// partial index's predicate nor the conditions of the query that the
+    /// predicate implies, which it drops: a scan of one keeps rows by a
+    /// predicate the plan does not show. So a scan of an index given here
+    /// is read as keeping the rows of its predicate too, and until the
+    /// partial indexes are given, a scan of any index has a predicate that
+    /// does not resolve. In PostgreSQL they are `SELECT c.relname,
+    /// pg_get_expr(i.indpred, i.indrelid) FROM pg_index i JOIN pg_class c
+    /// ON c.oid = i.indexrelid WHERE i.indpred IS NOT NULL`.
+    pub fn with_partial_indexes<I, N, P>(mut self, indexes: I) -> Catalog
+    where
+        I: IntoIterator<Item = (N, P)>,
+        N: Into<String>,
+        P: Into<String>,
+    {
+        self.partial_indexes = Some(indexes.into_iter().map(|(n, p)| (n.into(), p.into())).collect());
+        self
+    }
+
+    /// The predicate of each partial index among `indexes`, by name: or
+    /// `None` if the partial indexes were not given, when any of them may
+    /// be one.
+    pub(crate) fn index_predicates<'c>(&'c self, indexes: &[String]) -> Option<Vec<(&'c str, &'c str)>> {
+        let partial = self.partial_indexes.as_ref()?;
+        Some(indexes.iter().filter_map(|i| partial.get_key_value(i)).map(|(i, p)| (i.as_str(), p.as_str())).collect())
     }
 
     /// Every table's columns, qualified by table name.
@@ -348,6 +393,32 @@ fn date_comparison(e: Expr, schema: &DFSchema) -> Transformed<Expr> {
         _ => return Transformed::no(e),
     };
     Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(Box::new(l), *op, Box::new(r))))
+}
+
+/// The type of `e`, an expression over scan instances.
+pub(super) fn type_of(catalog: &Catalog, e: &Expr) -> Option<DataType> {
+    requalify(e, &|r| base_table(r).map(str::to_string)).get_type(catalog.all.as_ref()).ok()
+}
+
+/// `e` normalized against the schemas of the instances it reads, and of the
+/// aggregates of `nodes` whose values it reads.
+pub(super) fn simplify(catalog: &Catalog, nodes: &[ONode], e: Expr) -> Expr {
+    normalize(e, &|r| match base_table(r) {
+        Some(t) => catalog.tables.get(t).cloned(),
+        None => values(catalog, nodes, r),
+    })
+}
+
+/// The value columns of aggregate `@k`, with their types.
+fn values(catalog: &Catalog, nodes: &[ONode], relation: &str) -> Option<SchemaRef> {
+    let node = nodes.get(relation.strip_prefix('@')?.parse::<usize>().ok()?)?;
+    let Op::Aggregate { keys, values } = &node.op else { return None };
+    let fields: Vec<Field> = node.columns[keys.len()..]
+        .iter()
+        .zip(values)
+        .filter_map(|(c, v)| Some(Field::new(&c.name, type_of(catalog, v.as_ref()?)?, true)))
+        .collect();
+    Some(Arc::new(Schema::new(fields)))
 }
 
 /// `e` with each column's relation renamed by `f`, where it gives a name.

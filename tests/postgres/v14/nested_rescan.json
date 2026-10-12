@@ -1,0 +1,58 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Nested Loop",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 3,
+          "Actual Loops": 1,
+          "Inner Unique": false,
+          "Join Filter": "(s.s_nationkey < n.n_nationkey)",
+          "Rows Removed by Join Filter": 197,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "nation",
+              "Schema": "public",
+              "Alias": "n",
+              "Actual Rows": 2,
+              "Actual Loops": 1,
+              "Output": ["n.n_nationkey", "n.n_name", "n.n_regionkey", "n.n_comment"],
+              "Filter": "((n.n_name)::text ~~ 'A%'::text)",
+              "Rows Removed by Filter": 23
+            },
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "supplier",
+              "Schema": "public",
+              "Alias": "s",
+              "Actual Rows": 100,
+              "Actual Loops": 2,
+              "Output": ["s.s_suppkey", "s.s_name", "s.s_address", "s.s_nationkey", "s.s_phone", "s.s_acctbal", "s.s_comment"]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

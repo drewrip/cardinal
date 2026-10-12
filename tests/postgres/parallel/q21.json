@@ -1,0 +1,347 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["supplier.s_name", "(count(*))"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["supplier.s_name", "(count(*))"],
+          "Sort Key": ["(count(*)) DESC", "supplier.s_name"],
+          "Sort Method": "quicksort",
+          "Sort Space Used": 25,
+          "Sort Space Type": "Memory",
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Sorted",
+              "Partial Mode": "Simple",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["supplier.s_name", "count(*)"],
+              "Group Key": ["supplier.s_name"],
+              "Plans": [
+                {
+                  "Node Type": "Sort",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 9.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["supplier.s_name"],
+                  "Sort Key": ["supplier.s_name"],
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory",
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Semi",
+                      "Actual Rows": 9.00,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": ["supplier.s_name"],
+                      "Inner Unique": false,
+                      "Join Filter": "(orders.o_orderkey = l2.l_orderkey)",
+                      "Rows Removed by Join Filter": 0,
+                      "Plans": [
+                        {
+                          "Node Type": "Gather",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Actual Rows": 15.00,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": ["supplier.s_name", "l1.l_suppkey", "l1.l_orderkey", "orders.o_orderkey"],
+                          "Workers Planned": 2,
+                          "Workers Launched": 2,
+                          "Single Copy": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Nested Loop",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Join Type": "Anti",
+                              "Actual Rows": 5.00,
+                              "Actual Loops": 3,
+                              "Disabled": false,
+                              "Output": ["supplier.s_name", "l1.l_suppkey", "l1.l_orderkey", "orders.o_orderkey"],
+                              "Inner Unique": false,
+                              "Workers": [
+                                {
+                                  "Worker Number": 0,
+                                  "Actual Rows": 0.00,
+                                  "Actual Loops": 1
+                                },
+                                {
+                                  "Worker Number": 1,
+                                  "Actual Rows": 0.00,
+                                  "Actual Loops": 1
+                                }
+                              ],
+                              "Plans": [
+                                {
+                                  "Node Type": "Nested Loop",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Join Type": "Inner",
+                                  "Actual Rows": 60.67,
+                                  "Actual Loops": 3,
+                                  "Disabled": false,
+                                  "Output": ["supplier.s_name", "l1.l_suppkey", "l1.l_orderkey", "orders.o_orderkey"],
+                                  "Inner Unique": true,
+                                  "Workers": [
+                                    {
+                                      "Worker Number": 0,
+                                      "Actual Rows": 0.00,
+                                      "Actual Loops": 1
+                                    },
+                                    {
+                                      "Worker Number": 1,
+                                      "Actual Rows": 0.00,
+                                      "Actual Loops": 1
+                                    }
+                                  ],
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Nested Loop",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Join Type": "Inner",
+                                      "Actual Rows": 132.33,
+                                      "Actual Loops": 3,
+                                      "Disabled": false,
+                                      "Output": ["supplier.s_name", "l1.l_suppkey", "l1.l_orderkey"],
+                                      "Inner Unique": false,
+                                      "Workers": [
+                                        {
+                                          "Worker Number": 0,
+                                          "Actual Rows": 0.00,
+                                          "Actual Loops": 1
+                                        },
+                                        {
+                                          "Worker Number": 1,
+                                          "Actual Rows": 0.00,
+                                          "Actual Loops": 1
+                                        }
+                                      ],
+                                      "Plans": [
+                                        {
+                                          "Node Type": "Hash Join",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": true,
+                                          "Async Capable": false,
+                                          "Join Type": "Inner",
+                                          "Actual Rows": 0.33,
+                                          "Actual Loops": 3,
+                                          "Disabled": false,
+                                          "Output": ["supplier.s_name", "supplier.s_suppkey"],
+                                          "Inner Unique": true,
+                                          "Hash Cond": "(supplier.s_nationkey = nation.n_nationkey)",
+                                          "Workers": [
+                                            {
+                                              "Worker Number": 0,
+                                              "Actual Rows": 0.00,
+                                              "Actual Loops": 1
+                                            },
+                                            {
+                                              "Worker Number": 1,
+                                              "Actual Rows": 0.00,
+                                              "Actual Loops": 1
+                                            }
+                                          ],
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Seq Scan",
+                                              "Parent Relationship": "Outer",
+                                              "Parallel Aware": true,
+                                              "Async Capable": false,
+                                              "Relation Name": "supplier",
+                                              "Schema": "public",
+                                              "Alias": "supplier",
+                                              "Actual Rows": 100.00,
+                                              "Actual Loops": 1,
+                                              "Disabled": false,
+                                              "Output": ["supplier.s_suppkey", "supplier.s_name", "supplier.s_address", "supplier.s_nationkey", "supplier.s_phone", "supplier.s_acctbal", "supplier.s_comment"],
+                                              "Workers": [
+                                              ]
+                                            },
+                                            {
+                                              "Node Type": "Hash",
+                                              "Parent Relationship": "Inner",
+                                              "Parallel Aware": true,
+                                              "Async Capable": false,
+                                              "Actual Rows": 0.33,
+                                              "Actual Loops": 3,
+                                              "Disabled": false,
+                                              "Output": ["nation.n_nationkey"],
+                                              "Hash Buckets": 1024,
+                                              "Original Hash Buckets": 1024,
+                                              "Hash Batches": 1,
+                                              "Original Hash Batches": 1,
+                                              "Peak Memory Usage": 40,
+                                              "Workers": [
+                                                {
+                                                  "Worker Number": 0,
+                                                  "Actual Rows": 0.00,
+                                                  "Actual Loops": 1
+                                                },
+                                                {
+                                                  "Worker Number": 1,
+                                                  "Actual Rows": 0.00,
+                                                  "Actual Loops": 1
+                                                }
+                                              ],
+                                              "Plans": [
+                                                {
+                                                  "Node Type": "Seq Scan",
+                                                  "Parent Relationship": "Outer",
+                                                  "Parallel Aware": true,
+                                                  "Async Capable": false,
+                                                  "Relation Name": "nation",
+                                                  "Schema": "public",
+                                                  "Alias": "nation",
+                                                  "Actual Rows": 1.00,
+                                                  "Actual Loops": 1,
+                                                  "Disabled": false,
+                                                  "Output": ["nation.n_nationkey"],
+                                                  "Filter": "((nation.n_name)::text = 'SAUDI ARABIA'::text)",
+                                                  "Rows Removed by Filter": 24,
+                                                  "Workers": [
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "Node Type": "Index Scan",
+                                          "Parent Relationship": "Inner",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Scan Direction": "Forward",
+                                          "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                                          "Relation Name": "lineitem",
+                                          "Schema": "public",
+                                          "Alias": "l1",
+                                          "Actual Rows": 397.00,
+                                          "Actual Loops": 1,
+                                          "Disabled": false,
+                                          "Output": ["l1.l_orderkey", "l1.l_partkey", "l1.l_suppkey", "l1.l_linenumber", "l1.l_quantity", "l1.l_extendedprice", "l1.l_discount", "l1.l_tax", "l1.l_returnflag", "l1.l_linestatus", "l1.l_shipdate", "l1.l_commitdate", "l1.l_receiptdate", "l1.l_shipinstruct", "l1.l_shipmode", "l1.l_comment"],
+                                          "Index Cond": "(l1.l_suppkey = supplier.s_suppkey)",
+                                          "Rows Removed by Index Recheck": 0,
+                                          "Filter": "(l1.l_receiptdate > l1.l_commitdate)",
+                                          "Rows Removed by Filter": 218,
+                                          "Index Searches": 1,
+                                          "Workers": [
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Index Scan",
+                                      "Parent Relationship": "Inner",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Scan Direction": "Forward",
+                                      "Index Name": "orders_pkey",
+                                      "Relation Name": "orders",
+                                      "Schema": "public",
+                                      "Alias": "orders",
+                                      "Actual Rows": 0.46,
+                                      "Actual Loops": 397,
+                                      "Disabled": false,
+                                      "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                                      "Index Cond": "(orders.o_orderkey = l1.l_orderkey)",
+                                      "Rows Removed by Index Recheck": 0,
+                                      "Filter": "((orders.o_orderstatus)::text = 'F'::text)",
+                                      "Rows Removed by Filter": 1,
+                                      "Index Searches": 397,
+                                      "Workers": [
+                                      ]
+                                    }
+                                  ]
+                                },
+                                {
+                                  "Node Type": "Index Scan",
+                                  "Parent Relationship": "Inner",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Scan Direction": "Forward",
+                                  "Index Name": "lineitem_pkey",
+                                  "Relation Name": "lineitem",
+                                  "Schema": "public",
+                                  "Alias": "l3",
+                                  "Actual Rows": 0.92,
+                                  "Actual Loops": 182,
+                                  "Disabled": false,
+                                  "Output": ["l3.l_orderkey", "l3.l_partkey", "l3.l_suppkey", "l3.l_linenumber", "l3.l_quantity", "l3.l_extendedprice", "l3.l_discount", "l3.l_tax", "l3.l_returnflag", "l3.l_linestatus", "l3.l_shipdate", "l3.l_commitdate", "l3.l_receiptdate", "l3.l_shipinstruct", "l3.l_shipmode", "l3.l_comment"],
+                                  "Index Cond": "(l3.l_orderkey = l1.l_orderkey)",
+                                  "Rows Removed by Index Recheck": 0,
+                                  "Filter": "((l3.l_receiptdate > l3.l_commitdate) AND (l3.l_suppkey <> l1.l_suppkey))",
+                                  "Rows Removed by Filter": 1,
+                                  "Index Searches": 182,
+                                  "Workers": [
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "lineitem_pkey",
+                          "Relation Name": "lineitem",
+                          "Schema": "public",
+                          "Alias": "l2",
+                          "Actual Rows": 0.60,
+                          "Actual Loops": 15,
+                          "Disabled": false,
+                          "Output": ["l2.l_orderkey", "l2.l_partkey", "l2.l_suppkey", "l2.l_linenumber", "l2.l_quantity", "l2.l_extendedprice", "l2.l_discount", "l2.l_tax", "l2.l_returnflag", "l2.l_linestatus", "l2.l_shipdate", "l2.l_commitdate", "l2.l_receiptdate", "l2.l_shipinstruct", "l2.l_shipmode", "l2.l_comment"],
+                          "Index Cond": "(l2.l_orderkey = l1.l_orderkey)",
+                          "Rows Removed by Index Recheck": 0,
+                          "Filter": "(l2.l_suppkey <> l1.l_suppkey)",
+                          "Rows Removed by Filter": 1,
+                          "Index Searches": 15
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]
