@@ -566,6 +566,56 @@ them. DuckDB's plan does better on join orders (TPC-H q05: `X <= 5`, not 25)
 and the filters it pushes, and no worse on any. `explain_plans` checks that each TPC-H query's plain
 `EXPLAIN` asks for the same selectivities as its profile.
 
+## Simple selectivities
+
+A selectivity is a share of its operator's input, and that input is often
+other operators' output. A *simple* selectivity is a share of the rows of
+stored tables alone, whole:
+
+| Kind | Fact | Over |
+|---|---|---|
+| Filter | `s(p \| T)` | one table |
+| Join | `s(c \| T × U)` | two tables (a table read twice counts twice) |
+| Semi join | `m(c \| T ⋉ U)` | a kept table, and the other |
+| Distinct | `ndv(k \| T)`, over `\|T\|` | one table |
+
+```rust
+for s in analysis.simple_selectivities()? {
+    println!("{s}");
+    // s1 = s(orders.amount > 10 | orders): filter on orders
+    // s2: not simple (over filtered rows: items × orders where orders.amount > 10)
+}
+```
+
+An operator's input is named as a fact names it (see [Contexts](#facts)), so
+views, CTEs, subqueries, projections and aliases read as the stored tables'
+scans below them, and predicates and keys as expressions over their columns.
+Only scans of tables count: a view is inlined, and its definition read. A
+join's share whose condition reads one table only is that table's filter
+share, `s(p | T × U) = s(p | T)`.
+
+Where an input is more than whole tables, the constraints may prove it holds
+the same rows as one. Each operator that does is seen through, and listed in
+`Simple::proof`:
+
+- a filter, or a scan's pushed filters, or a semi or anti join, whose rows the
+  constraints prove are all of its input's;
+- an inner equi-join where each row of one side has at most one partner (the
+  other side's key is unique, or a foreign key goes to it) and the join
+  provably has as many rows as that side, so each has exactly one; or a left
+  join whose preserved rows each have at most one. Its rows are that side's,
+  one for one, and if nothing above reads the other side's columns, the other
+  side is dropped.
+
+So `SELECT i.part, count(*) FROM items i JOIN orders o ON i.order_id = o.id
+GROUP BY i.part`, with a foreign key from `items` to `orders`, needs
+`ndv(items.part | items)`. A filter on `o.amount` above reads the order, and
+the join's share stays one of pairs of filtered rows. `tests/simple.rs`
+executes every query and checks that each simple selectivity's fact, counted
+over its tables alone, gives the value the execution measured. On TPC-H with
+its foreign keys, 18 of the 67 selectivities DataFusion's plans need are
+simple, and 33 of 101 for DuckDB's.
+
 ## Validation
 
 `validate` evaluates the plan bottom-up, running each operator over its

@@ -46,6 +46,16 @@ impl Logical {
     /// The contexts of `nodes` (children before parents). `scans` maps each
     /// base-table scan's variable to its table.
     pub(crate) fn new(nodes: &[Node], scans: &[(String, String)]) -> Logical {
+        Logical::reduced(nodes, scans, &[])
+    }
+
+    /// [`Logical::new`], with each node `i` that `same[i]` says outputs
+    /// input `k`'s rows one for one (`Some(k)`) given input `k`'s context.
+    /// A filter or a scan's filters keep every row; a join keeps side `k`'s
+    /// rows each once, and the other side's columns read as nothing, so that
+    /// what reads them is unresolved. Contexts so named count the same rows,
+    /// but name them differently from facts.
+    pub(crate) fn reduced(nodes: &[Node], scans: &[(String, String)], same: &[Option<usize>]) -> Logical {
         let mut l = Logical {
             contexts: vec![],
             args: vec![],
@@ -55,9 +65,11 @@ impl Logical {
             values: vec![],
         };
         for (i, node) in nodes.iter().enumerate() {
-            let (ctx, args, lineage) = l.node(nodes, scans, i);
+            let (mut ctx, args, mut lineage) = l.node(nodes, scans, i);
+            if let Some(k) = same.get(i).copied().flatten() {
+                (ctx, lineage) = l.same(nodes, i, k, lineage);
+            }
             let width = node.plan.schema().fields().len();
-            let mut lineage = lineage;
             lineage.resize(width, None);
             l.contexts.push(ctx);
             l.args.push(args);
@@ -248,6 +260,27 @@ impl Logical {
                 (ctx, None, vec![])
             }
             _ => (unsupported(), None, vec![]),
+        }
+    }
+
+    /// The context and lineage of node `i`, whose rows are input `k`'s one
+    /// for one, given its own `lineage`.
+    fn same(&self, nodes: &[Node], i: usize, k: usize, lineage: Vec<Option<Expr>>) -> (Result<Context, Taint>, Vec<Option<Expr>>) {
+        let node = &nodes[i];
+        match &node.plan {
+            LogicalPlan::TableScan(_) => {
+                let ctx = match &self.instances[i] {
+                    Some(instance) => Ok(Context::table(instance)),
+                    None => Err(Taint::Unsupported("TableScan".into())),
+                };
+                (ctx, lineage)
+            }
+            LogicalPlan::Join(join) => {
+                let left = join.left.schema().fields().len();
+                let lineage = lineage.into_iter().enumerate().map(|(j, e)| e.filter(|_| (j >= left) == (k == 1))).collect();
+                (self.contexts[node.inputs[k]].clone(), lineage)
+            }
+            _ => (self.contexts[node.inputs[k]].clone(), lineage),
         }
     }
 

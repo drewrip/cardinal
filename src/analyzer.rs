@@ -116,6 +116,8 @@ pub(crate) struct Analyzer<'a> {
     max_product: usize,
     /// Declared foreign keys.
     foreign_keys: &'a [ForeignKey],
+    /// The last join visited's [`Node::at_most_once`], for its node to take.
+    at_most_once: (bool, bool),
 }
 
 /// One plan node and the variables describing its output.
@@ -131,6 +133,9 @@ pub(crate) struct Node {
     /// For a base scan with pushed-down filters: the raw scan's cardinality and
     /// NDV variables, and the scan without filters or fetch.
     pub(crate) raw_scan: Option<(String, Vec<String>, LogicalPlan)>,
+    /// For an equi-join: whether each left row matches at most one right row
+    /// (a unique right key, or a foreign key from the left), and the mirror.
+    pub(crate) at_most_once: (bool, bool),
 }
 
 /// How long Z3 may spend on one check before answering unknown.
@@ -201,6 +206,7 @@ impl<'a> Analyzer<'a> {
             origins: Vec::new(),
             max_product,
             foreign_keys,
+            at_most_once: (false, false),
         }
     }
 
@@ -311,6 +317,7 @@ impl<'a> Analyzer<'a> {
         // Subquery nodes stand on their own; they are not inputs of this node.
         self.frontier.truncate(mark);
         let (out, raw_scan) = self.visit_node(plan);
+        let at_most_once = std::mem::take(&mut self.at_most_once);
         self.apply_domains(plan, &out);
         if let Some(o) = &out.origin
             && o.informative()
@@ -327,6 +334,7 @@ impl<'a> Analyzer<'a> {
             plan: plan.clone(),
             inputs,
             raw_scan,
+            at_most_once,
         });
         self.frontier.push(self.nodes.len() - 1);
         out
@@ -948,6 +956,7 @@ impl<'a> Analyzer<'a> {
             JoinType::RightMark => self.assert(o.card.eq(&r.card)),
         }
         self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
+        self.at_most_once = (ru || fl, lu || fr);
         self.join_ndv(join, &o, &l, &r);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.

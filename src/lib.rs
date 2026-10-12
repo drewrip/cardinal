@@ -14,11 +14,13 @@ mod informed;
 pub mod observed;
 mod origin;
 mod selectivity;
+mod simple;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};
 pub use informed::{FactMode, Informed, Matched};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
+pub use simple::{Simple, SimpleKind, SimpleSelectivity};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -194,6 +196,17 @@ impl Analysis {
     /// none (a term that did not resolve, a limit, ...).
     pub fn selectivity_facts(&self) -> Vec<(String, std::result::Result<facts::FactKind, String>)> {
         informed::kinds(self)
+    }
+
+    /// Each selectivity of [`Analysis::selectivity`]'s `required`, and
+    /// whether it is *simple*: a filter's share of one stored table's rows, a
+    /// join's of two tables' pairs, a semi join's of one table's rows with a
+    /// partner in another, or a distinct count per row of one table. Views,
+    /// CTEs and projections are seen through, and operators the constraints
+    /// prove keep their input's rows one for one are too. Needs
+    /// [`Options::selectivity`].
+    pub fn simple_selectivities(&self) -> Result<Vec<SimpleSelectivity>> {
+        simple::simple(self)
     }
 }
 

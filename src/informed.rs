@@ -140,10 +140,14 @@ impl fmt::Display for Informed {
 /// The fact each selectivity `analysis` requires is looked up as, by
 /// selectivity name, or why it is none.
 pub(crate) fn kinds(analysis: &Analysis) -> Vec<(String, std::result::Result<FactKind, String>)> {
+    kinds_in(analysis, &Logical::new(&analysis.nodes, &analysis.scans))
+}
+
+/// [`kinds`], with the operators' rows named by `logical`.
+pub(crate) fn kinds_in(analysis: &Analysis, logical: &Logical) -> Vec<(String, std::result::Result<FactKind, String>)> {
     let Some(report) = &analysis.selectivity else { return vec![] };
-    let logical = Logical::new(&analysis.nodes, &analysis.scans);
     let none = FactSet::default();
-    let lookup = Lookup::new(&analysis.nodes, &logical, &none);
+    let lookup = Lookup::new(&analysis.nodes, logical, &none);
     report.required.iter().map(|s| (s.name.clone(), lookup.kind(s).map(|k| k.canonical()))).collect()
 }
 
