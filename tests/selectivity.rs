@@ -262,3 +262,26 @@ async fn measured_selectivities_reproduce_the_output() {
         }
     }
 }
+
+#[tokio::test]
+async fn first_row_per_partition_is_a_distinct_count() {
+    // rn = 1 keeps one row per user with an order: as many as GROUP BY user_id.
+    let (f, kinds) = formula(
+        "SELECT * FROM (SELECT o.user_id, o.amount, row_number() OVER
+           (PARTITION BY o.user_id ORDER BY o.amount DESC) AS rn FROM orders o) t WHERE rn = 1",
+    )
+    .await;
+    assert_eq!(f, "s1·|orders|");
+    assert!(matches!(&kinds[..], [Kind::Distinct(keys)] if keys.len() == 1 && keys[0].to_string().contains("user_id")), "{kinds:?}");
+    // Joined on the partition, each user has one partner if it has an order:
+    // the users with a match.
+    let (f, kinds) = formula(
+        "SELECT u.id, o.amount FROM users u JOIN (SELECT o.user_id, o.amount, row_number() OVER
+           (PARTITION BY o.user_id ORDER BY o.amount DESC) AS rn FROM orders o) o
+         ON u.id = o.user_id WHERE o.rn = 1",
+    )
+    .await;
+    assert!(f.contains("|users|"), "{f}");
+    assert!(kinds.iter().any(|k| matches!(k, Kind::Match { left: true, .. })), "{kinds:?}");
+    assert!(!kinds.iter().any(|k| matches!(k, Kind::Join { .. })), "{kinds:?}");
+}

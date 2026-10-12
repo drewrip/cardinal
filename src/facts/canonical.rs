@@ -19,9 +19,12 @@ const MAX_ORDERS: usize = 5040;
 impl FactKind {
     /// This fact with its table instances canonically renamed.
     pub fn canonical(&self) -> FactKind {
-        // Decorrelated first: the copy it takes out is no instance to name.
-        let decorrelated = self.decorrelated();
-        let this = decorrelated.as_ref().unwrap_or(self);
+        // Lookups no term reads taken out, and decorrelated first: what they
+        // take out is no instance to name.
+        let unpadded = self.unpadded();
+        let this = unpadded.as_ref().unwrap_or(self);
+        let decorrelated = this.decorrelated();
+        let this = decorrelated.as_ref().unwrap_or(this);
         let instances = this.instances();
         let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
         for i in &instances {
@@ -42,6 +45,65 @@ impl FactKind {
             }
         });
         best.unwrap_or_else(|| this.clone())
+    }
+
+    /// This fact with its left joins that only look up groups nothing
+    /// reads, and its inner joins on groups nothing else reads, taken out
+    /// (see [`rewrite::unpadded`]), until none is left: taking one out may
+    /// leave another that only it read. `None` if there are none, or if any
+    /// term reads an aggregate's value, which may be a group's.
+    fn unpadded(&self) -> Option<FactKind> {
+        let mut this = self.clone();
+        loop {
+            let next = this.unpadded_once()?;
+            if next == this {
+                return (this != *self).then_some(this);
+            }
+            this = next;
+        }
+    }
+
+    fn unpadded_once(&self) -> Option<FactKind> {
+        let (mut read, mut values) = (BTreeMap::new(), false);
+        let terms = |ts: &BTreeSet<Term>, read: &mut BTreeMap<String, usize>, values: &mut bool| {
+            for t in ts {
+                for c in t.expr.column_refs() {
+                    match c.relation.as_ref().map(|r| r.table()) {
+                        Some("value") | None => *values = true,
+                        Some(r) => *read.entry(r.to_string()).or_default() += 1,
+                    }
+                }
+            }
+        };
+        let contexts: Vec<&Context> = match self {
+            FactKind::Cardinality(c) => vec![c],
+            FactKind::Selectivity { pred, over } => {
+                terms(pred, &mut read, &mut values);
+                vec![over]
+            }
+            FactKind::Match { on, kept, other } => {
+                terms(on, &mut read, &mut values);
+                vec![kept, other]
+            }
+            FactKind::Distinct { keys, over } | FactKind::Unique { keys, over } => {
+                terms(keys, &mut read, &mut values);
+                vec![over]
+            }
+        };
+        for c in &contexts {
+            rewrite::reads(c, &mut read, &mut values);
+        }
+        if values {
+            return None;
+        }
+        let f = |c: &Context| rewrite::unpadded(c, &read);
+        Some(match self {
+            FactKind::Cardinality(c) => FactKind::Cardinality(f(c)),
+            FactKind::Selectivity { pred, over } => FactKind::Selectivity { pred: pred.clone(), over: f(over) },
+            FactKind::Match { on, kept, other } => FactKind::Match { on: on.clone(), kept: f(kept), other: f(other) },
+            FactKind::Distinct { keys, over } => FactKind::Distinct { keys: keys.clone(), over: f(over) },
+            FactKind::Unique { keys, over } => FactKind::Unique { keys: keys.clone(), over: f(over) },
+        })
     }
 
     /// A match share on a copy of its kept side grouped on the correlated

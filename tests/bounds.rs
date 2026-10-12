@@ -357,6 +357,15 @@ async fn top_n_per_group() {
     )
     .await;
     assert_eq!(b.constant, Some(10));
+    // rn = 1 keeps one row per user: joined on user_id, it matches each user
+    // at most once.
+    let b = bounds(
+        "SELECT u.id, o.amount FROM users u JOIN (SELECT o.user_id, o.amount, row_number() OVER
+           (PARTITION BY o.user_id ORDER BY o.amount DESC) AS rn FROM orders o) o
+         ON u.id = o.user_id WHERE o.rn = 1",
+    )
+    .await;
+    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
     // rank() repeats on ties, so it bounds nothing.
     let b = bounds(
         "SELECT id FROM (SELECT id, rank() OVER (ORDER BY age) AS r FROM users) t WHERE t.r = 1",

@@ -462,10 +462,47 @@ pub(crate) struct Values<'a> {
     pub plan: &'a ObservedPlan,
     pub states: &'a [State],
     pub stopped: &'a [bool],
+    /// What each operator's output may not read (see [`Hidden`]).
+    pub hidden: &'a [Hidden],
+}
+
+/// Columns an operator's output holds but no context names: those of the
+/// rows a first-row filter kept, beyond their partition columns, as
+/// `(instances, partition)`. Which row of a partition the filter kept
+/// depends on the window's order, so what reads them reads no context's
+/// rows. A partition column is the group's key, unless a semi join took
+/// the group out, after which it reads nothing either.
+pub(crate) type Hidden = Vec<(BTreeSet<String>, Vec<Expr>)>;
+
+/// True if `e` reads a hidden column, other than as a partition column.
+fn reads_hidden(e: &Expr, hidden: &Hidden) -> bool {
+    hidden.iter().any(|(instances, keys)| {
+        let e = e
+            .clone()
+            .transform_down(|x| {
+                Ok(if keys.contains(&x) { Transformed::yes(Expr::Literal(datafusion::common::ScalarValue::Null, None)) } else { Transformed::no(x) })
+            })
+            .map(|t| t.data)
+            .unwrap_or_else(|_| e.clone());
+        e.column_refs().iter().any(|c| c.relation.as_ref().is_some_and(|r| instances.contains(r.table())))
+    })
 }
 
 impl Values<'_> {
-    fn settle(&self, e: &Expr) -> Option<Expr> {
+    /// What the inputs of operator `at` may not read.
+    fn inherited(&self, at: usize) -> Hidden {
+        self.plan.nodes[at].children.iter().flat_map(|&c| self.hidden.get(c).cloned().unwrap_or_default()).collect()
+    }
+
+    fn settle(&self, at: usize, e: &Expr) -> Option<Expr> {
+        // A window function's value depends on the rows it ran over, which
+        // a context's predicates, in any order, do not say.
+        if e.exists(|x| Ok(matches!(x, Expr::WindowFunction(_)))).unwrap_or(true) {
+            return None;
+        }
+        if reads_hidden(e, &self.inherited(at)) {
+            return None;
+        }
         e.clone()
             .transform_up(|e| match e {
                 Expr::Column(c) if relation(&c).is_some_and(|r| r.starts_with('@')) => {
@@ -491,7 +528,7 @@ impl Values<'_> {
         let Op::Aggregate { keys, values } = &node.op else { return None };
         let i = node.columns.iter().position(|c| c.name == name)?.checked_sub(keys.len())?;
         // A value may be computed from another (`first(avg(x))`).
-        let value = self.settle(values.get(i)?.as_ref()?)?;
+        let value = self.settle(k, values.get(i)?.as_ref()?)?;
         let over = self.states.get(k)?.clean().filter(|_| !self.stopped[k])?.clone();
         let FactKind::Distinct { keys, over } = (FactKind::Distinct { keys: [Term::new(value)].into(), over }).canonical()
         else {
@@ -513,10 +550,10 @@ impl Values<'_> {
     }
 
     /// Resolved, deterministic predicates, or why not.
-    pub(crate) fn resolve(&self, preds: &[Pred]) -> std::result::Result<BTreeSet<Term>, Taint> {
+    pub(crate) fn resolve(&self, at: usize, preds: &[Pred]) -> std::result::Result<BTreeSet<Term>, Taint> {
         let mut exprs = vec![];
         for p in preds {
-            match p.expr.as_ref().map(|e| self.settle(e)) {
+            match p.expr.as_ref().map(|e| self.settle(at, e)) {
                 None | Some(None) => return Err(Taint::Unresolved(p.text.clone())),
                 Some(Some(e)) if e.is_volatile() => return Err(Taint::Volatile(p.text.clone())),
                 Some(Some(e)) => exprs.push(e),
@@ -526,8 +563,8 @@ impl Values<'_> {
     }
 
     /// Resolved grouping keys, or `None`.
-    pub(crate) fn keys(&self, keys: &[Option<Expr>]) -> Option<BTreeSet<Term>> {
-        keys.iter().map(|k| k.as_ref().and_then(|k| self.settle(k)).map(Term::new)).collect()
+    pub(crate) fn keys(&self, at: usize, keys: &[Option<Expr>]) -> Option<BTreeSet<Term>> {
+        keys.iter().map(|k| k.as_ref().and_then(|k| self.settle(at, k)).map(Term::new)).collect()
     }
 }
 
@@ -543,7 +580,7 @@ pub(crate) fn stopped(plan: &ObservedPlan) -> Vec<bool> {
     for i in (0..plan.nodes.len()).rev() {
         let node = &plan.nodes[i];
         let stops = match &node.op {
-            Op::Limit => node.children.clone(),
+            Op::Limit { .. } => node.children.clone(),
             // A join that keeps only matched probe rows and output none may
             // have stopped probing: its build side was empty, or had no key
             // that could match (all NULL).
@@ -567,6 +604,12 @@ pub(crate) fn stopped(plan: &ObservedPlan) -> Vec<bool> {
 
 /// The state of every operator of `plan`, by index.
 pub fn states(plan: &ObservedPlan) -> Vec<State> {
+    states_hidden(plan).0
+}
+
+/// The state of every operator of `plan`, and what its output may not read
+/// (see [`Hidden`]), by index.
+pub(crate) fn states_hidden(plan: &ObservedPlan) -> (Vec<State>, Vec<Hidden>) {
     // The columns joined on above each operator. A runtime filter on a
     // column may come from any join on it, so only the highest enforces it.
     let mut above = vec![BTreeSet::<String>::new(); plan.nodes.len()];
@@ -581,12 +624,62 @@ pub fn states(plan: &ObservedPlan) -> Vec<State> {
     }
     let stopped = stopped(plan);
     let mut states: Vec<State> = vec![];
+    let mut hidden: Vec<Hidden> = vec![];
+    // The partition of each operator's first rows, where its rows are a
+    // first-row filter's.
+    let mut first: Vec<Option<Vec<Expr>>> = vec![];
     for (i, above) in above.iter().enumerate() {
         let node = &plan.nodes[i];
         let inputs: Vec<State> = node.children.iter().map(|&c| states[c].clone()).collect();
-        let values = Values { plan, states: &states, stopped: &stopped };
-        let s = state(plan, i, &inputs, above, &values, &stopped);
+        let values = Values { plan, states: &states, stopped: &stopped, hidden: &hidden };
+        let mut h: Hidden = node.children.iter().flat_map(|&c| hidden[c].clone()).collect();
+        let mut f = None;
+        let s = if let Some(keys) = first_rows(plan, i, &values) {
+            // As many rows as a GROUP BY on the partition, and only its
+            // partition columns name anything of them.
+            let s = match inputs[0].clone().settle() {
+                Ok(c) => {
+                    h.push((c.tables(), keys.clone()));
+                    let args = keys.iter().cloned().map(Term::new).collect::<BTreeSet<_>>();
+                    State::Clean(Context::Derived { op: "group".into(), args: args.into_iter().collect(), inputs: vec![c] })
+                }
+                Err(t) => State::Tainted(t),
+            };
+            f = Some(keys);
+            s
+        } else {
+            let mut s = state(plan, i, &inputs, above, &values, &stopped);
+            match &node.op {
+                Op::Project | Op::Sort | Op::Window => f = first[node.children[0]].clone(),
+                // On exactly the partition of a side's first rows: a semi
+                // join with the window's input. The partition columns then
+                // name nothing either.
+                Op::Join { kind: JoinType::Inner, on } => {
+                    let side = (0..2).find(|&k| first[node.children[k]].as_ref().is_some_and(|p| on_partition(on, p)));
+                    if let (Some(k), State::Clean(_) | State::Pending(..)) = (side, &s)
+                        && let Ok(on_terms) = values.resolve(i, on)
+                    {
+                        let (l, _) = parts(&inputs[0]);
+                        let (r, _) = parts(&inputs[1]);
+                        let kind = if k == 1 { JoinType::LeftSemi } else { JoinType::RightSemi };
+                        let ctx = Context::join(kind, on_terms, l, r);
+                        s = match s {
+                            State::Pending(_, p) => State::Pending(ctx, p),
+                            _ => State::Clean(ctx),
+                        };
+                        let keys = first[node.children[k]].clone().unwrap();
+                        for (_, ks) in h.iter_mut().filter(|(_, ks)| *ks == keys) {
+                            ks.clear();
+                        }
+                    }
+                }
+                _ => {}
+            }
+            s
+        };
         states.push(s);
+        hidden.push(h);
+        first.push(f);
     }
     // Rows that may be short are no context's, though what is computed from
     // them may still be (a join with an empty side is empty).
@@ -595,7 +688,58 @@ pub fn states(plan: &ObservedPlan) -> Vec<State> {
             *s = State::Tainted(Taint::EarlyStop);
         }
     }
-    states
+    (states, hidden)
+}
+
+/// The partition of operator `i`'s `row_number()`, if it is a filter on
+/// only `rn = 1` (or `rn <= 1`) of one computed over its input's rows: only
+/// projections, sorts and windows, which keep every row, are in between.
+fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<Vec<Expr>> {
+    let node = &plan.nodes[i];
+    let Op::Filter { predicate } = &node.op else { return None };
+    let [p] = &predicate[..] else { return None };
+    let Some(Expr::BinaryExpr(BinaryExpr { left, op, right })) = &p.expr else { return None };
+    let one = |e: &Expr| {
+        matches!(e, Expr::Literal(v, _) if v.cast_to(&datafusion::arrow::datatypes::DataType::Int64).is_ok_and(|v| v == datafusion::common::ScalarValue::Int64(Some(1))))
+    };
+    let w = match (op, left.as_ref(), right.as_ref()) {
+        (Operator::Eq | Operator::LtEq, w @ Expr::WindowFunction(_), l) if one(l) => w,
+        (Operator::Eq | Operator::GtEq, l, w @ Expr::WindowFunction(_)) if one(l) => w,
+        _ => return None,
+    };
+    let Expr::WindowFunction(f) = w else { return None };
+    if f.fun.name() != "row_number" || f.params.filter.is_some() || f.params.partition_by.is_empty() {
+        return None;
+    }
+    if !f.params.partition_by.iter().all(|p| matches!(p, Expr::Column(_))) {
+        return None;
+    }
+    let mut c = *node.children.first()?;
+    loop {
+        let n = &plan.nodes[c];
+        match n.op {
+            Op::Window if n.columns.iter().any(|col| matches!(&col.lineage, crate::observed::Lineage::Exact(e) if e == w)) => break,
+            Op::Window | Op::Project | Op::Sort => c = *n.children.first()?,
+            _ => return None,
+        }
+    }
+    let keys = f.params.partition_by.clone();
+    keys.iter().all(|k| values.settle(i, k).as_ref() == Some(k)).then_some(keys)
+}
+
+/// True if `on` is equalities of exactly the columns `partition` (of one
+/// side) with columns of the other.
+fn on_partition(on: &[Pred], partition: &[Expr]) -> bool {
+    let mut seen = vec![];
+    for p in on {
+        let Some(Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right })) = &p.expr else { return false };
+        match (partition.contains(left), partition.contains(right)) {
+            (true, false) => seen.push(left.as_ref().clone()),
+            (false, true) => seen.push(right.as_ref().clone()),
+            _ => return false,
+        }
+    }
+    !on.is_empty() && partition.iter().all(|k| seen.contains(k))
 }
 
 /// Join kinds whose output includes probe-side rows without a match.
@@ -620,7 +764,7 @@ fn state(
             // in the context, required or optional, so that the rows are a
             // superset of the context's whichever were applied.
             let (optional, required): (Vec<Pred>, Vec<Pred>) = filters.iter().cloned().partition(|p| p.optional);
-            let mut preds = match values.resolve(&required) {
+            let mut preds = match values.resolve(i, &required) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -650,7 +794,7 @@ fn state(
             }
         }
         Op::Filter { predicate } => {
-            let preds = match values.resolve(predicate) {
+            let preds = match values.resolve(i, predicate) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -680,7 +824,7 @@ fn state(
             }
         }
         Op::Join { kind, on } => {
-            let on_terms = match values.resolve(on) {
+            let on_terms = match values.resolve(i, on) {
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
@@ -730,7 +874,7 @@ fn state(
                 Ok(c) => c,
                 Err(t) => return State::Tainted(t),
             };
-            let Some(keys) = values.keys(keys) else {
+            let Some(keys) = values.keys(i, keys) else {
                 return State::Tainted(Taint::Unresolved("grouping key".into()));
             };
             // A GROUP BY and a DISTINCT on the same keys give as many rows,
@@ -738,9 +882,12 @@ fn state(
             let op = if keys.is_empty() { "aggregate" } else { "group" };
             State::Clean(Context::Derived { op: op.into(), args: keys.into_iter().collect(), inputs: vec![input] })
         }
-        Op::TopN { fetch } => match inputs[0].clone().settle() {
+        Op::TopN { fetch, offset } => match inputs[0].clone().settle() {
             Ok(c) => State::Clean(Context::Derived {
-                op: format!("top {fetch}"),
+                op: match offset {
+                    0 => format!("top {fetch}"),
+                    k => format!("top {fetch} offset {k}"),
+                },
                 args: vec![],
                 inputs: vec![c],
             }),
@@ -756,7 +903,7 @@ fn state(
             }
             State::Clean(Context::Derived { op: "union".into(), args: vec![], inputs: ctxs })
         }
-        Op::Limit => State::Tainted(Taint::EarlyStop),
+        Op::Limit { .. } => State::Tainted(Taint::EarlyStop),
         Op::Other => State::Tainted(Taint::Unsupported(node.engine_op.clone())),
     }
 }

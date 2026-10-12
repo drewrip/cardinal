@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use datafusion::common::{Column, JoinType};
+use datafusion::common::{Column, JoinType, NullEquality};
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, Join, LogicalPlan, SkipType};
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::Expr;
@@ -20,6 +20,7 @@ use datafusion::logical_expr::Expr;
 use crate::analyzer::Node;
 use crate::bounds::Search;
 use crate::facts::Ratio;
+use crate::first;
 use crate::{Error, Result};
 
 /// A cardinality as an expression over table sizes and selectivities.
@@ -736,7 +737,14 @@ impl Builder<'_> {
             | LogicalPlan::SubqueryAlias(_)
             | LogicalPlan::Repartition(_)
             | LogicalPlan::Window(_) => input(),
-            LogicalPlan::Filter(f) => self.share(node, Kind::Filter(f.predicate.clone()), &inputs[0]),
+            // The first row of each partition: as many as the partitions.
+            LogicalPlan::Filter(f) => match first::first_rows(f) {
+                Some(first) => {
+                    let keys = first.partition.into_iter().map(Expr::Column).collect();
+                    self.share(node, Kind::Distinct(keys), &inputs[0])
+                }
+                None => self.share(node, Kind::Filter(f.predicate.clone()), &inputs[0]),
+            },
             LogicalPlan::Sort(s) => match s.fetch {
                 None => input(),
                 Some(n) => Card::min(Card::Const(n as u64), input()),
@@ -829,6 +837,16 @@ impl Builder<'_> {
             let m = if anti { Card::Not(Box::new(m)) } else { m };
             Card::mul(vec![side.clone(), m])
         };
+        // On exactly the partition of a side's first rows, a row of the other
+        // side has one partner if it has any: the rows of a semi join.
+        let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
+        let plain = join.join_type == JoinType::Inner && filter.is_none() && join.null_equality == NullEquality::NullEqualsNothing;
+        if plain && first::on_partition(&join.right, &rk) {
+            return matched(self, true, own, false, true);
+        }
+        if plain && first::on_partition(&join.left, &lk) {
+            return matched(self, false, own, false, true);
+        }
         match join.join_type {
             JoinType::Inner if cross => Card::mul(vec![l.clone(), r.clone()]),
             JoinType::Inner => pairs(self, own),

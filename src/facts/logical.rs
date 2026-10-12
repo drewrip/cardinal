@@ -22,6 +22,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use super::context::{Context, ExistsKind, Taint, Term};
 use super::FactKind;
 use crate::analyzer::Node;
+use crate::first;
 use crate::observed::{base_table, normalize, qualified};
 
 /// Every node's context, and what it is computed from.
@@ -115,6 +116,28 @@ impl Logical {
                 (ctx, None, pass(0))
             }
             LogicalPlan::Limit(_) => (Err(Taint::EarlyStop), None, pass(0)),
+            // The first row of each partition: as many rows as a GROUP BY on
+            // the partition, which is all that is named of them. Which row
+            // of a partition was kept depends on the window's order, so its
+            // other columns read as nothing.
+            LogicalPlan::Filter(f) if first::first_rows(f).is_some() => {
+                let first = first::first_rows(f).unwrap();
+                let mut w = node.inputs[0];
+                for _ in 0..first.depth {
+                    w = nodes[w].inputs[0];
+                }
+                let keys: Option<Vec<Expr>> = first
+                    .partition
+                    .iter()
+                    .map(|c| self.rewrite(&Expr::Column(c.clone()), &|c| self.column(nodes, w, c)).ok())
+                    .collect();
+                let lineage = match &keys {
+                    Some(ks) => pass(0).into_iter().map(|e| e.filter(|e| ks.contains(e))).collect(),
+                    None => vec![],
+                };
+                let keys: Option<BTreeSet<Term>> = keys.map(|ks| ks.into_iter().map(Term::new).collect());
+                (group(input(0), keys.clone()), keys, lineage)
+            }
             LogicalPlan::Filter(f) => {
                 let preds = self.terms(split_conjunction_owned(f.predicate.clone()), &|c| self.column(nodes, i, c));
                 let ctx = match (&preds, input(0)) {
@@ -168,19 +191,54 @@ impl Logical {
                         NullEquality::NullEqualsNull => Expr::BinaryExpr(BinaryExpr::new(Box::new(a), Operator::IsNotDistinctFrom, Box::new(b))),
                     }));
                 }
+                let pairs: Vec<(Expr, Expr)> = join
+                    .on
+                    .iter()
+                    .filter_map(|(a, b)| Some((self.resolve_in(nodes, l, a).ok()?, self.resolve_in(nodes, r, b).ok()?)))
+                    .collect();
                 let filter = join.filter.iter().cloned().flat_map(split_conjunction_owned);
                 let filter: Vec<Option<Expr>> = filter.map(|e| self.resolve(nodes, i, &e).ok()).collect();
                 let on: Option<BTreeSet<Term>> =
                     on.into_iter().chain(filter).map(|e| e.map(Term::new)).collect();
-                let lineage = match join.join_type {
+                let mut lineage = match join.join_type {
                     JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => pass(0),
                     JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => pass(1),
                     _ => pass(0).into_iter().chain(pass(1)).collect(),
                 };
+                // On exactly the partition of a side's first rows: the rows
+                // of a semi join with the window's input, whose key columns
+                // read as their partners'.
+                let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
+                let plain = join.join_type == JoinType::Inner
+                    && join.filter.is_none()
+                    && join.null_equality == NullEquality::NullEqualsNothing
+                    && pairs.len() == join.on.len();
+                let semi = if plain && first::on_partition(&join.right, &rk) {
+                    Some(JoinType::LeftSemi)
+                } else if plain && first::on_partition(&join.left, &lk) {
+                    Some(JoinType::RightSemi)
+                } else {
+                    None
+                };
+                if let Some(kind) = semi {
+                    let left = pass(0).len();
+                    for (j, e) in lineage.iter_mut().enumerate() {
+                        let grouped = (kind == JoinType::LeftSemi) == (j >= left);
+                        if grouped {
+                            let partner = e.as_ref().and_then(|e| {
+                                pairs.iter().find_map(|(a, b)| match kind {
+                                    JoinType::LeftSemi => (b == e).then(|| a.clone()),
+                                    _ => (a == e).then(|| b.clone()),
+                                })
+                            });
+                            *e = partner;
+                        }
+                    }
+                }
                 let ctx = match (input(0), input(1), &on) {
                     (Err(t), _, _) | (_, Err(t), _) => Err(t),
                     (_, _, None) => Err(Taint::Unresolved("join condition".into())),
-                    (Ok(lc), Ok(rc), Some(on)) => join_context(join.join_type, join.null_aware, lc, rc, on),
+                    (Ok(lc), Ok(rc), Some(on)) => join_context(semi.unwrap_or(join.join_type), join.null_aware, lc, rc, on),
                 };
                 (ctx, on, lineage)
             }

@@ -8,6 +8,7 @@
 mod analyzer;
 mod bounds;
 mod domain;
+mod first;
 pub mod facts;
 mod informed;
 pub mod observed;
@@ -187,6 +188,13 @@ impl Analysis {
     pub fn with_facts(&self, facts: &facts::FactSet, mode: FactMode) -> Result<Informed> {
         informed::inform(self, facts, mode)
     }
+
+    /// The fact each selectivity of [`Analysis::selectivity`]'s `required`
+    /// is looked up as, canonically named, by selectivity name; or why it is
+    /// none (a term that did not resolve, a limit, ...).
+    pub fn selectivity_facts(&self) -> Vec<(String, std::result::Result<facts::FactKind, String>)> {
+        informed::kinds(self)
+    }
 }
 
 /// The bounds `search` proves on its output: a constant, relative to the sum
@@ -357,6 +365,25 @@ pub fn analyze_plan_with(plan: &LogicalPlan, options: Options) -> Analysis {
         }
     };
     analyze_with(plan, &resolve, options)
+}
+
+/// Analyzes `plan`, the plan an engine chose for a query, in place of the
+/// plan DataFusion would choose, with explicit [`Options`]. Its operators keep
+/// the engine's order, so its selectivities are the ones the engine's
+/// profiles count: see [`observed::Catalog::to_logical`]. The plan's row
+/// counts, if any, are not read.
+pub fn analyze_observed(catalog: &observed::Catalog, plan: &observed::ObservedPlan, options: Options) -> Result<Analysis> {
+    let plan = catalog.to_logical(plan)?;
+    // Every scan is of a table in the catalog, by its bare name.
+    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
+    Ok(analyze_with(&plan, &resolve, options))
+}
+
+/// [`analyze_observed`] on DuckDB's plan for `sql`, as printed by `EXPLAIN
+/// (FORMAT JSON)` (or by `EXPLAIN (ANALYZE, FORMAT JSON)`).
+pub fn analyze_duckdb(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
+    let plan = observed::from_duckdb_explain(catalog, "", json, sql)?;
+    analyze_observed(catalog, &plan, options)
 }
 
 /// Identity of a provider object. An address, not a pointer, so futures holding

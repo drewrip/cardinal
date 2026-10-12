@@ -6,7 +6,7 @@
 
 use datafusion::common::JoinType;
 
-use super::context::{Context, State, Value, Values, states, stopped};
+use super::context::{Context, State, Value, Values, states_hidden, stopped};
 use super::{Fact, FactKind, Origin, Ratio};
 use crate::observed::{ObservedPlan, Op};
 
@@ -28,9 +28,13 @@ pub struct Observation<'a> {
 /// Every fact the rules read off `plan`, every upper bound, canonically
 /// named, and the definition of every value they may read.
 pub(crate) fn observe(plan: &ObservedPlan) -> (Vec<Fact>, Vec<Fact>, Vec<Value>) {
-    let states = states(plan);
+    // A plan that was not run counted nothing.
+    if !plan.counted {
+        return (vec![], vec![], vec![]);
+    }
+    let (states, hidden) = states_hidden(plan);
     let stopped = stopped(plan);
-    let obs = Observation { plan, states: &states, values: Values { plan, states: &states, stopped: &stopped } };
+    let obs = Observation { plan, states: &states, values: Values { plan, states: &states, stopped: &stopped, hidden: &hidden } };
     let mut facts = vec![];
     let mut bounds = vec![];
     let fact = |kind: FactKind, value, node, rule| Fact {
@@ -62,7 +66,7 @@ fn upper_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
     let Op::Aggregate { keys, .. } = &n.op else { return None };
     let input = &obs.states[n.children[0]];
     let (State::Pending(..), Some(over)) = (input, input.upper()) else { return None };
-    let keys = obs.values.keys(keys).filter(|k| !k.is_empty())?;
+    let keys = obs.values.keys(node, keys).filter(|k| !k.is_empty())?;
     Some((FactKind::Distinct { keys, over: over.clone() }, Ratio::int(n.rows)))
 }
 
@@ -117,7 +121,7 @@ impl FactRule for FilterSelectivity {
         let n = &obs.plan.nodes[node];
         let (Op::Filter { predicate }, Some((_, inputs))) = (&n.op, clean(obs, node)) else { return };
         let (input, rows) = inputs[0];
-        let Ok(mut pred) = obs.values.resolve(predicate) else { return };
+        let Ok(mut pred) = obs.values.resolve(node, predicate) else { return };
         if let Context::Spj { preds, .. } = input {
             pred.retain(|p| !preds.contains(p));
         }
@@ -140,13 +144,25 @@ impl FactRule for JoinSelectivity {
     fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
         let n = &obs.plan.nodes[node];
         let (Op::Join { kind, on }, Some((_, inputs))) = (&n.op, clean(obs, node)) else { return };
-        let Ok(on) = obs.values.resolve(on) else { return };
+        let Ok(on) = obs.values.resolve(node, on) else { return };
         let [(l, lr), (r, rr)] = inputs[..] else { return };
         let fact = match kind {
-            JoinType::Inner if !on.is_empty() => l.cross(r).and_then(|over| {
-                let pairs = lr.checked_mul(rr)?;
-                Some((FactKind::Selectivity { pred: on, over }, Ratio::new(n.rows, pairs)?))
-            }),
+            JoinType::Inner if !on.is_empty() => {
+                // An inner join on a side's first rows keeps the rows of a
+                // semi join (see `context::states`): the other side's share
+                // with a partner, too.
+                let this = obs.states[node].clean();
+                let semi = [(JoinType::LeftSemi, l, r, lr), (JoinType::RightSemi, r, l, rr)].into_iter().find_map(|(k, kept, other, rows)| {
+                    (this == Some(&Context::join(k, on.clone(), l.clone(), r.clone()))).then_some((kept, other, rows))
+                });
+                if let Some((kept, other, rows)) = semi {
+                    out.extend(Ratio::new(n.rows, rows).map(|m| (FactKind::Match { on: on.clone(), kept: kept.clone(), other: other.clone() }, m)));
+                }
+                l.cross(r).and_then(|over| {
+                    let pairs = lr.checked_mul(rr)?;
+                    Some((FactKind::Selectivity { pred: on, over }, Ratio::new(n.rows, pairs)?))
+                })
+            }
             JoinType::LeftSemi | JoinType::LeftAnti | JoinType::RightSemi | JoinType::RightAnti => {
                 let left = matches!(kind, JoinType::LeftSemi | JoinType::LeftAnti);
                 let (kept, other, rows) = if left { (l, r, lr) } else { (r, l, rr) };
@@ -173,7 +189,7 @@ impl FactRule for DistinctCount {
     fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Ratio)>) {
         let n = &obs.plan.nodes[node];
         let (Op::Aggregate { keys, .. }, Some((_, inputs))) = (&n.op, clean(obs, node)) else { return };
-        let Some(keys) = obs.values.keys(keys) else { return };
+        let Some(keys) = obs.values.keys(node, keys) else { return };
         if !keys.is_empty() {
             out.push((FactKind::Distinct { keys, over: inputs[0].0.clone() }, Ratio::int(n.rows)));
         }

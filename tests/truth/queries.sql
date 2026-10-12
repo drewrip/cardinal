@@ -129,3 +129,38 @@ select count(*) from part where p_container in ('SM BOX', 'MED PACK', 'LG CASE')
 -- name: exists_with_group_inside
 select count(*) from supplier where exists (
   select l_suppkey from lineitem where l_suppkey = s_suppkey group by l_suppkey having sum(l_quantity) > 15000)
+
+-- name: latest_order_per_customer
+select c_name, o.o_totalprice from customer c join
+  (select o_custkey, o_totalprice, row_number() over (partition by o_custkey order by o_orderdate desc, o_orderkey) as rn
+   from orders) o on c.c_custkey = o.o_custkey
+where o.rn = 1 and c_mktsegment = 'BUILDING'
+
+-- name: first_line_per_order_by_nation
+select n_name, count(*) from
+  (select l_orderkey, l_suppkey, row_number() over (partition by l_orderkey order by l_linenumber, l_partkey) as rn
+   from lineitem where l_shipmode = 'AIR') l
+  join orders on o_orderkey = l.l_orderkey join customer on c_custkey = o_custkey join nation on n_nationkey = c_nationkey
+where l.rn = 1
+group by n_name
+
+-- name: first_line_value_filtered_above
+select count(*) from
+  (select * from (select l_orderkey, l_quantity, row_number() over (partition by l_orderkey order by l_shipdate, l_linenumber) as rn
+   from lineitem) where rn = 1) t
+  join orders on o_orderkey = t.l_orderkey
+where t.l_quantity > 25 and o_orderpriority = '1-URGENT'
+
+-- name: lookup_left_join_unread
+select n_name, c_mktsegment, count(*) from customer
+  left join (select o_custkey, count(*) as n, max(o_totalprice) as top from orders group by o_custkey) t on c_custkey = t.o_custkey
+  join nation on n_nationkey = c_nationkey
+where c_acctbal > 0
+group by n_name, c_mktsegment
+
+-- name: lookup_left_join_read
+select n_name, count(*) from customer
+  left join (select o_custkey, count(*) as n from orders group by o_custkey) t on c_custkey = t.o_custkey
+  join nation on n_nationkey = c_nationkey
+where coalesce(t.n, 0) > 10
+group by n_name

@@ -303,8 +303,14 @@ includes, for two things the plan does not print reliably:
 
 - *Aliases.* A projection may print only `nation` or `o_year`; the alias's
   row-level expression in the query (`extract(year from o_orderdate)`) is
-  read in its place, unless the alias names two expressions or a column of a
-  table read twice.
+  read in its place, unless the alias names two expressions.
+- *Tables read twice.* Above a self-join DuckDB prints both instances'
+  columns by one name (TPC-H q07's `n_name`s). Each alias of such a table
+  (`n1`) is matched to the one instance whose join conditions are all
+  equalities its columns take part in with tables read once
+  (`s_nationkey = n1.n_nationkey`). A predicate or alias that does not
+  resolve by name is then read as the one query expression printed the
+  same without qualifiers, its aliases' columns as their instances'.
 - *Join conditions.* After decorrelating a subquery, DuckDB may print a
   condition's column under the other side's name. A condition is read only
   if the query compares those base columns: equal under its equalities
@@ -390,9 +396,9 @@ Some counts are not exactly a function of the context, and give no fact:
   scan that reports reading fewer rows than it output, operators may not
   have run to completion.
 - *Volatile* (`random()`) and unresolved predicates. Names stay unresolved
-  above a self-join where both instances' columns share them (TPC-H q07's two
-  `n_name`s), and aggregates named only by an alias (`total_revenue`,
-  `c_count`) stay unknown.
+  above a self-join where both instances' columns share them and the query
+  does not tell them apart (see *Tables read twice*), and aggregates named
+  only by an alias (`total_revenue`, `c_count`) stay unknown.
 
 **Rules.** `facts::RULES` read facts off each operator with clean inputs:
 
@@ -502,6 +508,63 @@ cargo test --test fact_bounds                                  # bounds hold, ma
 cargo test --test fact_bounds print_matches -- --nocapture     # each query's matches, and why not
 cargo test --test fact_bounds print_bounds -- --nocapture      # bounds before and after
 ```
+
+### Plans from an engine
+
+A fact matches only an operator whose rows it names, and DataFusion may plan
+a query in another order than the engine whose profiles gave the facts. So a
+query can also be analyzed as the engine planned it:
+
+```rust
+let a = cardinal::analyze_duckdb(&catalog, &explain_json, Some(sql), options)?;
+// or, from a plan already read:
+let plan = observed::from_duckdb_explain(&catalog, "q1", &explain_json, Some(sql))?;
+let a = cardinal::analyze_observed(&catalog, &plan, options)?;
+```
+
+`from_duckdb_explain` reads `EXPLAIN (FORMAT JSON)` output, or a profile
+with its counts ignored. A plain plan has no query text, so `sql` names what
+it prints only by alias and vouches for join conditions. Its plan is not
+counted (`ObservedPlan::counted`), and gives no facts.
+
+`Catalog::to_logical` writes the plan as an unoptimized DataFusion plan of
+the same shape, which the analysis reads as it reads any other. Each
+operator outputs its input's instance columns, which is what predicates and
+keys read, so projections, sorts and windows are left out:
+
+| Observed | Logical |
+|---|---|
+| Scan, with filters | `TableScan` with its required filters pushed, aliased as its instance. Optional and runtime filters are dropped: neither changes the rows above |
+| Filter, join | Filter, join. Equalities across the sides are keys (all `IS NOT DISTINCT FROM`: keys equal on NULL), the rest a filter |
+| Filter on a mark | Semi join, or for `NOT IN` a null-aware anti join |
+| Group by | `Aggregate`. Keys that are not columns, and values, are columns of `@node` |
+| Reuse (CTE scan, delim join input) | The read operator again, its instances renamed: an independent copy |
+| Top-n (`fetch`, `offset`) | `Sort` with fetch `offset + fetch`, then a limit skipping `offset` |
+| Limit | A filter on an opaque predicate, then a limit of `at_most` rows if known |
+| Union | Each input as one column: nothing traces a union's columns |
+
+DuckDB prints no limit's count, in any `EXPLAIN` format, so it is read off
+the query: when the plan has as many limit and top-n operators as the query
+has `LIMIT` clauses, each with a constant count, every limit outputs at most
+the largest (`Op::Limit { at_most }`). An offset only drops rows.
+
+DuckDB materializes a limit's rows late: the limit (or top-n) picks rows of
+a scan of `T`, and a semi join on `rowid = rowid` reads their columns from a
+second, unfiltered scan of `T`. That join outputs exactly the picked rows,
+so it reads as the picking side, with the second scan's columns read as the
+first's. `tests/plan_truth.rs` checks limits and offsets against a live
+DuckDB: every bound holds the true count, and limits bound what they should.
+
+What does not translate is opaque, and bounds nothing: a predicate or key
+that did not resolve is a volatile `opaque('<text>')`, and an operator
+without a model, or one DataFusion rejects, an extension node over its
+inputs.
+
+On the fixtures, with every fact, pinned bounds cap 35 of the 45 queries
+DataFusion also plans at their true count, against 30 when DataFusion plans
+them. DuckDB's plan does better on join orders (TPC-H q05: `X <= 5`, not 25)
+and the filters it pushes, and no worse on any. `explain_plans` checks that each TPC-H query's plain
+`EXPLAIN` asks for the same selectivities as its profile.
 
 ## Validation
 

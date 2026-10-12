@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regenerates the DuckDB EXPLAIN ANALYZE fixtures under tests/duckdb from
-# TPC-H at scale factor 0.01: the catalog, a profile per query, and the true
-# counts that tests/facts.rs checks the derived facts against.
+# TPC-H at scale factor 0.01: the catalog, a profile per query, each TPC-H
+# query's plain EXPLAIN plan, and the true counts that tests/facts.rs checks
+# the derived facts against.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,8 +27,19 @@ profile() { # sql file -> json file
   } | duckdb "$db" -list -noheader | sed -n '/^{/,$p' > "$2"
 }
 
+explain() { # sql file -> json file
+  {
+    echo "SET threads = 1;"
+    echo "EXPLAIN (FORMAT JSON)"
+    sed -e 's/;[[:space:]]*$//' "$1"
+    echo ";"
+  } | duckdb "$db" -list -noheader | sed -n '/^\[/,$p' > "$2"
+}
+
+mkdir -p "$out/explain"
 for f in "$root"/tests/tpch/q*.sql; do
   profile "$f" "$out/tpch/$(basename "$f" .sql).json"
+  explain "$f" "$out/explain/$(basename "$f" .sql).json"
 done
 for f in "$out"/extra/*.sql; do
   profile "$f" "${f%.sql}.json"

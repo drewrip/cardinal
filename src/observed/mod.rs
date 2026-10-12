@@ -9,9 +9,10 @@
 //! never guessed.
 
 mod duckdb;
+mod plan;
 mod sql;
 
-pub use duckdb::from_duckdb;
+pub use duckdb::{from_duckdb, from_duckdb_explain};
 pub use sql::QueryText;
 
 use std::collections::{BTreeSet, HashMap};
@@ -20,6 +21,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::{Transformed, TreeNode};
+use datafusion::catalog::TableProvider;
 use datafusion::common::{Column, DFSchema, JoinType, ScalarValue, TableReference};
 use datafusion::execution::SessionState;
 use datafusion::logical_expr::{BinaryExpr, Expr, ExprSchemable, Operator};
@@ -37,6 +39,9 @@ pub struct ObservedPlan {
     pub name: String,
     pub nodes: Vec<ONode>,
     pub root: usize,
+    /// Whether each operator's `rows` were counted. A plan read from a plain
+    /// `EXPLAIN` was not run: its rows are 0, and it gives no facts.
+    pub counted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,9 +96,12 @@ pub enum Op {
     /// a delim join's input. Its columns' instances get `suffix`, as an
     /// independent copy. `checked` if its own row count was reported.
     Reuse { suffix: String, checked: bool },
-    TopN { fetch: u64 },
-    /// A limit, which may stop its input early.
-    Limit,
+    /// The first `fetch` rows in some order, after skipping `offset`.
+    TopN { fetch: u64, offset: u64 },
+    /// A limit, which may stop its input early. `at_most`: it outputs at
+    /// most that many rows. Engines may not print it: it is read off the
+    /// query's `LIMIT` clauses.
+    Limit { at_most: Option<u64> },
     Union,
     /// Anything without a model here (correlated-subquery plumbing, CTEs, a
     /// join kind DataFusion has no name for, ...).
@@ -147,8 +155,10 @@ impl fmt::Display for Op {
             Op::MarkFilter { negated } => write!(f, "MarkFilter{}", if *negated { " not" } else { "" }),
             Op::Reuse { .. } => write!(f, "Reuse"),
             Op::Join { kind, .. } => write!(f, "{kind} Join"),
-            Op::TopN { fetch } => write!(f, "TopN {fetch}"),
-            Op::Limit => write!(f, "Limit"),
+            Op::TopN { fetch, offset: 0 } => write!(f, "TopN {fetch}"),
+            Op::TopN { fetch, offset } => write!(f, "TopN {fetch} offset {offset}"),
+            Op::Limit { at_most: Some(n) } => write!(f, "Limit <= {n}"),
+            Op::Limit { at_most: None } => write!(f, "Limit"),
             Op::Union => write!(f, "Union"),
             Op::Other => write!(f, "Other"),
         }
@@ -175,6 +185,8 @@ impl fmt::Display for ObservedPlan {
 pub struct Catalog {
     state: SessionState,
     tables: HashMap<String, SchemaRef>,
+    /// Every table's provider, to plan scans of it.
+    providers: HashMap<String, Arc<dyn TableProvider>>,
     /// Every table's columns, qualified by table name.
     all: Arc<DFSchema>,
 }
@@ -182,6 +194,7 @@ pub struct Catalog {
 impl Catalog {
     pub async fn from_context(ctx: &SessionContext) -> Result<Catalog> {
         let mut tables = HashMap::new();
+        let mut providers = HashMap::new();
         let mut all = DFSchema::empty();
         let mut names = vec![];
         for catalog in ctx.catalog_names() {
@@ -190,20 +203,22 @@ impl Catalog {
                 let Some(s) = c.schema(&schema) else { continue };
                 for name in s.table_names() {
                     if let Some(t) = s.table(&name).await? {
-                        names.push((name, t.schema()));
+                        names.push((name, t));
                     }
                 }
             }
         }
         names.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, schema) in names {
+        for (name, provider) in names {
             if tables.contains_key(&name) {
                 continue;
             }
+            let schema = provider.schema();
             all.merge(&DFSchema::try_from_qualified_schema(name.as_str(), &schema)?);
-            tables.insert(name, schema);
+            tables.insert(name.clone(), schema);
+            providers.insert(name, provider);
         }
-        Ok(Catalog { state: ctx.state(), tables, all: Arc::new(all) })
+        Ok(Catalog { state: ctx.state(), tables, providers, all: Arc::new(all) })
     }
 
     /// Every table's columns, qualified by table name.

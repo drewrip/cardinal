@@ -31,6 +31,19 @@
 //!   of K, on `k IS NOT DISTINCT FROM k'`. Each row of K finds its own key
 //!   among K's grouped keys (a NULL too), so it has a partner exactly when
 //!   some row of X satisfies P with `k'` read as its `k`: `K ⋉_{P[k'↦k]} X`.
+//! - **Grouped partners.** A row has a partner among `group_k(X)`'s rows
+//!   under a condition that reads them only by their key columns exactly
+//!   when it has one among X's rows, which hold the same keys: `K ⋉_q
+//!   group_k(X) = K ⋉_q X`. A `NOT IN` is left as it is.
+//! - **Lookups.** `A ⟕q group_K(X)`, where q equates each key of K with an
+//!   expression of A, pairs each row of A with at most one group, so it has
+//!   A's rows, one for one. Where nothing else reads the group (its columns
+//!   or any aggregate's value), the rows are A's: a fact about them is one
+//!   about A's. This reads the whole fact, so it is applied to facts
+//!   ([`unpadded`]), not to contexts as they are built. Likewise an inner
+//!   join with `group_K(X)` on each key of K, where nothing else reads the
+//!   group, pairs each row with one group if any: `σq(A × group_K(X)) = A
+//!   ⋉_q X`.
 //! - **Left joins.** `A ⟕q B` pairs each row of A with B's rows matching it
 //!   under q, or with NULLs: what happens to a row of A depends on that row
 //!   alone. So the preserved side is only the inputs q reads, and the rest
@@ -118,7 +131,29 @@ impl Spj {
 /// condition is exactly each key against its counterpart in `kept`, and
 /// nothing else on the other side reads the copy.
 pub(crate) fn decorrelate(kept: &Context, e: Exists) -> Exists {
+    let e = ungrouped(kept, &e).unwrap_or(e);
     decorrelated(kept, &e).unwrap_or(e)
+}
+
+/// `e` with a GROUP BY that is its whole other side taken out, if its
+/// condition reads the grouped rows only by their key columns (see the
+/// module's Grouped partners).
+fn ungrouped(kept: &Context, e: &Exists) -> Option<Exists> {
+    if !matches!(e.kind, ExistsKind::Semi | ExistsKind::Anti) {
+        return None;
+    }
+    let Context::Derived { op, args: keys, inputs } = &e.other else { return None };
+    if op != "group" || keys.is_empty() {
+        return None;
+    }
+    let mine = kept.tables();
+    let ok = e.on.iter().all(|t| {
+        t.expr.column_refs().into_iter().all(|c| {
+            c.relation.as_ref().is_some_and(|r| mine.contains(r.table()))
+                || keys.iter().any(|k| matches!(&k.expr, Expr::Column(k) if k.flat_name() == c.flat_name()))
+        })
+    });
+    ok.then(|| Exists { kind: e.kind, on: e.on.clone(), other: inputs[0].clone() })
 }
 
 fn decorrelated(kept: &Context, e: &Exists) -> Option<Exists> {
@@ -611,4 +646,184 @@ mod tests {
         assert!(matches!(full.filter(&pred(col("a.y").is_null())), Context::Spj { ref atoms, .. } if atoms.contains(&full)));
     }
 
+
+    #[test]
+    fn lookups_nothing_reads_are_their_preserved_rows() {
+        let (a, b) = (t("a"), t("b"));
+        let ab = join(&a, &b, eq("a.y", "b.y"));
+        let looked = left(eq("a.x", "c.k"), ab.clone(), group(t("c"), "c.k"));
+        let unpadded = |ctx: &Context, extra: &[&str]| {
+            let (mut read, mut values) = (BTreeMap::new(), false);
+            reads(ctx, &mut read, &mut values);
+            for e in extra {
+                *read.entry(e.to_string()).or_default() += 1;
+            }
+            assert!(!values);
+            super::unpadded(ctx, &read)
+        };
+        assert_eq!(unpadded(&looked, &[]), ab);
+        // Two lookups, one in the other's preserved side.
+        let twice = left(eq("a.x", "d.k"), looked.clone(), group(t("d"), "d.k"));
+        assert_eq!(unpadded(&twice, &[]), ab);
+        // A group something reads stays.
+        assert_eq!(unpadded(&looked, &["c"]), looked);
+        let p = pred(col("c.k").is_null());
+        assert_eq!(unpadded(&looked.filter(&p), &[]), looked.filter(&p));
+        // A join on part of the keys may pair a row with several groups.
+        let g2 = Context::Derived { op: "group".into(), args: vec![Term::new(col("c.k")), Term::new(col("c.j"))], inputs: vec![t("c")] };
+        let partial = left(eq("a.x", "c.k"), ab.clone(), g2);
+        assert_eq!(unpadded(&partial, &[]), partial);
+        // A left join to rows that are no group may pair a row with several.
+        let plain = left(eq("a.x", "c.k"), ab.clone(), t("c"));
+        assert_eq!(unpadded(&plain, &[]), plain);
+        // An inner join with a group on its keys that nothing else reads is
+        // a semi join with the grouped rows.
+        let inner = join(&ab, &group(t("c"), "c.k"), eq("a.x", "c.k"));
+        assert_eq!(unpadded(&inner, &[]), ab.exists(ExistsKind::Semi, eq("a.x", "c.k"), t("c")));
+        assert_eq!(unpadded(&inner, &["c"]), inner);
+    }
+}
+
+/// `ctx` with each left join that only looks up groups no term of `reads`
+/// reads taken out (see the module's Lookups). `reads` is every instance
+/// the fact's terms read, the conditions of such joins aside.
+pub(crate) fn unpadded(ctx: &Context, reads: &BTreeMap<String, usize>) -> Context {
+    match ctx {
+        Context::Spj { tables, atoms, preds, exists } => {
+            let mut s = Spj { tables: tables.clone(), preds: preds.clone(), ..Spj::default() };
+            // An atom that was a lookup may now be an SPJ to flatten.
+            for a in atoms {
+                s.merge(Spj::of(&unpadded(a, reads)));
+            }
+            s.exists.extend(exists.iter().map(|e| Exists { kind: e.kind, on: e.on.clone(), other: unpadded(&e.other, reads) }));
+            // A group joined on all its keys that nothing else reads: each
+            // row has one partner if it has any, a semi join.
+            for g in s.atoms.clone() {
+                let Context::Derived { op, args: keys, inputs } = &g else { continue };
+                let mine = inputs[0].tables();
+                if op != "group" || keys.is_empty() || read_outside(&inputs[0], reads) {
+                    continue;
+                }
+                let on: BTreeSet<Term> = s.preds.iter().filter(|p| on_key(p, keys, &mine).is_some()).cloned().collect();
+                if keys.iter().all(|k| on.iter().any(|p| on_key(p, keys, &mine).is_some_and(|e| Term::new(e.clone()) == *k))) {
+                    s.atoms.remove(&g);
+                    s.preds.retain(|p| !on.contains(p));
+                    s.exists.insert(Exists { kind: ExistsKind::Semi, on, other: inputs[0].clone() });
+                }
+            }
+            s.build()
+        }
+        Context::Derived { op, args, inputs } => {
+            let inputs: Vec<Context> = inputs.iter().map(|i| unpadded(i, reads)).collect();
+            let this = if op == "Left join" {
+                left_join(args.iter().cloned().collect(), inputs[0].clone(), inputs[1].clone())
+            } else {
+                Context::Derived { op: op.clone(), args: args.clone(), inputs }
+            };
+            lookup(&this, reads).unwrap_or(this)
+        }
+    }
+}
+
+/// True if `reads` reads an instance of `grouped` other than where
+/// `grouped` itself does.
+fn read_outside(grouped: &Context, reads: &BTreeMap<String, usize>) -> bool {
+    let (mut within, mut values) = (BTreeMap::new(), false);
+    self::reads(grouped, &mut within, &mut values);
+    grouped.tables().iter().any(|t| reads.get(t).copied().unwrap_or(0) > within.get(t).copied().unwrap_or(0))
+}
+
+/// The key of `keys` that `p` equates with an expression reading none of
+/// `mine`, if it is one.
+fn on_key<'a>(p: &'a Term, keys: &[Term], mine: &BTreeSet<String>) -> Option<&'a Expr> {
+    let Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) = &p.expr else { return None };
+    let outside = |e: &Expr| e.column_refs().iter().all(|c| c.relation.as_ref().is_some_and(|r| !mine.contains(r.table())));
+    // Compared as terms are, by their text: the same column may be built
+    // apart.
+    let key = |e: &Expr| matches!(e, Expr::Column(_)) && keys.iter().any(|k| *k == Term::new(e.clone()));
+    if key(left) && outside(right) {
+        Some(left)
+    } else if key(right) && outside(left) {
+        Some(right)
+    } else {
+        None
+    }
+}
+
+/// The preserved side of `ctx`, if it is a left join that only looks up a
+/// group nothing in `reads` reads.
+fn lookup(ctx: &Context, reads: &BTreeMap<String, usize>) -> Option<Context> {
+    let Context::Derived { op, args: on, inputs } = ctx else { return None };
+    if op != "Left join" {
+        return None;
+    }
+    let [kept, Context::Derived { op: g, args: keys, inputs: grouped }] = &inputs[..] else { return None };
+    let mine = grouped[0].tables();
+    if g != "group" || keys.is_empty() || read_outside(&grouped[0], reads) {
+        return None;
+    }
+    let outside = |e: &Expr| e.column_refs().iter().all(|c| c.relation.as_ref().is_some_and(|r| !mine.contains(r.table())));
+    let equated = |k: &Term| {
+        on.iter().any(|t| match &t.expr {
+            Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
+                let is_key = |e: &Expr| Term::new(e.clone()) == *k;
+                (is_key(left) && outside(right)) || (is_key(right) && outside(left))
+            }
+            _ => false,
+        })
+    };
+    keys.iter().all(|k| matches!(k.expr, Expr::Column(_)) && equated(k)).then(|| kept.clone())
+}
+
+/// How often `ctx`'s terms read each instance, into `out`, but for groups'
+/// keys and what joins them (a lookup's condition, an equality of a key);
+/// `values` if any reads an aggregate's value.
+pub(crate) fn reads(ctx: &Context, out: &mut BTreeMap<String, usize>, values: &mut bool) {
+    let mut term = |t: &Term, out: &mut BTreeMap<String, usize>| {
+        for c in t.expr.column_refs() {
+            match c.relation.as_ref().map(|r| r.table()) {
+                Some("value") | None => *values = true,
+                Some(r) => *out.entry(r.to_string()).or_default() += 1,
+            }
+        }
+    };
+    match ctx {
+        Context::Spj { atoms, preds, exists, .. } => {
+            // An equality of a group's key with what is outside it reads
+            // only the outside: it is what joins the group.
+            for p in preds {
+                let joins = atoms.iter().find_map(|a| match a {
+                    Context::Derived { op, args, inputs } if op == "group" => on_key(p, args, &inputs[0].tables()),
+                    _ => None,
+                });
+                match (joins, &p.expr) {
+                    (Some(k), Expr::BinaryExpr(BinaryExpr { left, right, .. })) => {
+                        let other = if std::ptr::eq(left.as_ref(), k) { right } else { left };
+                        term(&Term::new(other.as_ref().clone()), out);
+                    }
+                    _ => term(p, out),
+                }
+            }
+            for e in exists {
+                e.on.iter().for_each(|t| term(t, out));
+            }
+            for a in atoms {
+                reads(a, out, values);
+            }
+            for e in exists {
+                reads(&e.other, out, values);
+            }
+        }
+        Context::Derived { op, args, inputs } => {
+            // A group's keys and a lookup's condition are what a rewrite
+            // takes out with the group.
+            let on_group = op == "Left join" && matches!(&inputs[1], Context::Derived { op, .. } if op == "group");
+            if op != "group" && !on_group {
+                args.iter().for_each(|a| term(a, out));
+            }
+            for i in inputs {
+                reads(i, out, values);
+            }
+        }
+    }
 }

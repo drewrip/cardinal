@@ -137,6 +137,16 @@ impl fmt::Display for Informed {
     }
 }
 
+/// The fact each selectivity `analysis` requires is looked up as, by
+/// selectivity name, or why it is none.
+pub(crate) fn kinds(analysis: &Analysis) -> Vec<(String, std::result::Result<FactKind, String>)> {
+    let Some(report) = &analysis.selectivity else { return vec![] };
+    let logical = Logical::new(&analysis.nodes, &analysis.scans);
+    let none = FactSet::default();
+    let lookup = Lookup::new(&analysis.nodes, &logical, &none);
+    report.required.iter().map(|s| (s.name.clone(), lookup.kind(s).map(|k| k.canonical()))).collect()
+}
+
 /// `analysis` with what `facts` know put in place.
 pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Result<Informed> {
     let Some(report) = &analysis.selectivity else {
@@ -362,6 +372,32 @@ impl<'a> Lookup<'a> {
             return Ok(Context::table(instance));
         }
         self.logical.contexts[i].clone().map_err(|t| t.to_string())
+    }
+
+    /// The fact that gives `s`: the share, distinct count or match it is.
+    fn kind(&self, s: &Selectivity) -> std::result::Result<FactKind, String> {
+        let &(i, _) = self.by_var.get(s.operator.as_str()).ok_or("no operator")?;
+        let args = || self.logical.args[i].clone().ok_or_else(|| "unresolved terms".to_string());
+        let input = |k: usize| self.context(&self.nodes[self.nodes[i].inputs[k]].var);
+        Ok(match &s.kind {
+            Kind::Filter(_) => {
+                let over = self.context(&s.over[0])?;
+                FactKind::Selectivity { pred: without(args()?, &over), over }
+            }
+            Kind::Join { .. } => {
+                let (l, r) = (self.context(&s.over[0])?, self.context(&s.over[1])?);
+                let over = l.cross(&r).ok_or("a self-join")?;
+                FactKind::Selectivity { pred: without(args()?, &over), over }
+            }
+            Kind::Match { left, .. } => {
+                let (l, r) = (input(0)?, input(1)?);
+                let (kept, other) = if *left { (l, r) } else { (r, l) };
+                FactKind::Match { on: args()?, kept, other }
+            }
+            Kind::NotIn { .. } => FactKind::Cardinality(self.logical.contexts[i].clone().map_err(|t| t.to_string())?),
+            Kind::Distinct(_) => FactKind::Distinct { keys: args()?, over: self.context(&s.over[0])? },
+            Kind::Limit => return Err("a limit".into()),
+        })
     }
 
     /// The value of `s`, and the facts it is read from, or why there is none.

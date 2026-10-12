@@ -1,7 +1,7 @@
-//! Facts put in place of selectivities: each fixture query analyzed by
-//! DataFusion, with facts read off DuckDB's profiles of the same queries.
-//! Print how many selectivities find a fact, and the bounds before and after,
-//! with
+//! Facts put in place of selectivities: each fixture query analyzed as
+//! DataFusion plans it, and as DuckDB planned it (read from its profile),
+//! with facts read off DuckDB's profiles of the same queries. Print how many
+//! selectivities find a fact, and the bounds before and after, with
 //!
 //! ```sh
 //! cargo test --test fact_bounds print_matches -- --nocapture
@@ -15,12 +15,15 @@ use std::collections::HashMap;
 use cardinal::facts::{Context, FactKind, FactSet, derive_facts};
 use cardinal::observed::ObservedPlan;
 use cardinal::{Analysis, FactMode, Informed, Options};
-use fixtures::{context, foreign_keys, plans, query};
+use fixtures::{catalog, context, foreign_keys, plans, query};
 
-/// A fixture DataFusion can plan.
+/// A fixture query, analyzed by each planner.
 struct Case {
     name: String,
-    analysis: Analysis,
+    /// As DataFusion plans it, if it can.
+    analysis: Option<Analysis>,
+    /// As DuckDB planned it.
+    duck: Analysis,
     plan: ObservedPlan,
     /// The facts its profile shows, before closure.
     observed: FactSet,
@@ -31,21 +34,40 @@ impl Case {
     fn rows(&self) -> u64 {
         self.plan.nodes[self.plan.root].rows
     }
+
+    /// Its analyses, by planner.
+    fn planned(&self) -> impl Iterator<Item = (Planner, &Analysis)> {
+        let df = self.analysis.as_ref().map(|a| (Planner::DataFusion, a));
+        df.into_iter().chain([(Planner::DuckDb, &self.duck)])
+    }
+
+    fn by(&self, p: Planner) -> Option<&Analysis> {
+        self.planned().find(|(q, _)| *q == p).map(|(_, a)| a)
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Planner {
+    DataFusion,
+    DuckDb,
+}
+
+const PLANNERS: [Planner; 2] = [Planner::DataFusion, Planner::DuckDb];
 
 async fn cases() -> Vec<Case> {
     let ctx = context();
+    let catalog = catalog().await;
+    let options = || Options { selectivity: true, foreign_keys: foreign_keys(), ..Default::default() };
     let mut out = vec![];
     for dir in ["extra", "tpch"] {
         for plan in plans(dir).await {
             let sql = query(dir, &plan.name);
-            let options = Options { selectivity: true, foreign_keys: foreign_keys(), ..Default::default() };
             // DataFusion has no `AS MATERIALIZED`.
-            if let Ok(analysis) = cardinal::analyze_sql_with(&ctx, &sql, options).await {
-                let mut observed = FactSet::default();
-                observed.observe(&plan);
-                out.push(Case { name: plan.name.clone(), analysis, plan, observed });
-            }
+            let analysis = cardinal::analyze_sql_with(&ctx, &sql, options()).await.ok();
+            let duck = cardinal::analyze_observed(&catalog, &plan, options()).unwrap();
+            let mut observed = FactSet::default();
+            observed.observe(&plan);
+            out.push(Case { name: plan.name.clone(), analysis, duck, plan, observed });
         }
     }
     out
@@ -85,27 +107,39 @@ fn matched(a: &Analysis, i: &Informed) -> usize {
 async fn print_matches() {
     let cases = cases().await;
     let all = facts(&cases, None);
-    let (mut required, mut own, mut others, mut every) = (0, 0, 0, 0);
-    for Case { name, analysis: a, plan, .. } in &cases {
-        let report = a.selectivity.as_ref().unwrap();
-        let mine = a.with_facts(&derive_facts(std::slice::from_ref(plan)), FactMode::Ratios).unwrap();
-        let rest = a.with_facts(&facts(&cases, Some(name)), FactMode::Ratios).unwrap();
-        let both = a.with_facts(&all, FactMode::Ratios).unwrap();
-        let n = report.required.len();
-        required += n;
-        own += matched(a, &mine);
-        others += matched(a, &rest);
-        every += matched(a, &both);
-        println!(
-            "==== {name}: of {n}, {} from its own profile, {} from the others, {} from all; {} rows",
-            matched(a, &mine),
-            matched(a, &rest),
-            matched(a, &both),
-            plan.nodes[plan.root].rows,
-        );
-        println!("{report}\nown: {mine}\nothers: {rest}\nall: {both}");
+    // Per planner: required, and matched from own, others', every profile.
+    let mut totals = [[0usize; 4]; 2];
+    // Over the queries both plan.
+    let mut shared = [[0usize; 4]; 2];
+    for c in &cases {
+        let rest = facts(&cases, Some(&c.name));
+        let mine_facts = derive_facts(std::slice::from_ref(&c.plan));
+        println!("==== {}: {} rows", c.name, c.rows());
+        for (p, a) in c.planned() {
+            let report = a.selectivity.as_ref().unwrap();
+            let mine = a.with_facts(&mine_facts, FactMode::Ratios).unwrap();
+            let others = a.with_facts(&rest, FactMode::Ratios).unwrap();
+            let both = a.with_facts(&all, FactMode::Ratios).unwrap();
+            let n = [report.required.len(), matched(a, &mine), matched(a, &others), matched(a, &both)];
+            println!(
+                "{p:?}: of {}, {} from its own profile, {} from the others, {} from all",
+                n[0], n[1], n[2], n[3],
+            );
+            println!("{report}\nown: {mine}\nothers: {others}\nall: {both}");
+            let k = p as usize;
+            for j in 0..4 {
+                totals[k][j] += n[j];
+                if c.analysis.is_some() {
+                    shared[k][j] += n[j];
+                }
+            }
+        }
     }
-    println!("==== of {required}, {own} from their own profiles, {others} from the others', {every} from all");
+    for p in PLANNERS {
+        let [t, s] = [totals[p as usize], shared[p as usize]];
+        println!("==== {p:?}: of {}, {} from their own profiles, {} from the others', {} from all", t[0], t[1], t[2], t[3]);
+        println!("     on queries both plan: of {}, {} own, {} others', {} all", s[0], s[1], s[2], s[3]);
+    }
 }
 
 #[tokio::test]
@@ -113,17 +147,20 @@ async fn print_bounds() {
     let cases = cases().await;
     let all = facts(&cases, None);
     let only = std::env::var("ONLY").ok();
-    for Case { name, analysis: a, plan, .. } in &cases {
-        if only.as_ref().is_some_and(|o| !o.split(',').any(|q| q == name)) {
+    for c in &cases {
+        if only.as_ref().is_some_and(|o| !o.split(',').any(|q| q == c.name)) {
             continue;
         }
-        let ratios = a.with_facts(&all, FactMode::Ratios).unwrap();
-        let pinned = a.with_facts(&all, FactMode::Pinned).unwrap();
-        let (lo, hi) = pinned.range().unwrap();
-        println!("==== {name}: {} rows", plan.nodes[plan.root].rows);
-        println!("before: {}", a.bounds().unwrap());
-        println!("ratios: {ratios}\n  {}", ratios.bounds().unwrap());
-        println!("pinned: {lo} <= X <= {hi:?}; {}", pinned.bounds().unwrap());
+        println!("==== {}: {} rows", c.name, c.rows());
+        for (p, a) in c.planned() {
+            let ratios = a.with_facts(&all, FactMode::Ratios).unwrap();
+            let pinned = a.with_facts(&all, FactMode::Pinned).unwrap();
+            let (lo, hi) = pinned.range().unwrap();
+            println!("{p:?}:");
+            println!("before: {}", a.bounds().unwrap());
+            println!("ratios: {ratios}\n  {}", ratios.bounds().unwrap());
+            println!("pinned: {lo} <= X <= {hi:?}; {}", pinned.bounds().unwrap());
+        }
     }
 }
 
@@ -135,16 +172,17 @@ async fn bounds_hold() {
     let cases = cases().await;
     let all = facts(&cases, None);
     let mut failures = vec![];
-    for c @ Case { name, analysis: a, .. } in &cases {
+    for c in &cases {
         let truth = c.rows();
-        for (which, facts) in [("all", all.clone()), ("others", facts(&cases, Some(name)))] {
+        let rest = facts(&cases, Some(&c.name));
+        for ((p, a), (which, facts)) in c.planned().flat_map(|pa| [(pa, ("all", &all)), (pa, ("others", &rest))]) {
             for mode in [FactMode::Ratios, FactMode::Pinned] {
-                let i = a.with_facts(&facts, mode).unwrap();
-                let context = format!("{name}, {mode:?} with {which} facts");
+                let i = a.with_facts(facts, mode).unwrap();
+                let context = format!("{}, planned by {p:?}, {mode:?} with {which} facts", c.name);
                 if !i.rejected.is_empty() {
                     failures.push(format!("{context}: rejected {:?}", i.rejected));
                 }
-                if let Ok(r) = i.evaluate(&sizes(&facts))
+                if let Ok(r) = i.evaluate(&sizes(facts))
                     && !r.contains(truth as f64)
                 {
                     failures.push(format!("{context}: {} gives {r}, not {truth}", i.output));
@@ -167,21 +205,37 @@ async fn bounds_hold() {
 async fn match_rates() {
     let cases = cases().await;
     let all = facts(&cases, None);
-    const EVERY: usize = 6;
-    const OTHERS: usize = 1;
-    const TIGHT: usize = 30;
-    let (mut every, mut others, mut tight) = (0, 0, 0);
-    for c @ Case { name, analysis: a, .. } in &cases {
-        every += matched(a, &a.with_facts(&all, FactMode::Ratios).unwrap());
-        others += matched(a, &a.with_facts(&facts(&cases, Some(name)), FactMode::Ratios).unwrap());
-        // Bounds that cap the output at its true count.
-        let (_, hi) = a.with_facts(&all, FactMode::Pinned).unwrap().range().unwrap();
-        tight += usize::from(hi == Some(c.rows()));
+    // Per planner: DataFusion's, then DuckDB's.
+    const EVERY: [usize; 2] = [6, 8];
+    const OTHERS: [usize; 2] = [1, 1];
+    const TIGHT: [usize; 2] = [30, 35];
+    // Per planner, over the queries DataFusion plans.
+    let (mut every, mut others, mut tight) = ([0; 2], [0; 2], [0; 2]);
+    let shared: Vec<&Case> = cases.iter().filter(|c| c.analysis.is_some()).collect();
+    for c in &shared {
+        let rest = facts(&cases, Some(&c.name));
+        for (p, a) in c.planned() {
+            let k = p as usize;
+            every[k] += matched(a, &a.with_facts(&all, FactMode::Ratios).unwrap());
+            others[k] += matched(a, &a.with_facts(&rest, FactMode::Ratios).unwrap());
+            // Bounds that cap the output at its true count.
+            let (_, hi) = a.with_facts(&all, FactMode::Pinned).unwrap().range().unwrap();
+            tight[k] += usize::from(hi == Some(c.rows()));
+        }
     }
-    println!("{every} matched with every fact, {others} with others', {tight} of {} outputs capped at their count", cases.len());
-    assert!(every >= EVERY, "{every} selectivities matched with every fact");
-    assert!(others >= OTHERS, "{others} selectivities matched with other queries' facts");
-    assert!(tight >= TIGHT, "{tight} outputs capped at their true count");
+    for p in PLANNERS {
+        let k = p as usize;
+        println!(
+            "{p:?}: {} matched with every fact, {} with others', {} of {} outputs capped at their count",
+            every[k], others[k], tight[k], shared.len(),
+        );
+    }
+    for p in PLANNERS {
+        let k = p as usize;
+        assert!(every[k] >= EVERY[k], "{p:?}: {} selectivities matched with every fact", every[k]);
+        assert!(others[k] >= OTHERS[k], "{p:?}: {} selectivities matched with other queries' facts", others[k]);
+        assert!(tight[k] >= TIGHT[k], "{p:?}: {} outputs capped at their true count", tight[k]);
+    }
 }
 
 /// A filter pushed into a scan gives no exact fact, only an upper bound on
@@ -194,7 +248,7 @@ async fn pushed_filters_bound() {
     let all = facts(&cases, None);
     let case = |name: &str| {
         let c = cases.iter().find(|c| c.name == name).unwrap();
-        (&c.analysis, c.rows())
+        (c.by(Planner::DataFusion).unwrap(), c.rows())
     };
 
     // `select * from lineitem where l_quantity < 10`: the share is unknown,
@@ -215,4 +269,52 @@ async fn pushed_filters_bound() {
         assert!(i.rejected.is_empty(), "{name}: {i}");
         assert_eq!(i.range().unwrap().1, Some(rows), "{name}: {i}");
     }
+}
+
+/// DuckDB's plain `EXPLAIN` plan of each TPC-H query reads as the plan its
+/// profile ran, with no facts: analyzed, it asks for the same selectivities.
+#[tokio::test]
+async fn explain_plans() {
+    let catalog = catalog().await;
+    let profiles = plans("tpch").await;
+    let options = || Options { selectivity: true, foreign_keys: foreign_keys(), ..Default::default() };
+    let mut differ = vec![];
+    for (name, json) in fixtures::fixtures("explain") {
+        let sql = query("tpch", &name);
+        let plan = cardinal::observed::from_duckdb_explain(&catalog, &name, &json, Some(&sql)).unwrap();
+        assert!(!plan.counted);
+        assert!(derive_facts(std::slice::from_ref(&plan)).iter().next().is_none(), "{name} gives facts");
+        let explained = cardinal::analyze_observed(&catalog, &plan, options()).unwrap();
+        let profile = profiles.iter().find(|p| p.name == name).unwrap();
+        let profiled = cardinal::analyze_observed(&catalog, profile, options()).unwrap();
+        let report = |a: &Analysis| a.selectivity.as_ref().unwrap().to_string();
+        if report(&explained) != report(&profiled) {
+            differ.push(format!("{name}:\n{}\nvs its profile's\n{}", report(&explained), report(&profiled)));
+        }
+    }
+    assert!(differ.is_empty(), "{}", differ.join("\n\n"));
+}
+
+/// DuckDB does not print a limit's count; the query's `LIMIT` clause gives it.
+#[tokio::test]
+async fn limits_from_query_text() {
+    let cases = cases().await;
+    let c = cases.iter().find(|c| c.name == "limit").unwrap();
+    let a = c.by(Planner::DuckDb).unwrap();
+    assert_eq!(a.bounds().unwrap().constant, Some(5), "{}", a.plan);
+}
+
+/// Above a self-join, DuckDB prints both instances' columns by one name
+/// (TPC-H q07's `n_name`s): the query's aliases tell them apart, by what
+/// each is joined to, and cap the output at its true count.
+#[tokio::test]
+async fn self_join_names() {
+    let cases = cases().await;
+    let all = facts(&cases, None);
+    let c = cases.iter().find(|c| c.name == "q07").unwrap();
+    let a = c.by(Planner::DuckDb).unwrap();
+    assert_eq!(a.bounds().unwrap().constant, Some(8), "{}", a.plan);
+    let i = a.with_facts(&all, FactMode::Pinned).unwrap();
+    assert!(i.rejected.is_empty(), "{i}");
+    assert_eq!(i.range().unwrap().1, Some(c.rows()), "{i}");
 }

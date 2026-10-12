@@ -1,0 +1,182 @@
+[
+    {
+        "name": "PROJECTION",
+        "children": [
+            {
+                "name": "ORDER_BY",
+                "children": [
+                    {
+                        "name": "PROJECTION",
+                        "children": [
+                            {
+                                "name": "PROJECTION",
+                                "children": [
+                                    {
+                                        "name": "HASH_GROUP_BY",
+                                        "children": [
+                                            {
+                                                "name": "PROJECTION",
+                                                "children": [
+                                                    {
+                                                        "name": "PROJECTION",
+                                                        "children": [
+                                                            {
+                                                                "name": "RIGHT_DELIM_JOIN",
+                                                                "children": [
+                                                                    {
+                                                                        "name": "SEQ_SCAN",
+                                                                        "children": [],
+                                                                        "extra_info": {
+                                                                            "Table": "tpch.main.orders",
+                                                                            "Type": "Sequential Scan",
+                                                                            "Projections": [
+                                                                                "o_orderkey",
+                                                                                "o_orderpriority"
+                                                                            ],
+                                                                            "Filters": "o_orderdate>='1993-07-01'::DATE AND (CAST(o_orderdate AS TIMESTAMP) < '1993-10-01 00:00:00'::TIMESTAMP)",
+                                                                            "Estimated Cardinality": "3000"
+                                                                        }
+                                                                    },
+                                                                    {
+                                                                        "name": "HASH_JOIN",
+                                                                        "children": [
+                                                                            {
+                                                                                "name": "PROJECTION",
+                                                                                "children": [
+                                                                                    {
+                                                                                        "name": "HASH_JOIN",
+                                                                                        "children": [
+                                                                                            {
+                                                                                                "name": "PROJECTION",
+                                                                                                "children": [
+                                                                                                    {
+                                                                                                        "name": "FILTER",
+                                                                                                        "children": [
+                                                                                                            {
+                                                                                                                "name": "SEQ_SCAN",
+                                                                                                                "children": [],
+                                                                                                                "extra_info": {
+                                                                                                                    "Table": "tpch.main.lineitem",
+                                                                                                                    "Type": "Sequential Scan",
+                                                                                                                    "Projections": [
+                                                                                                                        "l_orderkey",
+                                                                                                                        "l_commitdate",
+                                                                                                                        "l_receiptdate"
+                                                                                                                    ],
+                                                                                                                    "Estimated Cardinality": "60175"
+                                                                                                                }
+                                                                                                            }
+                                                                                                        ],
+                                                                                                        "extra_info": {
+                                                                                                            "Expression": "(l_commitdate < l_receiptdate)",
+                                                                                                            "Estimated Cardinality": "12035"
+                                                                                                        }
+                                                                                                    }
+                                                                                                ],
+                                                                                                "extra_info": {
+                                                                                                    "Projections": "#0",
+                                                                                                    "Estimated Cardinality": "12035"
+                                                                                                }
+                                                                                            },
+                                                                                            {
+                                                                                                "name": "DELIM_SCAN",
+                                                                                                "children": [],
+                                                                                                "extra_info": {
+                                                                                                    "Delim Index": "1",
+                                                                                                    "Estimated Cardinality": "2625"
+                                                                                                }
+                                                                                            }
+                                                                                        ],
+                                                                                        "extra_info": {
+                                                                                            "Join Type": "INNER",
+                                                                                            "Conditions": "l_orderkey = o_orderkey",
+                                                                                            "Estimated Cardinality": "6347"
+                                                                                        }
+                                                                                    }
+                                                                                ],
+                                                                                "extra_info": {
+                                                                                    "Projections": "o_orderkey",
+                                                                                    "Estimated Cardinality": "6347"
+                                                                                }
+                                                                            },
+                                                                            {
+                                                                                "name": "DUMMY_SCAN",
+                                                                                "children": [],
+                                                                                "extra_info": {}
+                                                                            }
+                                                                        ],
+                                                                        "extra_info": {
+                                                                            "Join Type": "RIGHT_SEMI",
+                                                                            "Conditions": "o_orderkey IS NOT DISTINCT FROM o_orderkey",
+                                                                            "Estimated Cardinality": "600"
+                                                                        }
+                                                                    },
+                                                                    {
+                                                                        "name": "HASH_GROUP_BY",
+                                                                        "children": [],
+                                                                        "extra_info": {
+                                                                            "Groups": "#0",
+                                                                            "Aggregates": "",
+                                                                            "Estimated Cardinality": "2625"
+                                                                        }
+                                                                    }
+                                                                ],
+                                                                "extra_info": {
+                                                                    "Join Type": "RIGHT_SEMI",
+                                                                    "Conditions": "o_orderkey IS NOT DISTINCT FROM o_orderkey",
+                                                                    "Estimated Cardinality": "600",
+                                                                    "Delim Index": "1"
+                                                                }
+                                                            }
+                                                        ],
+                                                        "extra_info": {
+                                                            "Projections": "__internal_compress_string_uhugeint(#0)",
+                                                            "Estimated Cardinality": "600"
+                                                        }
+                                                    }
+                                                ],
+                                                "extra_info": {
+                                                    "Projections": "o_orderpriority",
+                                                    "Estimated Cardinality": "600"
+                                                }
+                                            }
+                                        ],
+                                        "extra_info": {
+                                            "Groups": "#0",
+                                            "Aggregates": "count_star()",
+                                            "Estimated Cardinality": "5"
+                                        }
+                                    }
+                                ],
+                                "extra_info": {
+                                    "Projections": [
+                                        "__internal_decompress_string(#0)",
+                                        "#1"
+                                    ],
+                                    "Estimated Cardinality": "5"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Projections": [
+                                "__internal_compress_string_uhugeint(#0)",
+                                "#1"
+                            ],
+                            "Estimated Cardinality": "5"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Order By": "tpch.main.orders.o_orderpriority ASC"
+                }
+            }
+        ],
+        "extra_info": {
+            "Projections": [
+                "__internal_decompress_string(#0)",
+                "#1"
+            ],
+            "Estimated Cardinality": "0"
+        }
+    }
+]

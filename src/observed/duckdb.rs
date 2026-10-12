@@ -1,4 +1,5 @@
-//! DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` profile, as an [`ObservedPlan`].
+//! DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` profile, or its plain
+//! `EXPLAIN (FORMAT JSON)` plan, as an [`ObservedPlan`].
 //!
 //! DuckDB prints a physical plan: columns are referred to by unqualified name
 //! or by position (`#2`), joins may drop and reorder columns without saying,
@@ -31,11 +32,26 @@ use crate::{Error, Result};
 /// Reads a DuckDB profile, as printed by `EXPLAIN (ANALYZE, FORMAT JSON)`,
 /// against the tables in `catalog`. `name` names the query in provenance.
 pub fn from_duckdb(catalog: &Catalog, name: &str, json: &str) -> Result<ObservedPlan> {
+    read(catalog, name, json, None, true)
+}
+
+/// Reads the plan DuckDB chose for a query, as printed by `EXPLAIN (FORMAT
+/// JSON)`, or by `EXPLAIN (ANALYZE, FORMAT JSON)` with its counts ignored.
+/// The plan is not counted: it gives no facts. `sql`, the query, names what
+/// the plan prints only by alias and vouches for join conditions, as a
+/// profile's own query text does; without it, a profile's is used.
+pub fn from_duckdb_explain(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>) -> Result<ObservedPlan> {
+    read(catalog, name, json, sql, false)
+}
+
+fn read(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>, counted: bool) -> Result<ObservedPlan> {
     let v: Value = serde_json::from_str(json).map_err(|e| Error::Observed(e.to_string()))?;
-    let text = v.get("query_name").and_then(Value::as_str).and_then(|q| QueryText::parse(catalog, q));
-    let mut b = Builder { catalog, text, nodes: vec![], ctes: HashMap::new(), delims: vec![] };
+    let sql = sql.or_else(|| v.get("query_name").and_then(Value::as_str));
+    let text = sql.and_then(|q| QueryText::parse(catalog, q));
+    let mut b = Builder { catalog, text, counted, nodes: vec![], ctes: HashMap::new(), delims: vec![] };
     let root = b.node(&v)?;
-    Ok(ObservedPlan { name: name.to_string(), nodes: b.nodes, root })
+    b.limits();
+    Ok(ObservedPlan { name: name.to_string(), nodes: b.nodes, root, counted })
 }
 
 /// Wrappers with no effect on rows.
@@ -44,6 +60,8 @@ const WRAPPERS: &[&str] = &["EXPLAIN_ANALYZE", "RESULT_COLLECTOR"];
 struct Builder<'a> {
     catalog: &'a Catalog,
     text: Option<QueryText>,
+    /// Whether operators report their rows. Without, they read as 0.
+    counted: bool,
     nodes: Vec<ONode>,
     /// A materialized CTE's definition, by its `Table Index`.
     ctes: HashMap<String, usize>,
@@ -64,7 +82,11 @@ struct Delim {
 
 impl Builder<'_> {
     fn node(&mut self, v: &Value) -> Result<usize> {
-        let ty = v.get("operator_type").and_then(Value::as_str);
+        // A plain EXPLAIN prints a list of one plan, its operators by `name`.
+        if let Some([only]) = v.as_array().map(Vec::as_slice) {
+            return self.node(only);
+        }
+        let ty = operator(v);
         let children: &[Value] = v.get("children").and_then(Value::as_array).map_or(&[], |c| c);
         if ty.is_none_or(|t| WRAPPERS.contains(&t)) {
             return match children {
@@ -74,7 +96,7 @@ impl Builder<'_> {
         }
         let ty = ty.unwrap();
         let info = v.get("extra_info").unwrap_or(&Value::Null);
-        let rows = rows(v, ty)?;
+        let rows = self.rows(v, ty)?;
         let index = |key| strings(info, key).into_iter().next();
         match (ty, children) {
             // A materialized CTE: its definition, then the query reading it.
@@ -123,6 +145,33 @@ impl Builder<'_> {
         Ok(self.nodes.len() - 1)
     }
 
+    /// Bounds each limit by the query's `LIMIT` clauses, which DuckDB does
+    /// not print. With as many limit and top-n operators as clauses, all with
+    /// a constant count, each limit is one of the clauses, so outputs at most
+    /// the largest count: its offset, if any, only drops rows.
+    fn limits(&mut self) {
+        let Some(text) = &self.text else { return };
+        let Some(counts) = text.limits().iter().copied().collect::<Option<Vec<u64>>>() else { return };
+        let limits = |n: &ONode| matches!(n.engine_op.as_str(), "STREAMING_LIMIT" | "LIMIT");
+        let operators = self.nodes.iter().filter(|n| limits(n) || n.engine_op == "TOP_N").count();
+        if operators != counts.len() || self.nodes.iter().any(|n| n.engine_op == "LIMIT_PERCENT") {
+            return;
+        }
+        let at_most = counts.into_iter().max();
+        for n in self.nodes.iter_mut().filter(|n| limits(n)) {
+            n.op = Op::Limit { at_most };
+        }
+    }
+
+    /// The rows operator `v` output, or 0 in a plan without counts.
+    fn rows(&self, v: &Value, ty: &str) -> Result<u64> {
+        match v.get("operator_cardinality").and_then(Value::as_u64) {
+            Some(rows) => Ok(rows),
+            None if !self.counted => Ok(0),
+            None => Err(Error::Observed(format!("{ty} has no operator_cardinality"))),
+        }
+    }
+
     /// A read of operator `of`'s output, as an independent copy of it.
     fn reuse(&mut self, of: usize, reported: Option<u64>, engine_op: &str) -> usize {
         let id = self.nodes.len();
@@ -169,11 +218,11 @@ impl Builder<'_> {
                 keys: keys.iter().map(|k| exact(&k.lineage)).collect(),
                 values: vec![],
             },
-            rows: rows(distinct, "delim distinct")?,
+            rows: self.rows(distinct, "delim distinct")?,
             children: vec![copy],
             columns: keys.clone(),
             ordered: true,
-            engine_op: distinct.get("operator_type").and_then(Value::as_str).unwrap_or("HASH_GROUP_BY").to_string(),
+            engine_op: operator(distinct).unwrap_or("HASH_GROUP_BY").to_string(),
             cut_short: false,
         };
         self.nodes.push(g);
@@ -184,7 +233,7 @@ impl Builder<'_> {
         let data = join
             .get("children")
             .and_then(|c| c.get(position))
-            .filter(|c| c.get("operator_type").and_then(Value::as_str) == Some(scan))
+            .filter(|c| operator(c) == Some(scan))
             .map_or(std::ptr::null(), |c| c as *const Value);
         let index = strings(info, "Delim Index").into_iter().next().unwrap_or_default();
         self.delims.push(Delim { index, data, input: a, keys: g });
@@ -204,8 +253,17 @@ impl Builder<'_> {
             let others: Vec<usize> = (0..self.nodes[sub].columns.len())
                 .filter(|&i| !key_names.contains(self.nodes[sub].columns[i].name.as_str()))
                 .collect();
+            // The join may have merged columns it equates: find the value by
+            // what it is, not where.
             if let [i] = others[..] {
-                self.nodes[j].columns[offset + i].name = "SUBQUERY".into();
+                let value = &self.nodes[sub].columns[i];
+                let same = |c: &OutCol| c.name == value.name && format!("{:?}", c.lineage) == format!("{:?}", value.lineage);
+                let at: Vec<usize> = (offset.min(self.nodes[j].columns.len())..self.nodes[j].columns.len())
+                    .filter(|&k| same(&self.nodes[j].columns[k]))
+                    .collect();
+                if let [k] = at[..] {
+                    self.nodes[j].columns[k].name = "SUBQUERY".into();
+                }
             }
         }
         Ok(j)
@@ -252,14 +310,29 @@ impl Builder<'_> {
             }
             ("ORDER_BY", [_]) => passthrough(Op::Sort),
             ("TOP_N", [_]) => match strings(info, "Top").first().and_then(|t| t.trim().parse().ok()) {
-                Some(fetch) => passthrough(Op::TopN { fetch }),
+                Some(fetch) => match strings(info, "Offset").first().map(|o| o.trim().parse()) {
+                    None => passthrough(Op::TopN { fetch, offset: 0 }),
+                    Some(Ok(offset)) => passthrough(Op::TopN { fetch, offset }),
+                    Some(Err(_)) => passthrough(Op::Other),
+                },
                 None => passthrough(Op::Other),
             },
-            ("STREAMING_LIMIT" | "LIMIT" | "LIMIT_PERCENT", [_]) => passthrough(Op::Limit),
+            // Bounded, if the query says, by `Builder::limits`.
+            ("STREAMING_LIMIT" | "LIMIT" | "LIMIT_PERCENT", [_]) => passthrough(Op::Limit { at_most: None }),
+            // Its window functions' values follow its input's columns. Each
+            // is a window expression over base columns, which only the
+            // analysis reads: facts take window values as unresolved.
             ("WINDOW" | "STREAMING_WINDOW", [c]) => {
-                let mut columns = self.nodes[*c].columns.clone();
-                columns.extend(strings(info, "Projections").into_iter().map(unknown));
-                (Op::Window, columns, false)
+                let child = &self.nodes[*c];
+                let mut columns = child.columns.clone();
+                for p in strings(info, "Projections") {
+                    let lineage = match self.read(&p, &child.columns, child.ordered) {
+                        Some(e @ Expr::WindowFunction(_)) => Lineage::Exact(e),
+                        _ => Lineage::Unknown,
+                    };
+                    columns.push(OutCol { name: p, lineage });
+                }
+                (Op::Window, columns, child.ordered)
             }
             ("UNION", [first, ..]) => {
                 let columns = self.nodes[*first].columns.iter().map(|c| unknown(c.name.clone())).collect();
@@ -387,7 +460,7 @@ impl Builder<'_> {
                 }
                 // An expression, or an alias the query defines.
                 let read = |text: &str| self.read(text, &child.columns, child.ordered);
-                let alias = || self.text.as_ref().and_then(|t| t.alias(item)).and_then(read);
+                let alias = || self.text.as_ref().and_then(|t| t.alias(item)).and_then(read).filter(|e| !aggregates(e));
                 match read(item).or_else(alias) {
                     Some(e) => OutCol { name: item.clone(), lineage: Lineage::Exact(e) },
                     None => unknown(item.clone()),
@@ -442,6 +515,22 @@ impl Builder<'_> {
             JoinType::LeftSemi | JoinType::LeftAnti => l.columns.clone(),
             JoinType::RightSemi | JoinType::RightAnti => r.columns.clone(),
             JoinType::LeftMark => l.columns.iter().cloned().chain([unknown(MARK.into())]).collect(),
+            // Columns of one name an inner join equates (`USING (id)`) are
+            // one column above it: either holds every row's value. A join's
+            // columns are read by name, not position.
+            JoinType::Inner => {
+                let equal = |a: &OutCol, b: &OutCol| {
+                    a.name == b.name
+                        && on.iter().any(|p| match (&p.expr, exact(&a.lineage), exact(&b.lineage)) {
+                            (Some(Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq | Operator::IsNotDistinctFrom, right })), Some(x), Some(y)) => {
+                                (**left == x && **right == y) || (**left == y && **right == x)
+                            }
+                            _ => false,
+                        })
+                };
+                let left = &l.columns;
+                left.iter().cloned().chain(r.columns.iter().filter(|c| !left.iter().any(|k| equal(k, c))).cloned()).collect()
+            }
             _ => l.columns.iter().chain(&r.columns).cloned().collect(),
         };
         (Op::Join { kind, on }, columns, false)
@@ -452,11 +541,59 @@ impl Builder<'_> {
     /// decorrelated subqueries), so the query must compare the columns read.
     fn condition(&self, text: &str, l: &ONode, r: &ONode) -> Pred {
         let expr = split_condition(text).and_then(|(a, op, b)| {
-            let a = self.read(&a.to_string(), &l.columns, l.ordered)?;
-            let b = self.read(&b.to_string(), &r.columns, r.ordered)?;
-            self.vouched(&a, op, &b).then(|| Expr::BinaryExpr(BinaryExpr::new(Box::new(a), op, Box::new(b))))
+            let (a, b) = (a.to_string(), b.to_string());
+            let (x, y) = (self.read(&a, &l.columns, l.ordered), self.read(&b, &r.columns, r.ordered));
+            let (x, y) = match (x, y) {
+                (Some(x), Some(y)) => (x, y),
+                (x, y) => self.disambiguate((&a, x, l), op, (&b, y, r))?,
+            };
+            self.vouched(&x, op, &y).then(|| Expr::BinaryExpr(BinaryExpr::new(Box::new(x), op, Box::new(y))))
         });
         Pred { expr, text: text.to_string(), optional: false }
+    }
+
+    /// A condition whose sides name columns several of their side's columns
+    /// have (an outer join keeps both of its equated columns): the one
+    /// reading of each that the query itself compares, if one.
+    fn disambiguate(&self, a: (&str, Option<Expr>, &ONode), op: Operator, b: (&str, Option<Expr>, &ONode)) -> Option<(Expr, Expr)> {
+        let q = self.text.as_ref()?;
+        let candidates = |(name, read, node): (&str, Option<Expr>, &ONode)| -> Vec<Expr> {
+            match read {
+                Some(e) => vec![e],
+                None => node
+                    .columns
+                    .iter()
+                    .filter(|c| c.name == name.trim())
+                    .filter_map(|c| match &c.lineage {
+                        Lineage::Exact(e @ Expr::Column(_)) => Some(e.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+        };
+        let base = |e: &Expr| match e {
+            Expr::Column(c) => relation(c).and_then(base_table).map(|t| format!("{t}.{}", c.name.to_lowercase())),
+            _ => None,
+        };
+        let op_text = match op {
+            Operator::IsNotDistinctFrom => "IS NOT DISTINCT FROM".to_string(),
+            Operator::NotEq => "<>".to_string(),
+            op => op.to_string(),
+        };
+        let mut found = vec![];
+        for x in candidates(a) {
+            for y in candidates(b.clone()) {
+                if let (Some(bx), Some(by)) = (base(&x), base(&y))
+                    && q.directly_compares(&bx, &op_text, &by)
+                {
+                    found.push((x.clone(), y));
+                }
+            }
+        }
+        match found.len() {
+            1 => found.pop(),
+            _ => None,
+        }
     }
 
     /// Whether the query compares what `a op b` reads: the same base
@@ -500,6 +637,7 @@ impl Builder<'_> {
     /// by position needs `ordered` columns, and must hold an exact value.
     /// Names that read as expressions (`sum(l_quantity)`) match as written.
     fn read(&self, text: &str, cols: &[OutCol], ordered: bool) -> Option<Expr> {
+        let printed = text;
         let mut fields = vec![];
         let mut lineage = HashMap::new();
         let mut count = HashMap::<&str, usize>::new();
@@ -528,8 +666,24 @@ impl Builder<'_> {
             };
             names.push((name, c));
         }
+        // A window function's value, named by the alias the query gives it
+        // (`recency_rank`), where no column has that name.
+        let mut windows: Vec<OutCol> = vec![];
+        if let Some(q) = &self.text {
+            for alias in q.window_aliases() {
+                if count.contains_key(alias) || !text.contains(alias) {
+                    continue;
+                }
+                if let Some(e) = self.read_window(alias, cols) {
+                    let placeholder = format!("__window_{}", windows.len());
+                    text = replace_word(&text, alias, &placeholder);
+                    windows.push(OutCol { name: placeholder, lineage: Lineage::Exact(e) });
+                }
+            }
+        }
+        let windows = windows.iter().map(|c| (c.name.clone(), c));
         let positions = cols.iter().enumerate().filter(|_| ordered).map(|(i, c)| (format!("__pos_{i}"), c));
-        for (name, c) in names.into_iter().chain(positions) {
+        for (name, c) in names.into_iter().chain(windows).chain(positions) {
             let ty = match &c.lineage {
                 Lineage::Exact(e) | Lineage::Bijective(e) => self.type_of(e),
                 Lineage::Unknown => None,
@@ -541,7 +695,11 @@ impl Builder<'_> {
         let Ok(expr) = self.catalog.state.create_logical_expr(&rewrite(&text), &schema) else {
             // A bare alias the query defines (`supplier_no`), not a column.
             let alias = self.text.as_ref().and_then(|t| t.alias(text.trim()));
-            return alias.filter(|a| *a != text.trim()).and_then(|a| self.read(a, cols, ordered));
+            return alias
+                .filter(|a| *a != text.trim())
+                .and_then(|a| self.read(a, cols, ordered))
+                .filter(|e| !aggregates(e))
+                .or_else(|| self.read_qualified(printed, cols, ordered));
         };
         let expr = expr
             .transform_up(|e| match e {
@@ -555,6 +713,109 @@ impl Builder<'_> {
             .ok()?
             .data;
         Some(self.simplify(expr))
+    }
+
+    /// Reads `text`, an alias the query gives a window function, as the
+    /// one column of `cols` that is that window function's value.
+    fn read_window(&self, text: &str, cols: &[OutCol]) -> Option<Expr> {
+        let want = self.text.as_ref()?.window_alias(text.trim())?;
+        let found: Vec<&Expr> = cols
+            .iter()
+            .filter(|c| QueryText::window_text(&c.name).as_deref() == Some(want))
+            .filter_map(|c| match &c.lineage {
+                Lineage::Exact(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        match found[..] {
+            [e] => Some(e.clone()),
+            _ => None,
+        }
+    }
+
+    /// Reads `text` as the query's expression it prints, where its names
+    /// are ambiguous: columns of a table the query reads more than once,
+    /// printed without the alias that tells them apart (TPC-H q07's two
+    /// `n_name`s). Each alias's columns are its instance's, when that is in
+    /// `cols`.
+    fn read_qualified(&self, text: &str, cols: &[OutCol], ordered: bool) -> Option<Expr> {
+        let q = self.text.as_ref()?;
+        let mut e = q.qualified_alias(text.trim()).or_else(|| q.qualified(&rewrite(text)))?.clone();
+        let instances = self.instances(q);
+        let mut extra: Vec<OutCol> = vec![];
+        let mut resolved = true;
+        let _ = ast::visit_expressions_mut(&mut e, |x| {
+            if let ast::Expr::CompoundIdentifier(parts) = x
+                && parts.len() >= 2
+            {
+                let alias = parts[parts.len() - 2].value.to_lowercase();
+                let column = parts[parts.len() - 1].value.to_lowercase();
+                let name = match q.twice().contains_key(&alias) {
+                    true => {
+                        let lineage = instances.get(&alias).map(|i| qualified(i, &column));
+                        let present = |l: &Expr| cols.iter().any(|c| matches!(&c.lineage, Lineage::Exact(e) if e == l));
+                        match lineage.filter(present) {
+                            Some(l) => {
+                                let name = format!("__alias_{}", extra.len());
+                                extra.push(OutCol { name: name.clone(), lineage: Lineage::Exact(l) });
+                                name
+                            }
+                            None => {
+                                resolved = false;
+                                column
+                            }
+                        }
+                    }
+                    // A table read once: its column, by name.
+                    false => column,
+                };
+                *x = ast::Expr::Identifier(ast::Ident::new(name));
+            }
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+        if !resolved || extra.is_empty() {
+            return None;
+        }
+        // Positions index `cols`, which the extra names follow.
+        let all: Vec<OutCol> = cols.iter().cloned().chain(extra).collect();
+        self.read(&e.to_string(), &all, ordered)
+    }
+
+    /// The instance each alias in the query's [`QueryText::twice`] reads:
+    /// the one instance of its table whose join conditions so far are all
+    /// equalities the alias's columns take part in, if no other alias's are.
+    fn instances(&self, q: &QueryText) -> HashMap<String, String> {
+        let mut pairs: HashMap<String, BTreeSet<(String, String)>> = HashMap::new();
+        for n in &self.nodes {
+            let Op::Join { on, .. } = &n.op else { continue };
+            for p in on {
+                let Some(Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right })) = &p.expr else { continue };
+                let (Expr::Column(x), Expr::Column(y)) = (left.as_ref(), right.as_ref()) else { continue };
+                for (a, o) in [(x, y), (y, x)] {
+                    if let (Some(ra), Some(to)) = (relation(a), relation(o).and_then(base_table)) {
+                        pairs.entry(ra.to_string()).or_default().insert((a.name.clone(), format!("{to}.{}", o.name)));
+                    }
+                }
+            }
+        }
+        let mut out = HashMap::new();
+        for (alias, (table, signature)) in q.twice() {
+            let fits: Vec<&String> = pairs
+                .iter()
+                .filter(|(i, p)| base_table(i) == Some(table.as_str()) && p.is_subset(signature))
+                .map(|(i, _)| i)
+                .collect();
+            if let [i] = fits[..] {
+                out.insert(alias.clone(), i.clone());
+            }
+        }
+        // An instance two aliases fit is neither's.
+        let mut claimed = HashMap::<String, usize>::new();
+        for i in out.values() {
+            *claimed.entry(i.clone()).or_default() += 1;
+        }
+        out.retain(|_, i| claimed[i.as_str()] == 1);
+        out
     }
 
     /// The type of `e`, an expression over scan instances.
@@ -626,10 +887,15 @@ fn mark_filter(text: &str) -> Option<bool> {
     }
 }
 
-fn rows(v: &Value, ty: &str) -> Result<u64> {
-    v.get("operator_cardinality")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| Error::Observed(format!("{ty} has no operator_cardinality")))
+/// Whether `e` computes an aggregate: an alias read so would be the
+/// aggregate's value read where it is not one.
+fn aggregates(e: &Expr) -> bool {
+    e.exists(|x| Ok(matches!(x, Expr::AggregateFunction(_)))).unwrap_or(true)
+}
+
+/// An operator's type: `operator_type` in a profile, `name` in a plain plan.
+fn operator(v: &Value) -> Option<&str> {
+    v.get("operator_type").or_else(|| v.get("name")).and_then(Value::as_str)
 }
 
 fn exact(l: &Lineage) -> Option<Expr> {

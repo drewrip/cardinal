@@ -1459,6 +1459,24 @@ fn same_positions(plan: &LogicalPlan, child: &LogicalPlan, cols: &[Column]) -> O
         .collect()
 }
 
+/// Columns `predicate` holds equal to a non-NULL constant on every row it keeps.
+fn pinned(predicate: &Expr) -> Vec<Column> {
+    split_conjunction(predicate)
+        .into_iter()
+        .filter_map(|e| match e {
+            Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
+                match (strip_alias(left), strip_alias(right)) {
+                    (Expr::Column(c), Expr::Literal(v, _)) | (Expr::Literal(v, _), Expr::Column(c)) if !v.is_null() => {
+                        Some(c.clone())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Positions of `cols` in `plan`'s output.
 fn output_indices(plan: &LogicalPlan, cols: &[Column]) -> Option<Vec<usize>> {
     cols.iter()
@@ -1487,14 +1505,54 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                 })
             })
         }
+        // A column the filter pins to one value adds nothing to tell its rows
+        // apart: if the input is unique on it with `cols`, the filter's rows
+        // are unique on `cols` alone, e.g. `rn = 1` over `row_number()`.
+        LogicalPlan::Filter(f) => {
+            let Some(cs) = same_positions(plan, &f.input, cols) else {
+                return false;
+            };
+            if covers_primary_key(&f.input, &cs) {
+                return true;
+            }
+            let mut with = cs.clone();
+            for c in pinned(&f.predicate) {
+                if f.input.schema().has_column(&c) && !with.contains(&c) {
+                    with.push(c);
+                }
+            }
+            with.len() > cs.len() && covers_primary_key(&f.input, &with)
+        }
+        // `row_number()` numbers each partition's rows 1, 2, ...: it is unique
+        // with its partition columns. Otherwise the window keeps its input's
+        // rows, so the input's keys among `cols` stay unique.
+        LogicalPlan::Window(w) => {
+            let Some(ix) = output_indices(plan, cols) else {
+                return false;
+            };
+            let n = w.input.schema().fields().len();
+            let numbered = ix.iter().filter(|&&i| i >= n).any(|&i| match strip_alias(&w.window_expr[i - n]) {
+                Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
+                    f.params.partition_by.iter().all(|p| match strip_alias(p) {
+                        Expr::Column(c) => w.input.schema().index_of_column(c).is_ok_and(|j| ix.contains(&j)),
+                        _ => false,
+                    })
+                }
+                _ => false,
+            });
+            let kept: Vec<Column> = ix
+                .iter()
+                .filter(|&&i| i < n)
+                .map(|&i| Column::from(w.input.schema().qualified_field(i)))
+                .collect();
+            numbered || (!kept.is_empty() && covers_primary_key(&w.input, &kept))
+        }
         // Operators whose output rows are a subset of their input's, with the
         // input's columns first and unchanged.
-        LogicalPlan::Filter(_)
-        | LogicalPlan::Sort(_)
+        LogicalPlan::Sort(_)
         | LogicalPlan::Limit(_)
         | LogicalPlan::Repartition(_)
-        | LogicalPlan::SubqueryAlias(_)
-        | LogicalPlan::Window(_) => {
+        | LogicalPlan::SubqueryAlias(_) => {
             let child = plan.inputs()[0];
             same_positions(plan, child, cols).is_some_and(|cs| covers_primary_key(child, &cs))
         }
