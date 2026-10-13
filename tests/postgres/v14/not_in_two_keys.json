@@ -1,0 +1,49 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "partsupp",
+          "Schema": "public",
+          "Alias": "partsupp",
+          "Actual Rows": 3712,
+          "Actual Loops": 1,
+          "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey", "partsupp.ps_availqty", "partsupp.ps_supplycost", "partsupp.ps_comment"],
+          "Filter": "(NOT (hashed SubPlan 1))",
+          "Rows Removed by Filter": 4288,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "SubPlan",
+              "Subplan Name": "SubPlan 1",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem",
+              "Actual Rows": 6086,
+              "Actual Loops": 1,
+              "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+              "Filter": "(lineitem.l_quantity > '45'::numeric)",
+              "Rows Removed by Filter": 54089
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

@@ -27,6 +27,18 @@
 //! CLI; skipped without it or the checkout. `CARDINAL_LIVE_TIMEOUT` sets each
 //! DuckDB call's time limit in seconds.
 //!
+//! With `CARDINAL_DAG_ENGINE=postgres`, PostgreSQL is the engine: for a
+//! checkout compiled and built with dbt's `postgres` target, whose manifest
+//! names each project's database and schema. `psql` connects to that
+//! database as its environment says (`PGHOST`, `PGUSER`, ...); the models run
+//! and are planned there (`CARDINAL_DAG_PLANNER=engine`, for PostgreSQL's
+//! plan of each view), each TABLE model profiled as PostgreSQL plans it,
+//! with hash joins only, and with merge joins. Where the schema is not built
+//! and `CARDINAL_DAG_MIRROR` is set, the tables of the project's DuckDB
+//! warehouse (`data/warehouse.duckdb`) are copied into it first: with
+//! `CARDINAL_DAG_MIRROR_ROWS`, at most that many rows of each, for a
+//! warehouse PostgreSQL is quick over.
+//!
 //! ```sh
 //! CARDINAL_LIVE_TIMEOUT=120 cargo test --release --test dag_bench -- --nocapture
 //! ```
@@ -38,14 +50,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cardinal::facts::{Fact, FactKind, FactSet, Ratio};
-use cardinal::observed::{Catalog, from_duckdb};
+use cardinal::observed::Catalog;
 use cardinal::{FactMode, ForeignKey, Options};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::common::{Constraint, Constraints};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
 use datafusion::prelude::{SessionConfig, SessionContext};
-use live::{TIMED_OUT, duckdb_available, profile, run, values};
+use live::{Engine, TIMED_OUT, duckdb_available};
 use serde_json::Value;
 
 /// A model of the DAG.
@@ -59,28 +71,35 @@ struct Model {
 /// A project: its database, sources, and models in dependency order.
 struct Dag {
     name: String,
-    db: PathBuf,
+    /// Where its models run: the built warehouse.
+    engine: Engine,
     database: String,
+    /// The schema its relations are in.
+    schema: String,
     models: Vec<Model>,
     /// dbt `relationships` tests, `(column, field)` of a model referencing
     /// another, each model as the source tables it reads.
     relationships: Vec<(Vec<String>, String, Vec<String>, String)>,
 }
 
-fn dags(root: &Path) -> Vec<Dag> {
+/// The projects under `root` whose name contains `only`, if given.
+fn dags(root: &Path, postgres: bool, only: Option<&str>) -> Vec<Dag> {
     let mut out = vec![];
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root.join("projects")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    dirs.retain(|d| only.is_none_or(|o| d.file_name().is_some_and(|n| n.to_string_lossy().contains(o))));
     dirs.sort();
     for dir in dirs {
         let Ok(text) = std::fs::read_to_string(dir.join("target/manifest.json")) else { continue };
         let m: Value = serde_json::from_str(&text).unwrap();
         let mut models: HashMap<String, Model> = HashMap::new();
         let mut database = None;
+        let mut schema = None;
         for (id, n) in m["nodes"].as_object().unwrap() {
             if n["resource_type"] != "model" {
                 continue;
             }
             database.get_or_insert_with(|| n["database"].as_str().unwrap_or_default().to_string());
+            schema.get_or_insert_with(|| n["schema"].as_str().unwrap_or("main").to_string());
             let depends = n["depends_on"]["nodes"].as_array().unwrap().iter().filter_map(|d| d.as_str().map(String::from)).collect();
             models.insert(
                 id.clone(),
@@ -140,28 +159,43 @@ fn dags(root: &Path) -> Vec<Dag> {
             visit(id, &models, &mut done, &mut order);
         }
         let models: Vec<Model> = order.into_iter().map(|id| models.remove(&id).unwrap()).collect();
-        // The built warehouse: whichever copy has the most of the models.
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         let names: BTreeSet<String> = models.iter().map(|m| m.name.clone()).collect();
+        if postgres {
+            // The schema dbt built; or, asked for, a copy of the DuckDB
+            // warehouse's tables.
+            let schema = schema.unwrap_or_else(|| "public".into());
+            let engine = Engine::Postgres(format!("{database}/{schema}"));
+            let warehouse = dir.join("data/warehouse.duckdb");
+            let copy = relations(&engine, &schema).is_empty() && std::env::var("CARDINAL_DAG_MIRROR").is_ok() && warehouse.exists();
+            let rows = std::env::var("CARDINAL_DAG_MIRROR_ROWS").ok().and_then(|n| n.parse().ok());
+            if copy && let Err(e) = live::pg::mirror(&warehouse, &database, &schema, rows) {
+                eprintln!("{name}: not copied into PostgreSQL: {e}");
+            }
+            if relations(&engine, &schema).is_empty() {
+                eprintln!("{name}: no relations in PostgreSQL's {database}.{schema}");
+                continue;
+            }
+            out.push(Dag { name, engine, database, schema, models, relationships });
+            continue;
+        }
+        // The built warehouse: whichever copy has the most of the models.
         let candidates = [dir.join(format!("{database}.duckdb")), dir.join("data").join(format!("{database}.duckdb"))];
         let best = candidates
             .into_iter()
             .filter(|c| c.exists())
-            .map(|c| (relations(&c).intersection(&names).count(), c))
+            .map(|c| (relations(&Engine::DuckDb(c.clone()), "main").intersection(&names).count(), c))
             .max_by_key(|(n, _)| *n);
         let Some((_, db)) = best else { continue };
-        out.push(Dag { name: dir.file_name().unwrap().to_string_lossy().into_owned(), db, database, models, relationships });
+        out.push(Dag { name, engine: Engine::DuckDb(db), database, schema: "main".into(), models, relationships });
     }
     out
 }
 
-fn json(db: &PathBuf, sql: &str) -> Value {
-    let out = run(db, sql, &["-readonly", "-json"]).unwrap_or_default();
-    serde_json::from_str(out.trim()).unwrap_or(Value::Array(vec![]))
-}
-
-/// The relations (tables and views) of `db`'s main schema.
-fn relations(db: &PathBuf) -> BTreeSet<String> {
-    json(db, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';")
+/// The relations (tables and views) of `schema`.
+fn relations(engine: &Engine, schema: &str) -> BTreeSet<String> {
+    engine
+        .json(&format!("SELECT table_name FROM information_schema.tables WHERE table_schema = '{schema}'"))
         .as_array()
         .into_iter()
         .flatten()
@@ -174,6 +208,16 @@ fn arrow_type(t: &str) -> DataType {
         let (p, s) = ps.split_once(',').unwrap();
         return DataType::Decimal128(p.trim().parse().unwrap(), s.trim().parse().unwrap());
     }
+    // PostgreSQL's names, as DuckDB's.
+    let upper = t.to_uppercase();
+    let t = match upper.as_str() {
+        "CHARACTER VARYING" | "TEXT" | "CHARACTER" => "VARCHAR",
+        "DOUBLE PRECISION" => "DOUBLE",
+        "REAL" => "FLOAT",
+        "TIMESTAMP WITHOUT TIME ZONE" => "TIMESTAMP",
+        "TIME WITHOUT TIME ZONE" => "TIME",
+        t => t,
+    };
     match t {
         "BOOLEAN" => DataType::Boolean,
         "TINYINT" => DataType::Int8,
@@ -226,26 +270,42 @@ impl ScalarUDFImpl for DateDiff {
 /// `relationships` tests, between the source tables their models read, that
 /// hold on the stored rows against a primary key.
 async fn context(dag: &Dag) -> (SessionContext, Vec<String>, Vec<ForeignKey>) {
-    let config = SessionConfig::new().with_default_catalog_and_schema(dag.database.as_str(), "main");
+    let (engine, schema) = (&dag.engine, dag.schema.as_str());
+    let postgres = matches!(engine, Engine::Postgres(_));
+    let config = SessionConfig::new().with_default_catalog_and_schema(dag.database.as_str(), schema);
     let ctx = SessionContext::new_with_config(config);
     ctx.register_udf(ScalarUDF::from(DateDiff { signature: Signature::any(3, Volatility::Immutable) }));
-    let rows = json(
-        &dag.db,
-        "SELECT c.table_name, c.column_name, c.data_type FROM information_schema.columns c \
+    // A `numeric` column's type, with the precision and scale PostgreSQL
+    // lists beside it.
+    let data_type = match postgres {
+        true => "CASE WHEN c.data_type = 'numeric' AND c.numeric_precision IS NOT NULL \
+                 THEN 'DECIMAL(' || c.numeric_precision || ',' || c.numeric_scale || ')' ELSE c.data_type END",
+        false => "c.data_type",
+    };
+    let rows = engine.json(&format!(
+        "SELECT c.table_name, c.column_name, {data_type} AS data_type FROM information_schema.columns c \
          JOIN information_schema.tables t USING (table_schema, table_name) \
-         WHERE c.table_schema = 'main' AND t.table_type = 'BASE TABLE' ORDER BY c.table_name, c.ordinal_position;",
-    );
+         WHERE c.table_schema = '{schema}' AND t.table_type = 'BASE TABLE' AND c.table_name NOT LIKE '\\_cardinal%' ESCAPE '\\' \
+         ORDER BY c.table_name, c.ordinal_position"
+    ));
     let mut tables: BTreeMap<String, Vec<Field>> = BTreeMap::new();
     for c in rows.as_array().unwrap() {
         let field = Field::new(c["column_name"].as_str().unwrap(), arrow_type(c["data_type"].as_str().unwrap()), true);
         tables.entry(c["table_name"].as_str().unwrap().to_string()).or_default().push(field);
     }
     let mut primary: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let keys = json(
-        &dag.db,
-        "SELECT table_name, constraint_column_names FROM duckdb_constraints() \
-         WHERE schema_name = 'main' AND constraint_type = 'PRIMARY KEY';",
-    );
+    let keys = engine.json(&match postgres {
+        true => format!(
+            "SELECT t.relname AS table_name, json_agg(a.attname ORDER BY k.ord) AS constraint_column_names \
+             FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+             CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+             WHERE c.contype = 'p' AND n.nspname = '{schema}' GROUP BY t.relname"
+        ),
+        false => "SELECT table_name, constraint_column_names FROM duckdb_constraints() \
+                  WHERE schema_name = 'main' AND constraint_type = 'PRIMARY KEY'"
+            .to_string(),
+    });
     for k in keys.as_array().unwrap() {
         let cols = k["constraint_column_names"].as_array().unwrap().iter().filter_map(|c| c.as_str().map(String::from)).collect();
         primary.insert(k["table_name"].as_str().unwrap().to_string(), cols);
@@ -278,9 +338,9 @@ async fn context(dag: &Dag) -> (SessionContext, Vec<String>, Vec<ForeignKey>) {
                 // Never NULL, and always matched.
                 let orphans = format!(
                     "SELECT count(*) AS n FROM \"{from}\" f WHERE f.\"{column}\" IS NULL \
-                     OR NOT EXISTS (SELECT 1 FROM \"{to}\" t WHERE t.\"{field}\" = f.\"{column}\");"
+                     OR NOT EXISTS (SELECT 1 FROM \"{to}\" t WHERE t.\"{field}\" = f.\"{column}\")"
                 );
-                if json(&dag.db, &orphans)[0]["n"].as_u64() == Some(0) {
+                if engine.json(&orphans)[0]["n"].as_u64() == Some(0) {
                     foreign.push(fk);
                 }
             }
@@ -321,7 +381,7 @@ fn agrees(kind: &FactKind, value: Ratio, n: u64, of: Option<u64>) -> bool {
 
 /// Every fact and bound of `facts` against its count: the failures, and how
 /// many were counted true, could not be counted, and timed out.
-fn check(db: &PathBuf, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usize, usize, usize) {
+fn check(engine: &Engine, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usize, usize, usize) {
     let mut checks: Vec<(&Fact, bool, usize, Option<usize>)> = vec![];
     let mut sql: Vec<String> = vec![];
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -333,7 +393,7 @@ fn check(db: &PathBuf, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usiz
     };
     let mut uncountable = 0;
     for (f, bound) in facts.iter().map(|f| (f, false)).chain(facts.bounds().map(|f| (f, true))) {
-        match f.kind.count_sql(catalog, facts) {
+        match f.kind.count_sql_in(catalog, facts, engine.dialect()) {
             Some(c) => {
                 let v = at(c.value, &mut sql);
                 let of = c.of.map(|q| at(q, &mut sql));
@@ -342,7 +402,7 @@ fn check(db: &PathBuf, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usiz
             None => uncountable += 1,
         }
     }
-    let counted = values(db, &sql);
+    let counted = engine.values(&sql);
     let (mut failures, mut ok, mut slow) = (vec![], 0, 0);
     for (f, bound, v, of) in checks {
         let (n, of) = match (&counted[v], of.map(|o| &counted[o])) {
@@ -436,6 +496,7 @@ fn dump(
                     rules.push(rule.to_string());
                 }
                 cardinal::facts::Origin::Derived { rule } => rules.push(format!("derived: {rule}")),
+                cardinal::facts::Origin::Counted => rules.push("counted".to_string()),
             }
         }
         for v in [&mut models, &mut rules] {
@@ -466,14 +527,6 @@ fn dump(
     let path = path.replace("{dag}", &dag.name);
     std::fs::write(&path, serde_json::to_string_pretty(&out).unwrap()).unwrap();
     println!("  wrote {path}");
-}
-
-/// DuckDB's plan for `sql`, as `EXPLAIN (FORMAT JSON)` prints it, in the
-/// warehouse (read only).
-fn explain(db: &PathBuf, sql: &str) -> Result<String, String> {
-    let sql = sql.trim().trim_end_matches(';');
-    let out = run(db, &format!("SET threads = 1;\nEXPLAIN (FORMAT JSON) {sql};"), &["-readonly", "-list", "-noheader"])?;
-    out.find('[').map(|i| out[i..].to_string()).ok_or_else(|| "no plan printed".to_string())
 }
 
 fn range(r: (u64, Option<u64>)) -> String {
@@ -525,19 +578,22 @@ async fn table_facts_bound_views() {
     let root = std::env::var("CARDINAL_DAG_BENCH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("dag-bench"));
-    if !duckdb_available() || !root.join("projects").exists() {
-        eprintln!("skipped: no duckdb CLI or no dag-bench at {}", root.display());
+    let postgres = std::env::var("CARDINAL_DAG_ENGINE").is_ok_and(|e| e == "postgres");
+    let available = if postgres { live::pg::available() } else { duckdb_available() };
+    if !available || !root.join("projects").exists() {
+        eprintln!("skipped: no {} or no dag-bench at {}", if postgres { "PostgreSQL" } else { "duckdb CLI" }, root.display());
         return;
     }
     let only = std::env::var("CARDINAL_DAG_ONLY").ok();
+    // `engine`: as the warehouse's engine planned it.
     let planners: Vec<&str> = match std::env::var("CARDINAL_DAG_PLANNER").as_deref() {
-        Ok("duckdb") => vec!["duckdb"],
-        Ok("both") => vec!["datafusion", "duckdb"],
+        Ok("duckdb" | "postgres" | "engine") => vec!["engine"],
+        Ok("both") => vec!["datafusion", "engine"],
         _ => vec!["datafusion"],
     };
     let mut failures = vec![];
     let mut summaries: Vec<(String, Summary)> = vec![];
-    for dag in dags(&root).into_iter().filter(|d| only.as_ref().is_none_or(|o| d.name.contains(o.as_str()))) {
+    for dag in dags(&root, postgres, only.as_deref()) {
         let mut s = Summary { tables: dag.models.iter().filter(|m| m.table).count(), views: dag.models.iter().filter(|m| !m.table).count(), ..Default::default() };
         if s.views == 0 {
             println!("==== {}: {} TABLE models and no VIEW models: nothing to match\n", dag.name, s.tables);
@@ -545,8 +601,8 @@ async fn table_facts_bound_views() {
             continue;
         }
         let (ctx, undefined, foreign_keys) = context(&dag).await;
-        let catalog = Catalog::from_context(&ctx).await.unwrap();
-        println!("==== {} ({}): {} TABLE and {} VIEW models", dag.name, dag.db.display(), s.tables, s.views);
+        let catalog = Catalog::from_context(&ctx).await.unwrap().with_partial_indexes(dag.engine.partial_indexes());
+        println!("==== {} ({} {}): {} TABLE and {} VIEW models", dag.name, dag.engine.name(), dag.engine.target(), s.tables, s.views);
         for fk in &foreign_keys {
             println!("  foreign key {}({}) -> {}({})", fk.table, fk.columns.join(", "), fk.references, fk.referenced.join(", "));
         }
@@ -563,15 +619,19 @@ async fn table_facts_bound_views() {
         let mut table_rows: HashMap<String, u64> = HashMap::new();
         for m in dag.models.iter().filter(|m| m.table) {
             let mut ok = false;
-            for threads in [1, 4] {
-                let label = format!("{}/{}/t{threads}", dag.name, m.name);
-                match profile(&dag.db, &inlined(m), threads).and_then(|j| from_duckdb(&catalog, &label, &j).map_err(|e| e.to_string())) {
+            let variants = dag.engine.variants();
+            for variant in &variants {
+                let label = format!("{}/{}/{variant}", dag.name, m.name);
+                let sql = inlined(m);
+                match dag.engine.profile(&sql, variant).and_then(|j| dag.engine.read(&catalog, &label, &j, &sql)) {
                     Ok(p) => {
-                        table_rows.insert(m.name.clone(), p.nodes[p.root].rows);
+                        if p.nodes[p.root].counted {
+                            table_rows.insert(m.name.clone(), p.nodes[p.root].rows);
+                        }
                         facts.observe(&p);
                         ok = true;
                     }
-                    Err(e) if threads == 1 => println!("  table {} not profiled: {}", m.name, e.lines().next().unwrap_or_default()),
+                    Err(e) if *variant == variants[0] => println!("  table {} not profiled: {}", m.name, e.lines().next().unwrap_or_default()),
                     Err(_) => {}
                 }
             }
@@ -589,6 +649,7 @@ async fn table_facts_bound_views() {
                     .map(|o| match o {
                         cardinal::facts::Origin::Observed { query, .. } => query.split('/').nth(1).unwrap_or(query).to_string(),
                         cardinal::facts::Origin::Derived { rule } => format!("derived ({rule})"),
+                        cardinal::facts::Origin::Counted => "counted".to_string(),
                     })
                     .collect();
                 q.sort();
@@ -602,7 +663,7 @@ async fn table_facts_bound_views() {
                 println!("  bound {} <= {}    [{}]", b.kind, b.value, from(b));
             }
         }
-        let (wrong, counted, uncountable, slow) = check(&dag.db, &catalog, &facts);
+        let (wrong, counted, uncountable, slow) = check(&dag.engine, &catalog, &facts);
         failures.extend(wrong.into_iter().map(|w| format!("{}: {w}", dag.name)));
         (s.facts, s.bounds, s.counted) = (facts.len(), facts.bounds().count(), counted);
         println!(
@@ -623,7 +684,14 @@ async fn table_facts_bound_views() {
             println!("  planned by {planner}:");
             println!("  {:<34} {:>10} {:>8} {:>6}  {:<16} {:<16} {:<16}", "view", "rows", "matched", "capped", "no facts", "ratios", "pinned");
             for m in dag.models.iter().filter(|m| !m.table) {
-                let truth = match profile(&dag.db, &m.sql, 1).and_then(|j| from_duckdb(&catalog, &m.name, &j).map_err(|e| e.to_string())) {
+                // PostgreSQL may have only the tables: the views inlined.
+                let run = if postgres { inlined(m) } else { m.sql.clone() };
+                let first = &dag.engine.variants()[0];
+                let truth = match dag.engine.profile(&run, first).and_then(|j| dag.engine.read(&catalog, &m.name, &j, &run)) {
+                    Ok(p) if !p.nodes[p.root].counted => {
+                        skipped.push(format!("{}: its rows were not counted", m.name));
+                        continue;
+                    }
                     Ok(p) => p.nodes[p.root].rows,
                     Err(e) => {
                         skipped.push(format!("{}: not profiled: {}", m.name, e.lines().next().unwrap_or_default()));
@@ -633,12 +701,13 @@ async fn table_facts_bound_views() {
                 let options = Options { selectivity: true, foreign_keys: foreign_keys.clone(), ..Default::default() };
                 let analyzed = match planner {
                     // The view's query with the views it reads inlined, as
-                    // DuckDB plans it: so its text says what the plan reads.
-                    "duckdb" => Some(inlined(m))
+                    // the engine plans it: so its text says what the plan reads.
+                    "engine" => Some(inlined(m))
                         .ok_or_else(|| "does not inline".to_string())
                         .and_then(|sql| {
-                            let j = explain(&dag.db, &sql)?;
-                            cardinal::analyze_duckdb(&catalog, &j, Some(&sql), options).map_err(|e| e.to_string())
+                            let j = dag.engine.plan(&sql)?;
+                            let plan = dag.engine.read_plan(&catalog, &m.name, &j, &sql)?;
+                            cardinal::analyze_observed(&catalog, &plan, options).map_err(|e| e.to_string())
                         }),
                     _ => cardinal::analyze_sql_with(&ctx, &m.sql, options).await.map_err(|e| e.to_string()),
                 };

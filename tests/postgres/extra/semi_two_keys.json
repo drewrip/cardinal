@@ -1,0 +1,96 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 2807.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": true,
+          "Hash Cond": "((lineitem.l_partkey = partsupp.ps_partkey) AND (lineitem.l_suppkey = partsupp.ps_suppkey))",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem",
+              "Actual Rows": 60175.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 381.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 26,
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Simple",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 381.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey"],
+                  "Group Key": ["partsupp.ps_partkey", "partsupp.ps_suppkey"],
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 56,
+                  "Disk Usage": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "partsupp",
+                      "Schema": "public",
+                      "Alias": "partsupp",
+                      "Actual Rows": 381.00,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey"],
+                      "Filter": "(partsupp.ps_availqty < 500)",
+                      "Rows Removed by Filter": 7619
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

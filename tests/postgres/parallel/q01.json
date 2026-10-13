@@ -1,0 +1,131 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 4.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["l_returnflag", "l_linestatus", "sum(l_quantity)", "sum(l_extendedprice)", "sum((l_extendedprice * ('1'::numeric - l_discount)))", "sum(((l_extendedprice * ('1'::numeric - l_discount)) * ('1'::numeric + l_tax)))", "avg(l_quantity)", "avg(l_extendedprice)", "avg(l_discount)", "count(*)"],
+      "Group Key": ["lineitem.l_returnflag", "lineitem.l_linestatus"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 12.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["l_returnflag", "l_linestatus", "(PARTIAL sum(l_quantity))", "(PARTIAL sum(l_extendedprice))", "(PARTIAL sum((l_extendedprice * ('1'::numeric - l_discount))))", "(PARTIAL sum(((l_extendedprice * ('1'::numeric - l_discount)) * ('1'::numeric + l_tax))))", "(PARTIAL avg(l_quantity))", "(PARTIAL avg(l_extendedprice))", "(PARTIAL avg(l_discount))", "(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 4.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["l_returnflag", "l_linestatus", "(PARTIAL sum(l_quantity))", "(PARTIAL sum(l_extendedprice))", "(PARTIAL sum((l_extendedprice * ('1'::numeric - l_discount))))", "(PARTIAL sum(((l_extendedprice * ('1'::numeric - l_discount)) * ('1'::numeric + l_tax))))", "(PARTIAL avg(l_quantity))", "(PARTIAL avg(l_extendedprice))", "(PARTIAL avg(l_discount))", "(PARTIAL count(*))"],
+              "Sort Key": ["lineitem.l_returnflag", "lineitem.l_linestatus"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 26,
+              "Sort Space Type": "Memory",
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 4.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 26,
+                  "Sort Space Type": "Memory"
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 4.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 26,
+                  "Sort Space Type": "Memory"
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Partial",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 4.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["l_returnflag", "l_linestatus", "PARTIAL sum(l_quantity)", "PARTIAL sum(l_extendedprice)", "PARTIAL sum((l_extendedprice * ('1'::numeric - l_discount)))", "PARTIAL sum(((l_extendedprice * ('1'::numeric - l_discount)) * ('1'::numeric + l_tax)))", "PARTIAL avg(l_quantity)", "PARTIAL avg(l_extendedprice)", "PARTIAL avg(l_discount)", "PARTIAL count(*)"],
+                  "Group Key": ["lineitem.l_returnflag", "lineitem.l_linestatus"],
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 32,
+                  "Disk Usage": 0,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 4.00,
+                      "Actual Loops": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 4.00,
+                      "Actual Loops": 1,
+                      "HashAgg Batches": 1,
+                      "Peak Memory Usage": 32,
+                      "Disk Usage": 0
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "lineitem",
+                      "Actual Rows": 19769.00,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["l_orderkey", "l_partkey", "l_suppkey", "l_linenumber", "l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate", "l_commitdate", "l_receiptdate", "l_shipinstruct", "l_shipmode", "l_comment"],
+                      "Filter": "(lineitem.l_shipdate <= '1998-09-02 00:00:00'::timestamp without time zone)",
+                      "Rows Removed by Filter": 289,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 18108.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 18393.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

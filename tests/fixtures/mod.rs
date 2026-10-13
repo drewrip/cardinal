@@ -4,13 +4,15 @@
 
 use std::sync::Arc;
 
-use cardinal::observed::{Catalog, ObservedPlan, from_duckdb};
+use cardinal::observed::{Catalog, ObservedPlan, from_duckdb, from_postgres};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use serde_json::Value;
 
 pub const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/duckdb");
+/// The PostgreSQL fixtures: profiles of the same queries over the same data.
+pub const PG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/postgres");
 
 pub fn json(path: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(format!("{DIR}/{path}")).unwrap()).unwrap()
@@ -51,13 +53,19 @@ pub fn context() -> SessionContext {
     ctx
 }
 
+/// The tables' catalog. The PostgreSQL fixtures' indexes are all whole:
+/// none is partial.
 pub async fn catalog() -> Catalog {
-    Catalog::from_context(&context()).await.unwrap()
+    Catalog::from_context(&context()).await.unwrap().with_partial_indexes(Vec::<(String, String)>::new())
 }
 
 /// Every fixture under `dir`, by name, in name order.
 pub fn fixtures(dir: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = std::fs::read_dir(format!("{DIR}/{dir}"))
+    fixtures_in(&format!("{DIR}/{dir}"))
+}
+
+fn fixtures_in(dir: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
@@ -80,6 +88,25 @@ pub fn query(dir: &str, name: &str) -> String {
         dir => format!("{DIR}/{dir}/{name}.sql"),
     };
     std::fs::read_to_string(path).unwrap()
+}
+
+/// The query a PostgreSQL profile ran, by name: TPC-H's, or one of the
+/// queries DuckDB's fixtures also ran.
+pub fn pg_query(name: &str) -> String {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let paths = [format!("{root}/tests/tpch/{name}.sql"), format!("{PG_DIR}/extra/{name}.sql"), format!("{DIR}/extra/{name}.sql")];
+    paths.iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| panic!("no query {name}"))
+}
+
+/// Every PostgreSQL profile under `dir` (`tpch`, `extra`, `indexed`, `v14`),
+/// by name.
+pub fn pg_fixtures(dir: &str) -> Vec<(String, String)> {
+    fixtures_in(&format!("{PG_DIR}/{dir}"))
+}
+
+pub async fn pg_plans(dir: &str) -> Vec<ObservedPlan> {
+    let catalog = catalog().await;
+    pg_fixtures(dir).iter().map(|(name, json)| from_postgres(&catalog, name, json, Some(&pg_query(name))).unwrap()).collect()
 }
 
 /// TPC-H's foreign keys, all of which its data satisfies.

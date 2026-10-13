@@ -1,0 +1,203 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 2.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["lineitem.l_shipmode", "sum(CASE WHEN (((orders.o_orderpriority)::text = '1-URGENT'::text) OR ((orders.o_orderpriority)::text = '2-HIGH'::text)) THEN 1 ELSE 0 END)", "sum(CASE WHEN (((orders.o_orderpriority)::text <> '1-URGENT'::text) AND ((orders.o_orderpriority)::text <> '2-HIGH'::text)) THEN 1 ELSE 0 END)"],
+      "Group Key": ["lineitem.l_shipmode"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 6.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["lineitem.l_shipmode", "(PARTIAL sum(CASE WHEN (((orders.o_orderpriority)::text = '1-URGENT'::text) OR ((orders.o_orderpriority)::text = '2-HIGH'::text)) THEN 1 ELSE 0 END))", "(PARTIAL sum(CASE WHEN (((orders.o_orderpriority)::text <> '1-URGENT'::text) AND ((orders.o_orderpriority)::text <> '2-HIGH'::text)) THEN 1 ELSE 0 END))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Sorted",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 2.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["lineitem.l_shipmode", "PARTIAL sum(CASE WHEN (((orders.o_orderpriority)::text = '1-URGENT'::text) OR ((orders.o_orderpriority)::text = '2-HIGH'::text)) THEN 1 ELSE 0 END)", "PARTIAL sum(CASE WHEN (((orders.o_orderpriority)::text <> '1-URGENT'::text) AND ((orders.o_orderpriority)::text <> '2-HIGH'::text)) THEN 1 ELSE 0 END)"],
+              "Group Key": ["lineitem.l_shipmode"],
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 2.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 2.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Sort",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 102.33,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["lineitem.l_shipmode", "orders.o_orderpriority"],
+                  "Sort Key": ["lineitem.l_shipmode"],
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 29,
+                  "Sort Space Type": "Memory",
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 66.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 27,
+                      "Sort Space Type": "Memory"
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 111.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 28,
+                      "Sort Space Type": "Memory"
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Actual Rows": 102.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["lineitem.l_shipmode", "orders.o_orderpriority"],
+                      "Inner Unique": false,
+                      "Hash Cond": "(orders.o_orderkey = lineitem.l_orderkey)",
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 66.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 111.00,
+                          "Actual Loops": 1
+                        }
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "orders",
+                          "Schema": "public",
+                          "Alias": "orders",
+                          "Actual Rows": 5000.00,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 3081.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 5111.00,
+                              "Actual Loops": 1
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Actual Rows": 102.33,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["lineitem.l_shipmode", "lineitem.l_orderkey"],
+                          "Hash Buckets": 1024,
+                          "Original Hash Buckets": 1024,
+                          "Hash Batches": 1,
+                          "Original Hash Batches": 1,
+                          "Peak Memory Usage": 104,
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 36.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 46.00,
+                              "Actual Loops": 1
+                            }
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": true,
+                              "Async Capable": false,
+                              "Relation Name": "lineitem",
+                              "Schema": "public",
+                              "Alias": "lineitem",
+                              "Actual Rows": 102.33,
+                              "Actual Loops": 3,
+                              "Disabled": false,
+                              "Output": ["lineitem.l_shipmode", "lineitem.l_orderkey"],
+                              "Filter": "(((lineitem.l_shipmode)::text = ANY ('{MAIL,SHIP}'::text[])) AND (lineitem.l_commitdate < lineitem.l_receiptdate) AND (lineitem.l_shipdate < lineitem.l_commitdate) AND (lineitem.l_receiptdate >= '1994-01-01'::date) AND (lineitem.l_receiptdate < '1995-01-01 00:00:00'::timestamp without time zone))",
+                              "Rows Removed by Filter": 19956,
+                              "Workers": [
+                                {
+                                  "Worker Number": 0,
+                                  "Actual Rows": 36.00,
+                                  "Actual Loops": 1
+                                },
+                                {
+                                  "Worker Number": 1,
+                                  "Actual Rows": 46.00,
+                                  "Actual Loops": 1
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

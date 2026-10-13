@@ -18,7 +18,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use datafusion::common::Column;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+use datafusion::logical_expr::Like;
 use datafusion::sql::unparser::Unparser;
+use datafusion::sql::unparser::dialect::PostgreSqlDialect;
 
 use super::{Context, ExistsKind, FactKind, FactSet, Term};
 use crate::observed::Catalog;
@@ -32,20 +34,36 @@ pub struct Counts {
     pub of: Option<String>,
 }
 
+/// The engine a fact's queries are written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CountDialect {
+    #[default]
+    DuckDb,
+    Postgres,
+}
+
 impl FactKind {
     /// Queries counting this fact's value, with tables' columns from
     /// `catalog` and aggregate values' definitions from `facts`. `None` if it
     /// reads what no query can name: a value no GROUP BY of its rows
     /// computes, a grouping key that is not a column, the first rows of a
-    /// sort.
+    /// sort. The queries are DuckDB's SQL: [`FactKind::count_sql_in`]
+    /// writes another engine's.
     pub fn count_sql(&self, catalog: &Catalog, facts: &FactSet) -> Option<Counts> {
+        self.count_sql_in(catalog, facts, CountDialect::DuckDb)
+    }
+
+    /// [`FactKind::count_sql`], in `dialect`.
+    pub fn count_sql_in(&self, catalog: &Catalog, facts: &FactSet, dialect: CountDialect) -> Option<Counts> {
         let r = Render {
             catalog,
             facts,
+            dialect,
             wanted: wanted(self, facts),
             next: Cell::new(0),
             aliases: RefCell::new(HashMap::new()),
             computed: RefCell::new(BTreeSet::new()),
+            skip: RefCell::new(BTreeSet::new()),
         };
         let counts = r.counts(self)?;
         // Every value read must be computed where it is read.
@@ -120,6 +138,7 @@ fn values_read(e: &Expr) -> Vec<String> {
 struct Render<'a> {
     catalog: &'a Catalog,
     facts: &'a FactSet,
+    dialect: CountDialect,
     /// The values the fact reads, by name.
     wanted: BTreeSet<String>,
     /// The next subquery alias.
@@ -128,6 +147,9 @@ struct Render<'a> {
     aliases: RefCell<HashMap<String, String>>,
     /// The columns of values some GROUP BY computes.
     computed: RefCell<BTreeSet<String>>,
+    /// The value columns the next aggregate rendered leaves to another
+    /// beside it, which computes the same.
+    skip: RefCell<BTreeSet<String>>,
 }
 
 impl Render<'_> {
@@ -255,7 +277,21 @@ impl Render<'_> {
                     let columns: Vec<String> = columns.iter().map(|col| format!("{} AS {}", quote(col), quote(&format!("{t}.{col}")))).collect();
                     from.push(format!("(SELECT {} FROM {table}) AS {}", columns.join(", "), self.alias()));
                 }
+                // Two atoms over the same rows compute the same values. Two
+                // aggregates' one row each holds them alike, so one gives
+                // them; which of two GROUP BYs' rows a value is of, its name
+                // does not say.
+                let mut given = BTreeSet::new();
                 for a in atoms {
+                    let mine = self.value_columns(a);
+                    let again: BTreeSet<String> = mine.intersection(&given).cloned().collect();
+                    if !again.is_empty() {
+                        match a {
+                            Context::Derived { op, .. } if op == "aggregate" => *self.skip.borrow_mut() = again,
+                            _ => return None,
+                        }
+                    }
+                    given.extend(mine);
                     from.push(self.from(a)?);
                 }
                 if from.is_empty() {
@@ -324,10 +360,14 @@ impl Render<'_> {
     /// computes: each `aggregate AS column`. A value is `g`'s if its rows are
     /// `g`'s under some names of `g`'s instances.
     fn computes(&self, g: &Context) -> Option<Vec<String>> {
+        let skip = std::mem::take(&mut *self.skip.borrow_mut());
         let mut out = vec![];
         for name in &self.wanted {
             let Some(v) = self.facts.value(name) else { continue };
             let Some(names) = renaming(g, &v.over) else { continue };
+            if skip.contains(&self.column(name)) {
+                continue;
+            }
             // The aggregate, read over `g`'s instances.
             let back: HashMap<&str, &str> = names.iter().map(|(a, b)| (b.as_str(), a.as_str())).collect();
             let aggregate = v.aggregate.rename(&|r| back.get(r).map(|s| s.to_string()));
@@ -336,6 +376,15 @@ impl Render<'_> {
             self.computed.borrow_mut().insert(column);
         }
         Some(out)
+    }
+
+    /// The columns of the values `c`, if a GROUP BY or aggregate, computes.
+    fn value_columns(&self, c: &Context) -> BTreeSet<String> {
+        if !matches!(c, Context::Derived { op, .. } if op == "group" || op == "aggregate") {
+            return BTreeSet::new();
+        }
+        let computes = |name: &&String| self.facts.value(name).is_some_and(|v| renaming(c, &v.over).is_some());
+        self.wanted.iter().filter(computes).map(|name| self.column(name)).collect()
     }
 
     /// Whether the rows of `c` carry value `name`: a GROUP BY in it, not
@@ -387,10 +436,49 @@ impl Render<'_> {
             })
             .ok()?
             .data;
+        if self.dialect == CountDialect::Postgres {
+            let sql = Unparser::new(&PostgreSqlDialect {}).expr_to_sql(&postgres(e)?).ok()?.to_string();
+            // PostgreSQL has no aggregate for a group's first or last row,
+            // and calls the current date and time without parentheses.
+            let sql = sql
+                .replace("current_date()", "CURRENT_DATE")
+                .replace("current_time()", "CURRENT_TIME")
+                .replace("current_timestamp()", "CURRENT_TIMESTAMP");
+            return (!sql.contains("first_value(") && !sql.contains("last_value(")).then_some(sql);
+        }
         let sql = Unparser::default().expr_to_sql(&e).ok()?.to_string();
         // Aggregates DuckDB names otherwise.
         Some(sql.replace("first_value(", "first(").replace("last_value(", "last(").replace("btrim(", "trim("))
     }
+}
+
+/// `e` with the functions PostgreSQL lacks as what they test: `contains(x,
+/// 'abc')` and `ends_with(x, 'abc')` as `LIKE`. `None` for one whose
+/// argument is no literal free of wildcards.
+fn postgres(e: Expr) -> Option<Expr> {
+    e.transform_up(|e| {
+        let Expr::ScalarFunction(f) = &e else { return Ok(Transformed::no(e)) };
+        let pattern = |s: &str| match f.name() {
+            "contains" => Some(format!("%{s}%")),
+            "ends_with" => Some(format!("%{s}")),
+            _ => None,
+        };
+        let [x, Expr::Literal(v, _)] = &f.args[..] else { return Ok(Transformed::no(e)) };
+        let text = match v {
+            datafusion::common::ScalarValue::Utf8(Some(s))
+            | datafusion::common::ScalarValue::LargeUtf8(Some(s))
+            | datafusion::common::ScalarValue::Utf8View(Some(s)) => s,
+            _ => return Ok(Transformed::no(e)),
+        };
+        let Some(pattern) = pattern(text) else { return Ok(Transformed::no(e)) };
+        if text.contains(['%', '_', '\\']) {
+            return Err(datafusion::error::DataFusionError::Plan("a wildcard in a literal".into()));
+        }
+        let pattern = Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(pattern)), None);
+        Ok(Transformed::yes(Expr::Like(Like::new(false, Box::new(x.clone()), Box::new(pattern), None, false))))
+    })
+    .ok()
+    .map(|t| t.data)
 }
 
 /// Names for `from`'s instances under which it is `to`, if there are any:

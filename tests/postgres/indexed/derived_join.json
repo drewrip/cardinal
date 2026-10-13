@@ -1,0 +1,98 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Hash Join",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Inner",
+      "Actual Rows": 420.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["customer.c_name", "s.n"],
+      "Inner Unique": true,
+      "Hash Cond": "(customer.c_custkey = s.k)",
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "customer",
+          "Schema": "public",
+          "Alias": "customer",
+          "Actual Rows": 659.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"],
+          "Filter": "(customer.c_acctbal > '5000'::numeric)",
+          "Rows Removed by Filter": 841
+        },
+        {
+          "Node Type": "Hash",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 998.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["s.n", "s.k"],
+          "Hash Buckets": 1024,
+          "Original Hash Buckets": 1024,
+          "Hash Batches": 1,
+          "Original Hash Batches": 1,
+          "Peak Memory Usage": 55,
+          "Plans": [
+            {
+              "Node Type": "Subquery Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Alias": "s",
+              "Actual Rows": 998.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["s.n", "s.k"],
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Simple",
+                  "Parent Relationship": "Subquery",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 998.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["orders.o_custkey", "count(*)"],
+                  "Group Key": ["orders.o_custkey"],
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 121,
+                  "Disk Usage": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "orders",
+                      "Schema": "public",
+                      "Alias": "orders",
+                      "Actual Rows": 7333.00,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                      "Filter": "((orders.o_orderstatus)::text = 'O'::text)",
+                      "Rows Removed by Filter": 7667
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

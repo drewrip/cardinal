@@ -1,0 +1,59 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Subquery Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Alias": "s",
+      "Actual Rows": 2912,
+      "Actual Loops": 1,
+      "Output": ["s.o_custkey", "s.o_orderkey", "s.rn"],
+      "Filter": "(s.rn <= 3)",
+      "Rows Removed by Filter": 4392,
+      "Plans": [
+        {
+          "Node Type": "WindowAgg",
+          "Parent Relationship": "Subquery",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 7304,
+          "Actual Loops": 1,
+          "Output": ["orders.o_custkey", "orders.o_orderkey", "row_number() OVER (?)", "orders.o_totalprice"],
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 7304,
+              "Actual Loops": 1,
+              "Output": ["orders.o_custkey", "orders.o_totalprice", "orders.o_orderkey"],
+              "Sort Key": ["orders.o_custkey", "orders.o_totalprice DESC"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 763,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 7304,
+                  "Actual Loops": 1,
+                  "Output": ["orders.o_custkey", "orders.o_totalprice", "orders.o_orderkey"],
+                  "Filter": "((orders.o_orderstatus)::text = 'F'::text)",
+                  "Rows Removed by Filter": 7696
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

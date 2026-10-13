@@ -1,0 +1,75 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Full",
+          "Actual Rows": 1417,
+          "Actual Loops": 1,
+          "Inner Unique": false,
+          "Hash Cond": "(customer.c_nationkey = supplier.s_nationkey)",
+          "Join Filter": "(customer.c_acctbal > '9000'::numeric)",
+          "Rows Removed by Join Filter": 5405,
+          "Filter": "((supplier.s_acctbal > '9000'::numeric) OR (supplier.s_suppkey IS NULL))",
+          "Rows Removed by Filter": 480,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "customer",
+              "Schema": "public",
+              "Alias": "customer",
+              "Actual Rows": 1500,
+              "Actual Loops": 1,
+              "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 100,
+              "Actual Loops": 1,
+              "Output": ["supplier.s_nationkey", "supplier.s_acctbal", "supplier.s_suppkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 14,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "supplier",
+                  "Schema": "public",
+                  "Alias": "supplier",
+                  "Actual Rows": 100,
+                  "Actual Loops": 1,
+                  "Output": ["supplier.s_nationkey", "supplier.s_acctbal", "supplier.s_suppkey"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

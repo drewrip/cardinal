@@ -1,0 +1,335 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 100.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["customer.c_name", "customer.c_custkey", "orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "(sum(lineitem.l_quantity))"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 100.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["customer.c_name", "customer.c_custkey", "orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "(sum(lineitem.l_quantity))"],
+          "Sort Key": ["orders.o_totalprice DESC", "orders.o_orderdate"],
+          "Sort Method": "top-N heapsort",
+          "Sort Space Used": 47,
+          "Sort Space Type": "Memory",
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Hashed",
+              "Partial Mode": "Simple",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 7361.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["customer.c_name", "customer.c_custkey", "orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "sum(lineitem.l_quantity)"],
+              "Group Key": ["customer.c_custkey", "orders.o_orderkey"],
+              "HashAgg Batches": 1,
+              "Peak Memory Usage": 3601,
+              "Disk Usage": 0,
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Actual Rows": 41163.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["customer.c_custkey", "orders.o_orderkey", "customer.c_name", "orders.o_orderdate", "orders.o_totalprice", "lineitem.l_quantity"],
+                  "Inner Unique": true,
+                  "Hash Cond": "(orders.o_orderkey = lineitem_1.l_orderkey)",
+                  "Plans": [
+                    {
+                      "Node Type": "Gather",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Actual Rows": 60175.00,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": ["customer.c_name", "customer.c_custkey", "orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "lineitem.l_quantity", "lineitem.l_orderkey"],
+                      "Workers Planned": 2,
+                      "Workers Launched": 2,
+                      "Single Copy": false,
+                      "Plans": [
+                        {
+                          "Node Type": "Hash Join",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Actual Rows": 20058.33,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["customer.c_name", "customer.c_custkey", "orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "lineitem.l_quantity", "lineitem.l_orderkey"],
+                          "Inner Unique": true,
+                          "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 28207.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 29469.00,
+                              "Actual Loops": 1
+                            }
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Hash Join",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": true,
+                              "Async Capable": false,
+                              "Join Type": "Inner",
+                              "Actual Rows": 20058.33,
+                              "Actual Loops": 3,
+                              "Disabled": false,
+                              "Output": ["orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "orders.o_custkey", "lineitem.l_quantity", "lineitem.l_orderkey"],
+                              "Inner Unique": true,
+                              "Hash Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+                              "Workers": [
+                                {
+                                  "Worker Number": 0,
+                                  "Actual Rows": 28207.00,
+                                  "Actual Loops": 1
+                                },
+                                {
+                                  "Worker Number": 1,
+                                  "Actual Rows": 29469.00,
+                                  "Actual Loops": 1
+                                }
+                              ],
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": true,
+                                  "Async Capable": false,
+                                  "Relation Name": "lineitem",
+                                  "Schema": "public",
+                                  "Alias": "lineitem",
+                                  "Actual Rows": 20058.33,
+                                  "Actual Loops": 3,
+                                  "Disabled": false,
+                                  "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                                  "Workers": [
+                                    {
+                                      "Worker Number": 0,
+                                      "Actual Rows": 28207.00,
+                                      "Actual Loops": 1
+                                    },
+                                    {
+                                      "Worker Number": 1,
+                                      "Actual Rows": 29469.00,
+                                      "Actual Loops": 1
+                                    }
+                                  ]
+                                },
+                                {
+                                  "Node Type": "Hash",
+                                  "Parent Relationship": "Inner",
+                                  "Parallel Aware": true,
+                                  "Async Capable": false,
+                                  "Actual Rows": 5000.00,
+                                  "Actual Loops": 3,
+                                  "Disabled": false,
+                                  "Output": ["orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "orders.o_custkey"],
+                                  "Hash Buckets": 16384,
+                                  "Original Hash Buckets": 16384,
+                                  "Hash Batches": 1,
+                                  "Original Hash Batches": 1,
+                                  "Peak Memory Usage": 1120,
+                                  "Workers": [
+                                    {
+                                      "Worker Number": 0,
+                                      "Actual Rows": 345.00,
+                                      "Actual Loops": 1
+                                    },
+                                    {
+                                      "Worker Number": 1,
+                                      "Actual Rows": 1235.00,
+                                      "Actual Loops": 1
+                                    }
+                                  ],
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Seq Scan",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": true,
+                                      "Async Capable": false,
+                                      "Relation Name": "orders",
+                                      "Schema": "public",
+                                      "Alias": "orders",
+                                      "Actual Rows": 5000.00,
+                                      "Actual Loops": 3,
+                                      "Disabled": false,
+                                      "Output": ["orders.o_orderkey", "orders.o_orderdate", "orders.o_totalprice", "orders.o_custkey"],
+                                      "Workers": [
+                                        {
+                                          "Worker Number": 0,
+                                          "Actual Rows": 345.00,
+                                          "Actual Loops": 1
+                                        },
+                                        {
+                                          "Worker Number": 1,
+                                          "Actual Rows": 1235.00,
+                                          "Actual Loops": 1
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "Node Type": "Hash",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": true,
+                              "Async Capable": false,
+                              "Actual Rows": 500.00,
+                              "Actual Loops": 3,
+                              "Disabled": false,
+                              "Output": ["customer.c_name", "customer.c_custkey"],
+                              "Hash Buckets": 2048,
+                              "Original Hash Buckets": 2048,
+                              "Hash Batches": 1,
+                              "Original Hash Batches": 1,
+                              "Peak Memory Usage": 112,
+                              "Workers": [
+                                {
+                                  "Worker Number": 0,
+                                  "Actual Rows": 0.00,
+                                  "Actual Loops": 1
+                                },
+                                {
+                                  "Worker Number": 1,
+                                  "Actual Rows": 0.00,
+                                  "Actual Loops": 1
+                                }
+                              ],
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": true,
+                                  "Async Capable": false,
+                                  "Relation Name": "customer",
+                                  "Schema": "public",
+                                  "Alias": "customer",
+                                  "Actual Rows": 1500.00,
+                                  "Actual Loops": 1,
+                                  "Disabled": false,
+                                  "Output": ["customer.c_name", "customer.c_custkey"],
+                                  "Workers": [
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Actual Rows": 7361.00,
+                      "Actual Loops": 1,
+                      "Disabled": false,
+                      "Output": ["lineitem_1.l_orderkey"],
+                      "Hash Buckets": 8192,
+                      "Original Hash Buckets": 8192,
+                      "Hash Batches": 1,
+                      "Original Hash Batches": 1,
+                      "Peak Memory Usage": 352,
+                      "Plans": [
+                        {
+                          "Node Type": "Aggregate",
+                          "Strategy": "Hashed",
+                          "Partial Mode": "Simple",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Actual Rows": 7361.00,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": ["lineitem_1.l_orderkey"],
+                          "Group Key": ["lineitem_1.l_orderkey"],
+                          "Filter": "(sum(lineitem_1.l_quantity) > '100'::numeric)",
+                          "HashAgg Batches": 1,
+                          "Peak Memory Usage": 5649,
+                          "Disk Usage": 0,
+                          "Rows Removed by Filter": 7639,
+                          "Plans": [
+                            {
+                              "Node Type": "Gather",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Actual Rows": 60175.00,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Output": ["lineitem_1.l_orderkey", "lineitem_1.l_quantity"],
+                              "Workers Planned": 2,
+                              "Workers Launched": 2,
+                              "Single Copy": false,
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": true,
+                                  "Async Capable": false,
+                                  "Relation Name": "lineitem",
+                                  "Schema": "public",
+                                  "Alias": "lineitem_1",
+                                  "Actual Rows": 20058.33,
+                                  "Actual Loops": 3,
+                                  "Disabled": false,
+                                  "Output": ["lineitem_1.l_orderkey", "lineitem_1.l_quantity"],
+                                  "Workers": [
+                                    {
+                                      "Worker Number": 0,
+                                      "Actual Rows": 7877.00,
+                                      "Actual Loops": 1
+                                    },
+                                    {
+                                      "Worker Number": 1,
+                                      "Actual Rows": 42689.00,
+                                      "Actual Loops": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

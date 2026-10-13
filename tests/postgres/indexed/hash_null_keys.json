@@ -1,0 +1,85 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 7380.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Hash Cond": "(lineitem.l_suppkey = NULLIF((orders.o_custkey % '2'::bigint), 0))",
+          "Plans": [
+            {
+              "Node Type": "Index Only Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem",
+              "Actual Rows": 60175.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+              "Heap Fetches": 0,
+              "Index Searches": 1
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 12.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_custkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 9,
+              "Plans": [
+                {
+                  "Node Type": "Index Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Scan Direction": "Forward",
+                  "Index Name": "orders_pkey",
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 27.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["orders.o_custkey"],
+                  "Index Cond": "(orders.o_orderkey < 100)",
+                  "Rows Removed by Index Recheck": 0,
+                  "Index Searches": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

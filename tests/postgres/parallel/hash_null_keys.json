@@ -1,0 +1,164 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 3.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Single Copy": false,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["PARTIAL count(*)"],
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Actual Rows": 2460.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Inner Unique": false,
+                  "Hash Cond": "(lineitem.l_suppkey = NULLIF((orders.o_custkey % '2'::bigint), 0))",
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 648.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 960.00,
+                      "Actual Loops": 1
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Index Only Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "lineitem",
+                      "Actual Rows": 20058.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+                      "Heap Fetches": 0,
+                      "Index Searches": 1,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 3614.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 4383.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Actual Rows": 9.00,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["orders.o_custkey"],
+                      "Hash Buckets": 1024,
+                      "Original Hash Buckets": 1024,
+                      "Hash Batches": 1,
+                      "Original Hash Batches": 1,
+                      "Peak Memory Usage": 40,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        }
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "orders_pkey",
+                          "Relation Name": "orders",
+                          "Schema": "public",
+                          "Alias": "orders",
+                          "Actual Rows": 27.00,
+                          "Actual Loops": 1,
+                          "Disabled": false,
+                          "Output": ["orders.o_custkey"],
+                          "Index Cond": "(orders.o_orderkey < 100)",
+                          "Rows Removed by Index Recheck": 0,
+                          "Index Searches": 1,
+                          "Workers": [
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

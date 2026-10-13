@@ -543,7 +543,7 @@ impl Facts {
         let [Expr::Literal(part, _), arg] = args else {
             return None;
         };
-        let part = part.try_as_str()??.to_lowercase();
+        let part = part.try_as_str()??.trim_matches(['\'', '"']).to_lowercase();
         let t = arg.get_type(schema).ok()?;
         let d = self.dom(arg, schema);
         let values = d.clone().without_null();

@@ -1,0 +1,98 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Disabled": false,
+      "Output": ["(SUBSTRING(customer.c_phone FROM 1 FOR 2))", "count(*)", "sum(customer.c_acctbal)"],
+      "Group Key": ["(SUBSTRING(customer.c_phone FROM 1 FOR 2))"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Plain",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "InitPlan 1",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["avg(customer_1.c_acctbal)"],
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "customer",
+              "Schema": "public",
+              "Alias": "customer_1",
+              "Disabled": false,
+              "Output": ["customer_1.c_custkey", "customer_1.c_name", "customer_1.c_address", "customer_1.c_nationkey", "customer_1.c_phone", "customer_1.c_acctbal", "customer_1.c_mktsegment", "customer_1.c_comment"],
+              "Filter": "((customer_1.c_acctbal > 0.00) AND (SUBSTRING(customer_1.c_phone FROM 1 FOR 2) = ANY ('{13,31,23,29,30,18,17}'::text[])))"
+            }
+          ]
+        },
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["(SUBSTRING(customer.c_phone FROM 1 FOR 2))", "customer.c_acctbal"],
+          "Sort Key": ["(SUBSTRING(customer.c_phone FROM 1 FOR 2))"],
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Right Anti",
+              "Disabled": false,
+              "Output": ["SUBSTRING(customer.c_phone FROM 1 FOR 2)", "customer.c_acctbal"],
+              "Inner Unique": false,
+              "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Disabled": false,
+                  "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"]
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Output": ["customer.c_phone", "customer.c_acctbal", "customer.c_custkey"],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "customer",
+                      "Schema": "public",
+                      "Alias": "customer",
+                      "Disabled": false,
+                      "Output": ["customer.c_phone", "customer.c_acctbal", "customer.c_custkey"],
+                      "Filter": "((customer.c_acctbal > (InitPlan 1).col1) AND (SUBSTRING(customer.c_phone FROM 1 FOR 2) = ANY ('{13,31,23,29,30,18,17}'::text[])))"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,90 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 1143,
+          "Actual Loops": 1,
+          "Inner Unique": true,
+          "Hash Cond": "(orders.o_orderkey = lineitem.l_orderkey)",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 15000,
+              "Actual Loops": 1,
+              "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1143,
+              "Actual Loops": 1,
+              "Output": ["lineitem.l_orderkey"],
+              "Hash Buckets": 2048,
+              "Original Hash Buckets": 2048,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 61,
+              "Plans": [
+                {
+                  "Node Type": "Aggregate",
+                  "Strategy": "Hashed",
+                  "Partial Mode": "Simple",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 1143,
+                  "Actual Loops": 1,
+                  "Output": ["lineitem.l_orderkey"],
+                  "Group Key": ["lineitem.l_orderkey"],
+                  "HashAgg Batches": 1,
+                  "Peak Memory Usage": 129,
+                  "Disk Usage": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "lineitem",
+                      "Actual Rows": 1192,
+                      "Actual Loops": 1,
+                      "Output": ["lineitem.l_orderkey"],
+                      "Filter": "(lineitem.l_quantity > '49'::numeric)",
+                      "Rows Removed by Filter": 58983
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

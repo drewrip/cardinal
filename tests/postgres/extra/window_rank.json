@@ -1,0 +1,63 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Subquery Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Alias": "s",
+      "Actual Rows": 10.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["s.o_orderkey", "s.r"],
+      "Plans": [
+        {
+          "Node Type": "WindowAgg",
+          "Parent Relationship": "Subquery",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 10.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_orderkey", "rank() OVER w1", "orders.o_totalprice"],
+          "Window": "w1 AS (ORDER BY orders.o_totalprice ROWS UNBOUNDED PRECEDING)",
+          "Run Condition": "(rank() OVER w1 <= 10)",
+          "Storage": "Memory",
+          "Maximum Storage": 17,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 11.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_totalprice", "orders.o_orderkey"],
+              "Sort Key": ["orders.o_totalprice DESC"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 967,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 15000.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["orders.o_totalprice", "orders.o_orderkey"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

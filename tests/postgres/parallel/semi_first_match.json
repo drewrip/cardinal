@@ -1,0 +1,111 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Nested Loop",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Semi",
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Join Filter": "(nation.n_nationkey = supplier.s_nationkey)",
+          "Rows Removed by Join Filter": 12,
+          "Plans": [
+            {
+              "Node Type": "Gather",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["nation.n_nationkey"],
+              "Workers Planned": 1,
+              "Workers Launched": 1,
+              "Single Copy": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "nation",
+                  "Schema": "public",
+                  "Alias": "nation",
+                  "Actual Rows": 0.50,
+                  "Actual Loops": 2,
+                  "Disabled": false,
+                  "Output": ["nation.n_nationkey"],
+                  "Filter": "((nation.n_regionkey = 1) AND ((nation.n_name)::text = 'CANADA'::text))",
+                  "Rows Removed by Filter": 12,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "Node Type": "Gather",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 13.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["supplier.s_nationkey"],
+              "Workers Planned": 2,
+              "Workers Launched": 2,
+              "Single Copy": false,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "supplier",
+                  "Schema": "public",
+                  "Alias": "supplier",
+                  "Actual Rows": 7.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["supplier.s_nationkey"],
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 8.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

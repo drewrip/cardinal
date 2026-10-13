@@ -1,0 +1,127 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["(sum(lineitem.l_extendedprice) / 7.0)"],
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 0.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["lineitem.l_extendedprice"],
+          "Inner Unique": true,
+          "Hash Cond": "(lineitem.l_partkey = part.p_partkey)",
+          "Join Filter": "(lineitem.l_quantity < (SubPlan 1))",
+          "Rows Removed by Join Filter": 0,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem",
+              "Actual Rows": 1.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 0.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["part.p_partkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 8,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "part",
+                  "Schema": "public",
+                  "Alias": "part",
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["part.p_partkey"],
+                  "Filter": "(((part.p_brand)::text = 'Brand#23'::text) AND ((part.p_container)::text = 'MED BOX'::text))",
+                  "Rows Removed by Filter": 2000
+                }
+              ]
+            },
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Simple",
+              "Parent Relationship": "SubPlan",
+              "Subplan Name": "SubPlan 1",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 0,
+              "Actual Loops": 0,
+              "Disabled": false,
+              "Output": ["(0.2 * avg(lineitem_1.l_quantity))"],
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem_1",
+                  "Actual Rows": 0,
+                  "Actual Loops": 0,
+                  "Disabled": false,
+                  "Output": ["lineitem_1.l_orderkey", "lineitem_1.l_partkey", "lineitem_1.l_suppkey", "lineitem_1.l_linenumber", "lineitem_1.l_quantity", "lineitem_1.l_extendedprice", "lineitem_1.l_discount", "lineitem_1.l_tax", "lineitem_1.l_returnflag", "lineitem_1.l_linestatus", "lineitem_1.l_shipdate", "lineitem_1.l_commitdate", "lineitem_1.l_receiptdate", "lineitem_1.l_shipinstruct", "lineitem_1.l_shipmode", "lineitem_1.l_comment"],
+                  "Recheck Cond": "(lineitem_1.l_partkey = part.p_partkey)",
+                  "Rows Removed by Index Recheck": 0,
+                  "Exact Heap Blocks": 0,
+                  "Lossy Heap Blocks": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Index Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                      "Actual Rows": 0,
+                      "Actual Loops": 0,
+                      "Disabled": false,
+                      "Index Cond": "(lineitem_1.l_partkey = part.p_partkey)",
+                      "Index Searches": 0
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

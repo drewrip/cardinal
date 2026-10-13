@@ -1,0 +1,124 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))"],
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["lineitem.l_extendedprice", "lineitem.l_discount"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Single Copy": false,
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Actual Rows": 0.33,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["lineitem.l_extendedprice", "lineitem.l_discount"],
+              "Inner Unique": false,
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "part",
+                  "Schema": "public",
+                  "Alias": "part",
+                  "Actual Rows": 1.67,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["part.p_partkey", "part.p_name", "part.p_mfgr", "part.p_brand", "part.p_type", "part.p_size", "part.p_container", "part.p_retailprice", "part.p_comment"],
+                  "Filter": "((part.p_size >= 1) AND ((((part.p_brand)::text = 'Brand#12'::text) AND ((part.p_container)::text = ANY ('{\"SM CASE\",\"SM BOX\",\"SM PACK\",\"SM PKG\"}'::text[])) AND (part.p_size <= 5)) OR (((part.p_brand)::text = 'Brand#23'::text) AND ((part.p_container)::text = ANY ('{\"MED BAG\",\"MED BOX\",\"MED PKG\",\"MED PACK\"}'::text[])) AND (part.p_size <= 10)) OR (((part.p_brand)::text = 'Brand#34'::text) AND ((part.p_container)::text = ANY ('{\"LG CASE\",\"LG BOX\",\"LG PACK\",\"LG PKG\"}'::text[])) AND (part.p_size <= 15))))",
+                  "Rows Removed by Filter": 665,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Actual Rows": 0.20,
+                  "Actual Loops": 5,
+                  "Disabled": false,
+                  "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                  "Recheck Cond": "(lineitem.l_partkey = part.p_partkey)",
+                  "Rows Removed by Index Recheck": 0,
+                  "Filter": "(((lineitem.l_shipmode)::text = ANY ('{AIR,\"AIR REG\"}'::text[])) AND ((lineitem.l_shipinstruct)::text = 'DELIVER IN PERSON'::text) AND (((lineitem.l_quantity >= '1'::numeric) AND (lineitem.l_quantity <= '11'::numeric)) OR ((lineitem.l_quantity >= '10'::numeric) AND (lineitem.l_quantity <= '20'::numeric)) OR ((lineitem.l_quantity >= '20'::numeric) AND (lineitem.l_quantity <= '30'::numeric))) AND ((((part.p_brand)::text = 'Brand#12'::text) AND ((part.p_container)::text = ANY ('{\"SM CASE\",\"SM BOX\",\"SM PACK\",\"SM PKG\"}'::text[])) AND (lineitem.l_quantity >= '1'::numeric) AND (lineitem.l_quantity <= '11'::numeric) AND (part.p_size <= 5)) OR (((part.p_brand)::text = 'Brand#23'::text) AND ((part.p_container)::text = ANY ('{\"MED BAG\",\"MED BOX\",\"MED PKG\",\"MED PACK\"}'::text[])) AND (lineitem.l_quantity >= '10'::numeric) AND (lineitem.l_quantity <= '20'::numeric) AND (part.p_size <= 10)) OR (((part.p_brand)::text = 'Brand#34'::text) AND ((part.p_container)::text = ANY ('{\"LG CASE\",\"LG BOX\",\"LG PACK\",\"LG PKG\"}'::text[])) AND (lineitem.l_quantity >= '20'::numeric) AND (lineitem.l_quantity <= '30'::numeric) AND (part.p_size <= 15))))",
+                  "Rows Removed by Filter": 29,
+                  "Exact Heap Blocks": 144,
+                  "Lossy Heap Blocks": 0,
+                  "Workers": [
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Index Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                      "Actual Rows": 29.20,
+                      "Actual Loops": 5,
+                      "Disabled": false,
+                      "Index Cond": "(lineitem.l_partkey = part.p_partkey)",
+                      "Index Searches": 5,
+                      "Workers": [
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

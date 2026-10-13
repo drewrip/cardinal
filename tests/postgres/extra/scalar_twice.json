@@ -1,0 +1,90 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Plain",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "InitPlan 1",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["avg(lineitem_1.l_quantity)"],
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem_1",
+              "Actual Rows": 60175.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem_1.l_orderkey", "lineitem_1.l_partkey", "lineitem_1.l_suppkey", "lineitem_1.l_linenumber", "lineitem_1.l_quantity", "lineitem_1.l_extendedprice", "lineitem_1.l_discount", "lineitem_1.l_tax", "lineitem_1.l_returnflag", "lineitem_1.l_linestatus", "lineitem_1.l_shipdate", "lineitem_1.l_commitdate", "lineitem_1.l_receiptdate", "lineitem_1.l_shipinstruct", "lineitem_1.l_shipmode", "lineitem_1.l_comment"]
+            }
+          ]
+        },
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Plain",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "InitPlan 2",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["avg(lineitem_2.l_extendedprice)"],
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "lineitem",
+              "Schema": "public",
+              "Alias": "lineitem_2",
+              "Actual Rows": 60175.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["lineitem_2.l_orderkey", "lineitem_2.l_partkey", "lineitem_2.l_suppkey", "lineitem_2.l_linenumber", "lineitem_2.l_quantity", "lineitem_2.l_extendedprice", "lineitem_2.l_discount", "lineitem_2.l_tax", "lineitem_2.l_returnflag", "lineitem_2.l_linestatus", "lineitem_2.l_shipdate", "lineitem_2.l_commitdate", "lineitem_2.l_receiptdate", "lineitem_2.l_shipinstruct", "lineitem_2.l_shipmode", "lineitem_2.l_comment"]
+            }
+          ]
+        },
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "lineitem",
+          "Schema": "public",
+          "Alias": "lineitem",
+          "Actual Rows": 3592.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+          "Filter": "((lineitem.l_quantity > (InitPlan 1).col1) AND (lineitem.l_extendedprice < (InitPlan 2).col1))",
+          "Rows Removed by Filter": 56583
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

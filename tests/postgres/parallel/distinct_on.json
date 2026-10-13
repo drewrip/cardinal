@@ -1,0 +1,92 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Unique",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 960.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["o_custkey", "o_orderkey", "o_orderdate"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 3810.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["o_custkey", "o_orderkey", "o_orderdate"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1270.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["o_custkey", "o_orderkey", "o_orderdate"],
+              "Sort Key": ["orders.o_custkey", "orders.o_orderdate DESC"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 236,
+              "Sort Space Type": "Memory",
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory"
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 243.00,
+                  "Actual Loops": 1,
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 34,
+                  "Sort Space Type": "Memory"
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 1270.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["o_custkey", "o_orderkey", "o_orderdate"],
+                  "Filter": "(orders.o_totalprice > '200000'::numeric)",
+                  "Rows Removed by Filter": 3730,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 243.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

@@ -1,7 +1,9 @@
-//! Queries analyzed as DuckDB plans them, from a live `EXPLAIN (FORMAT JSON)`
+//! Queries analyzed as DuckDB and PostgreSQL plan them, from a live `EXPLAIN`
 //! of TPC-H at scale factor 0.01: each constant bound holds the query's true
-//! count, and limits, which DuckDB prints without their counts, bound the
-//! output as the query's clauses say. Needs the `duckdb` CLI.
+//! count, and limits, which both print without their counts, bound the
+//! output as the query's clauses say. Needs the `duckdb` CLI, and for
+//! PostgreSQL a server with the database `scripts/postgres_fixtures.sh`
+//! loads; each is skipped without.
 //!
 //! ```sh
 //! cargo test --test plan_truth -- --nocapture
@@ -10,9 +12,8 @@
 mod fixtures;
 mod live;
 
-use cardinal::observed::from_duckdb_explain;
 use fixtures::catalog;
-use live::{database, duckdb_available, run};
+use live::Engine;
 
 /// Each query, and the bound its limits should give, if any.
 const QUERIES: &[(&str, Option<u64>)] = &[
@@ -58,18 +59,40 @@ const QUERIES: &[(&str, Option<u64>)] = &[
 
 #[tokio::test]
 async fn bounds_hold() {
-    if !duckdb_available() {
-        eprintln!("skipped: no duckdb CLI");
-        return;
+    match Engine::duckdb() {
+        Some(engine) => check(engine).await,
+        None => eprintln!("skipped: no duckdb CLI"),
     }
-    let db = database();
+}
+
+/// The same queries, as PostgreSQL plans them. It prints no limit's count
+/// either, plans a limit under a sort as the two operators, and has no
+/// `LIMIT n PERCENT`.
+#[tokio::test]
+async fn bounds_hold_in_postgres() {
+    match Engine::postgres() {
+        Some(engine) => check(engine).await,
+        None => eprintln!("skipped: no PostgreSQL with the fixtures' database"),
+    }
+}
+
+async fn check(engine: Engine) {
     let catalog = catalog().await;
     let mut failures = vec![];
+    let mut planned = 0;
     for &(sql, expected) in QUERIES {
-        let out = run(&db, &format!("EXPLAIN (FORMAT JSON) {sql};"), &["-list", "-noheader"]).unwrap();
-        let json = &out[out.find('[').unwrap()..];
-        let truth: u64 = run(&db, &format!("select count(*) from ({sql});"), &["-list", "-noheader"]).unwrap().trim().parse().unwrap();
-        let plan = from_duckdb_explain(&catalog, "q", json, Some(sql)).unwrap();
+        let json = match engine.plan(sql) {
+            Ok(json) => json,
+            // DuckDB's own syntax.
+            Err(e) if engine.name() == "postgres" => {
+                println!("not planned: {sql}: {}", e.lines().next().unwrap_or_default());
+                continue;
+            }
+            Err(e) => panic!("{sql}: {e}"),
+        };
+        planned += 1;
+        let truth = engine.count(sql).unwrap();
+        let plan = engine.read_plan(&catalog, "q", &json, sql).unwrap();
         let a = cardinal::analyze_observed(&catalog, &plan, Default::default()).unwrap();
         let bound = a.bounds().unwrap().constant;
         println!("{truth} rows, X <= {bound:?}: {sql}");
@@ -79,5 +102,6 @@ async fn bounds_hold() {
             failures.push(format!("{sql}: X <= {bound:?}, not {expected:?}\n{plan}"));
         }
     }
+    assert!(planned > QUERIES.len() - 4, "only {planned} queries planned");
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

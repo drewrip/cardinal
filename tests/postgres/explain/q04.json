@@ -1,0 +1,74 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Disabled": false,
+      "Output": ["orders.o_orderpriority", "(count(*))"],
+      "Sort Key": ["orders.o_orderpriority"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Hashed",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["orders.o_orderpriority", "count(*)"],
+          "Group Key": ["orders.o_orderpriority"],
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Right Semi",
+              "Disabled": false,
+              "Output": ["orders.o_orderpriority"],
+              "Inner Unique": false,
+              "Hash Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Disabled": false,
+                  "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                  "Filter": "(lineitem.l_commitdate < lineitem.l_receiptdate)"
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Output": ["orders.o_orderpriority", "orders.o_orderkey"],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "orders",
+                      "Schema": "public",
+                      "Alias": "orders",
+                      "Disabled": false,
+                      "Output": ["orders.o_orderpriority", "orders.o_orderkey"],
+                      "Filter": "((orders.o_orderdate >= '1993-07-01'::date) AND (orders.o_orderdate < '1993-10-01 00:00:00'::timestamp without time zone))"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

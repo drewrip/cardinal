@@ -1,0 +1,149 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE big",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1704.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_orderkey", "orders.o_custkey"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Single Copy": false,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": true,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 568.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["orders.o_orderkey", "orders.o_custkey"],
+              "Filter": "(orders.o_totalprice > '250000'::numeric)",
+              "Rows Removed by Filter": 4432,
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 520.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 1024.00,
+                  "Actual Loops": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 278.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": true,
+          "Hash Cond": "(big.o_custkey = customer.c_custkey)",
+          "Plans": [
+            {
+              "Node Type": "CTE Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "big",
+              "Alias": "big",
+              "Actual Rows": 1704.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["big.o_orderkey", "big.o_custkey"],
+              "Storage": "Memory",
+              "Maximum Storage": 83
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 288.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["customer.c_custkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 20,
+              "Plans": [
+                {
+                  "Node Type": "Gather",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 288.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["customer.c_custkey"],
+                  "Workers Planned": 2,
+                  "Workers Launched": 2,
+                  "Single Copy": false,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Relation Name": "customer",
+                      "Schema": "public",
+                      "Alias": "customer",
+                      "Actual Rows": 96.00,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["customer.c_custkey"],
+                      "Filter": "((customer.c_mktsegment)::text = 'MACHINERY'::text)",
+                      "Rows Removed by Filter": 404,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

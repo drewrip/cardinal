@@ -1,0 +1,57 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Subquery Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Alias": "s",
+      "Actual Rows": 1000,
+      "Actual Loops": 1,
+      "Output": ["s.o_custkey", "s.o_orderkey"],
+      "Filter": "(s.rn = 1)",
+      "Rows Removed by Filter": 14000,
+      "Plans": [
+        {
+          "Node Type": "WindowAgg",
+          "Parent Relationship": "Subquery",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 15000,
+          "Actual Loops": 1,
+          "Output": ["orders.o_custkey", "orders.o_orderkey", "row_number() OVER (?)", "orders.o_orderdate"],
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 15000,
+              "Actual Loops": 1,
+              "Output": ["orders.o_custkey", "orders.o_orderkey", "orders.o_orderdate"],
+              "Sort Key": ["orders.o_custkey", "orders.o_orderdate DESC", "orders.o_orderkey"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 1556,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 15000,
+                  "Actual Loops": 1,
+                  "Output": ["orders.o_custkey", "orders.o_orderkey", "orders.o_orderdate"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

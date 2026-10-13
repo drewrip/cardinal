@@ -1,0 +1,87 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 3.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Single Copy": false,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["PARTIAL count(*)"],
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Actual Rows": 636.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["l_orderkey", "l_partkey", "l_suppkey", "l_linenumber", "l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate", "l_commitdate", "l_receiptdate", "l_shipinstruct", "l_shipmode", "l_comment"],
+                  "Filter": "((lineitem.l_comment IS NOT NULL) AND ((lineitem.l_shipinstruct)::text ~~* 'deliver%'::text) AND (lineitem.l_tax >= 0.02) AND (lineitem.l_tax <= 0.04) AND (COALESCE(lineitem.l_discount, '0'::numeric) > 0.05) AND ((lineitem.l_shipmode)::text <> 'AIR'::text))",
+                  "Rows Removed by Filter": 19422,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 408.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 545.00,
+                      "Actual Loops": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

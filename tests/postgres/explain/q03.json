@@ -1,0 +1,119 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Disabled": false,
+      "Output": ["lineitem.l_orderkey", "(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))", "orders.o_orderdate", "orders.o_shippriority"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["lineitem.l_orderkey", "(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))", "orders.o_orderdate", "orders.o_shippriority"],
+          "Sort Key": ["(sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))) DESC", "orders.o_orderdate"],
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Hashed",
+              "Partial Mode": "Simple",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Disabled": false,
+              "Output": ["lineitem.l_orderkey", "sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)))", "orders.o_orderdate", "orders.o_shippriority"],
+              "Group Key": ["lineitem.l_orderkey", "orders.o_orderdate", "orders.o_shippriority"],
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Disabled": false,
+                  "Output": ["lineitem.l_orderkey", "orders.o_orderdate", "orders.o_shippriority", "lineitem.l_extendedprice", "lineitem.l_discount"],
+                  "Inner Unique": false,
+                  "Hash Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "lineitem",
+                      "Disabled": false,
+                      "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                      "Filter": "(lineitem.l_shipdate > '1995-03-15'::date)"
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Disabled": false,
+                      "Output": ["orders.o_orderdate", "orders.o_shippriority", "orders.o_orderkey"],
+                      "Plans": [
+                        {
+                          "Node Type": "Hash Join",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Disabled": false,
+                          "Output": ["orders.o_orderdate", "orders.o_shippriority", "orders.o_orderkey"],
+                          "Inner Unique": false,
+                          "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "orders",
+                              "Schema": "public",
+                              "Alias": "orders",
+                              "Disabled": false,
+                              "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                              "Filter": "(orders.o_orderdate < '1995-03-15'::date)"
+                            },
+                            {
+                              "Node Type": "Hash",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Disabled": false,
+                              "Output": ["customer.c_custkey"],
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "customer",
+                                  "Schema": "public",
+                                  "Alias": "customer",
+                                  "Disabled": false,
+                                  "Output": ["customer.c_custkey"],
+                                  "Filter": "((customer.c_mktsegment)::text = 'BUILDING'::text)"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

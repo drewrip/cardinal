@@ -399,6 +399,13 @@ pub fn analyze_duckdb(catalog: &observed::Catalog, json: &str, sql: Option<&str>
     analyze_observed(catalog, &plan, options)
 }
 
+/// [`analyze_observed`] on PostgreSQL's plan for `sql`, as printed by
+/// `EXPLAIN (VERBOSE, FORMAT JSON)` (or with `ANALYZE`, too).
+pub fn analyze_postgres(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
+    let plan = observed::from_postgres_explain(catalog, "", json, sql)?;
+    analyze_observed(catalog, &plan, options)
+}
+
 /// Identity of a provider object. An address, not a pointer, so futures holding
 /// it stay `Send`.
 fn provider_ptr(p: &Arc<dyn TableProvider>) -> usize {

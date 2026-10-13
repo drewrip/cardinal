@@ -1,0 +1,169 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 3.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Single Copy": false,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["PARTIAL count(*)"],
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 1.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Actual Rows": 6370.00,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Inner Unique": false,
+                  "Hash Cond": "(l2.l_orderkey = l1.l_orderkey)",
+                  "Join Filter": "(l1.l_suppkey <> l2.l_suppkey)",
+                  "Rows Removed by Join Filter": 1653,
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 4497.00,
+                      "Actual Loops": 1
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 7052.00,
+                      "Actual Loops": 1
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "l2",
+                      "Actual Rows": 20058.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["l2.l_orderkey", "l2.l_partkey", "l2.l_suppkey", "l2.l_linenumber", "l2.l_quantity", "l2.l_extendedprice", "l2.l_discount", "l2.l_tax", "l2.l_returnflag", "l2.l_linestatus", "l2.l_shipdate", "l2.l_commitdate", "l2.l_receiptdate", "l2.l_shipinstruct", "l2.l_shipmode", "l2.l_comment"],
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 13777.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 22076.00,
+                          "Actual Loops": 1
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": true,
+                      "Async Capable": false,
+                      "Actual Rows": 1599.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["l1.l_orderkey", "l1.l_suppkey"],
+                      "Hash Buckets": 8192,
+                      "Original Hash Buckets": 8192,
+                      "Hash Batches": 1,
+                      "Original Hash Batches": 1,
+                      "Peak Memory Usage": 352,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 553.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 728.00,
+                          "Actual Loops": 1
+                        }
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "lineitem",
+                          "Schema": "public",
+                          "Alias": "l1",
+                          "Actual Rows": 1599.33,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["l1.l_orderkey", "l1.l_suppkey"],
+                          "Filter": "(l1.l_quantity < '5'::numeric)",
+                          "Rows Removed by Filter": 18459,
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 553.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 728.00,
+                              "Actual Loops": 1
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

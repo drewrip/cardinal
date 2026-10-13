@@ -10,13 +10,12 @@
 //! vouches for each join condition's columns.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{DFSchema, DataFusionError, JoinType};
 use datafusion::logical_expr::utils::split_conjunction_owned;
-use datafusion::logical_expr::{BinaryExpr, Expr, ExprSchemable, Operator};
+use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::sql::sqlparser::ast;
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
@@ -24,8 +23,8 @@ use serde_json::Value;
 
 use super::sql::QueryText;
 use super::{
-    Catalog, Lineage, ONode, ObservedPlan, Op, OutCol, Pred, RuntimeFilter, base_table, normalize, qualified,
-    relation, requalify,
+    Catalog, Lineage, ONode, ObservedPlan, Op, OutCol, Pred, RuntimeFilter, base_table, qualified, relation,
+    requalify, simplify, type_of,
 };
 use crate::{Error, Result};
 
@@ -141,7 +140,8 @@ impl Builder<'_> {
         }
         let scanned = v.get("operator_rows_scanned").and_then(Value::as_u64);
         let cut_short = matches!(op, Op::Scan { .. }) && scanned.is_some_and(|s| s < rows);
-        self.nodes.push(ONode { op, rows, children: kids, columns, ordered, engine_op: ty.to_string(), cut_short });
+        let counted = self.counted;
+        self.nodes.push(ONode { op, rows, counted, children: kids, columns, ordered, blocking: false, engine_op: ty.to_string(), cut_short });
         Ok(self.nodes.len() - 1)
     }
 
@@ -184,9 +184,11 @@ impl Builder<'_> {
         let node = ONode {
             op: Op::Reuse { suffix, checked: reported.is_some() },
             rows: reported.unwrap_or(self.nodes[of].rows),
+            counted: self.counted,
             children: vec![of],
             columns,
             ordered: self.nodes[of].ordered,
+            blocking: false,
             engine_op: engine_op.to_string(),
             cut_short: false,
         };
@@ -219,9 +221,11 @@ impl Builder<'_> {
                 values: vec![],
             },
             rows: self.rows(distinct, "delim distinct")?,
+            counted: self.counted,
             children: vec![copy],
             columns: keys.clone(),
             ordered: true,
+            blocking: false,
             engine_op: operator(distinct).unwrap_or("HASH_GROUP_BY").to_string(),
             cut_short: false,
         };
@@ -511,6 +515,11 @@ impl Builder<'_> {
         // sides' columns. Unread, the join would read as one on nothing.
         let both: Vec<OutCol> = l.columns.iter().chain(&r.columns).cloned().collect();
         on.extend(strings(info, "Condition").iter().flat_map(|c| self.pred(c, &both, false, false)));
+        // Only a cross product joins on nothing: a join that printed no
+        // condition has one.
+        if on.is_empty() {
+            on.push(Pred { expr: None, text: "an unprinted condition".into(), optional: false });
+        }
         let columns = match kind {
             JoinType::LeftSemi | JoinType::LeftAnti => l.columns.clone(),
             JoinType::RightSemi | JoinType::RightAnti => r.columns.clone(),
@@ -818,30 +827,12 @@ impl Builder<'_> {
         out
     }
 
-    /// The type of `e`, an expression over scan instances.
     fn type_of(&self, e: &Expr) -> Option<DataType> {
-        requalify(e, &|r| base_table(r).map(str::to_string)).get_type(self.catalog.all.as_ref()).ok()
+        type_of(self.catalog, e)
     }
 
-    /// `e` normalized against the schemas of the instances it reads, and of
-    /// the aggregates whose values it reads.
     fn simplify(&self, e: Expr) -> Expr {
-        normalize(e, &|r| match base_table(r) {
-            Some(t) => self.catalog.tables.get(t).cloned(),
-            None => self.values(r),
-        })
-    }
-
-    /// The value columns of aggregate `@k`, with their types.
-    fn values(&self, relation: &str) -> Option<SchemaRef> {
-        let node = self.nodes.get(relation.strip_prefix('@')?.parse::<usize>().ok()?)?;
-        let Op::Aggregate { keys, values } = &node.op else { return None };
-        let fields: Vec<Field> = node.columns[keys.len()..]
-            .iter()
-            .zip(values)
-            .filter_map(|(c, v)| Some(Field::new(&c.name, self.type_of(v.as_ref()?)?, true)))
-            .collect();
-        Some(Arc::new(Schema::new(fields)))
+        simplify(self.catalog, &self.nodes, e)
     }
 }
 

@@ -1,0 +1,85 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Nested Loop",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 2807.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "partsupp",
+              "Schema": "public",
+              "Alias": "partsupp",
+              "Actual Rows": 381.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["partsupp.ps_partkey", "partsupp.ps_suppkey", "partsupp.ps_availqty", "partsupp.ps_supplycost", "partsupp.ps_comment"],
+              "Filter": "(partsupp.ps_availqty < 500)",
+              "Rows Removed by Filter": 7619
+            },
+            {
+              "Node Type": "Memoize",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 7.37,
+              "Actual Loops": 381,
+              "Disabled": false,
+              "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+              "Cache Key": "partsupp.ps_partkey, partsupp.ps_suppkey",
+              "Cache Mode": "logical",
+              "Cache Hits": 0,
+              "Cache Misses": 381,
+              "Cache Evictions": 0,
+              "Cache Overflows": 0,
+              "Peak Memory Usage": 162,
+              "Plans": [
+                {
+                  "Node Type": "Index Only Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Scan Direction": "Forward",
+                  "Index Name": "lineitem_l_partkey_l_suppkey_idx",
+                  "Relation Name": "lineitem",
+                  "Schema": "public",
+                  "Alias": "lineitem",
+                  "Actual Rows": 7.37,
+                  "Actual Loops": 381,
+                  "Disabled": false,
+                  "Output": ["lineitem.l_partkey", "lineitem.l_suppkey"],
+                  "Index Cond": "((lineitem.l_partkey = partsupp.ps_partkey) AND (lineitem.l_suppkey = partsupp.ps_suppkey))",
+                  "Rows Removed by Index Recheck": 0,
+                  "Heap Fetches": 0,
+                  "Index Searches": 381
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

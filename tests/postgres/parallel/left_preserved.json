@@ -1,0 +1,115 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Gather",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 715.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["customer.c_custkey", "orders.o_orderkey"],
+      "Workers Planned": 2,
+      "Workers Launched": 2,
+      "Single Copy": false,
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": true,
+          "Async Capable": false,
+          "Join Type": "Right",
+          "Actual Rows": 238.33,
+          "Actual Loops": 3,
+          "Disabled": false,
+          "Output": ["customer.c_custkey", "orders.o_orderkey"],
+          "Inner Unique": true,
+          "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+          "Workers": [
+            {
+              "Worker Number": 0,
+              "Actual Rows": 498.00,
+              "Actual Loops": 1
+            },
+            {
+              "Worker Number": 1,
+              "Actual Rows": 0.00,
+              "Actual Loops": 1
+            }
+          ],
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": true,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 266.00,
+              "Actual Loops": 2,
+              "Disabled": false,
+              "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+              "Filter": "(orders.o_totalprice > '300000'::numeric)",
+              "Rows Removed by Filter": 7234,
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 8.00,
+                  "Actual Loops": 1
+                }
+              ]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": true,
+              "Async Capable": false,
+              "Actual Rows": 219.67,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["customer.c_custkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 40,
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "customer",
+                  "Schema": "public",
+                  "Alias": "customer",
+                  "Actual Rows": 659.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["customer.c_custkey"],
+                  "Filter": "(customer.c_acctbal > '5000'::numeric)",
+                  "Rows Removed by Filter": 841,
+                  "Workers": [
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

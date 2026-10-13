@@ -1,0 +1,82 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "orders",
+          "Schema": "public",
+          "Alias": "o",
+          "Actual Rows": 7148.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["o.o_orderkey", "o.o_custkey", "o.o_orderstatus", "o.o_totalprice", "o.o_orderdate", "o.o_orderpriority", "o.o_clerk", "o.o_shippriority", "o.o_comment"],
+          "Filter": "(o.o_totalprice > (SubPlan 1))",
+          "Rows Removed by Filter": 7852,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Simple",
+              "Parent Relationship": "SubPlan",
+              "Subplan Name": "SubPlan 1",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.00,
+              "Actual Loops": 15000,
+              "Disabled": false,
+              "Output": ["avg(o2.o_totalprice)"],
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "o2",
+                  "Actual Rows": 17.56,
+                  "Actual Loops": 15000,
+                  "Disabled": false,
+                  "Output": ["o2.o_orderkey", "o2.o_custkey", "o2.o_orderstatus", "o2.o_totalprice", "o2.o_orderdate", "o2.o_orderpriority", "o2.o_clerk", "o2.o_shippriority", "o2.o_comment"],
+                  "Recheck Cond": "(o2.o_custkey = o.o_custkey)",
+                  "Rows Removed by Index Recheck": 0,
+                  "Exact Heap Blocks": 254550,
+                  "Lossy Heap Blocks": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Index Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Index Name": "orders_o_custkey_idx",
+                      "Actual Rows": 17.56,
+                      "Actual Loops": 15000,
+                      "Disabled": false,
+                      "Index Cond": "(o2.o_custkey = o.o_custkey)",
+                      "Index Searches": 15000
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

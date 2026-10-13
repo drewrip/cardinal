@@ -1,0 +1,93 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Nested Loop",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Inner",
+      "Actual Rows": 76.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["c.c_custkey", "o.o_orderkey"],
+      "Inner Unique": false,
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "customer",
+          "Schema": "public",
+          "Alias": "c",
+          "Actual Rows": 59.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["c.c_custkey", "c.c_name", "c.c_address", "c.c_nationkey", "c.c_phone", "c.c_acctbal", "c.c_mktsegment", "c.c_comment"],
+          "Filter": "(c.c_acctbal > '9500'::numeric)",
+          "Rows Removed by Filter": 1441
+        },
+        {
+          "Node Type": "Limit",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 1.29,
+          "Actual Loops": 59,
+          "Disabled": false,
+          "Output": ["o.o_orderkey", "o.o_totalprice"],
+          "Plans": [
+            {
+              "Node Type": "Sort",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.29,
+              "Actual Loops": 59,
+              "Disabled": false,
+              "Output": ["o.o_orderkey", "o.o_totalprice"],
+              "Sort Key": ["o.o_totalprice DESC"],
+              "Sort Method": "quicksort",
+              "Sort Space Used": 25,
+              "Sort Space Type": "Memory",
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "o",
+                  "Actual Rows": 9.31,
+                  "Actual Loops": 59,
+                  "Disabled": false,
+                  "Output": ["o.o_orderkey", "o.o_totalprice"],
+                  "Recheck Cond": "(o.o_custkey = c.c_custkey)",
+                  "Rows Removed by Index Recheck": 0,
+                  "Exact Heap Blocks": 533,
+                  "Lossy Heap Blocks": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Index Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Index Name": "orders_o_custkey_idx",
+                      "Actual Rows": 9.31,
+                      "Actual Loops": 59,
+                      "Disabled": false,
+                      "Index Cond": "(o.o_custkey = c.c_custkey)",
+                      "Index Searches": 59
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

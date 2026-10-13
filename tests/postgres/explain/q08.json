@@ -1,0 +1,279 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Disabled": false,
+      "Output": ["(EXTRACT(year FROM orders.o_orderdate))", "(sum(CASE WHEN ((n2.n_name)::text = 'BRAZIL'::text) THEN (lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount)) ELSE '0'::numeric END) / sum((lineitem.l_extendedprice * ('1'::numeric - lineitem.l_discount))))"],
+      "Group Key": ["(EXTRACT(year FROM orders.o_orderdate))"],
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Disabled": false,
+          "Output": ["(EXTRACT(year FROM orders.o_orderdate))", "n2.n_name", "lineitem.l_extendedprice", "lineitem.l_discount"],
+          "Sort Key": ["(EXTRACT(year FROM orders.o_orderdate))"],
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Disabled": false,
+              "Output": ["EXTRACT(year FROM orders.o_orderdate)", "n2.n_name", "lineitem.l_extendedprice", "lineitem.l_discount"],
+              "Inner Unique": false,
+              "Hash Cond": "(supplier.s_nationkey = n2.n_nationkey)",
+              "Plans": [
+                {
+                  "Node Type": "Hash Join",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Disabled": false,
+                  "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "supplier.s_nationkey", "orders.o_orderdate"],
+                  "Inner Unique": false,
+                  "Hash Cond": "(lineitem.l_suppkey = supplier.s_suppkey)",
+                  "Plans": [
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Disabled": false,
+                      "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "orders.o_orderdate"],
+                      "Inner Unique": false,
+                      "Hash Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+                      "Plans": [
+                        {
+                          "Node Type": "Hash Join",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Join Type": "Inner",
+                          "Disabled": false,
+                          "Output": ["lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_suppkey", "lineitem.l_orderkey"],
+                          "Inner Unique": false,
+                          "Hash Cond": "(lineitem.l_partkey = part.p_partkey)",
+                          "Plans": [
+                            {
+                              "Node Type": "Seq Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "lineitem",
+                              "Schema": "public",
+                              "Alias": "lineitem",
+                              "Disabled": false,
+                              "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"]
+                            },
+                            {
+                              "Node Type": "Hash",
+                              "Parent Relationship": "Inner",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Disabled": false,
+                              "Output": ["part.p_partkey"],
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "part",
+                                  "Schema": "public",
+                                  "Alias": "part",
+                                  "Disabled": false,
+                                  "Output": ["part.p_partkey"],
+                                  "Filter": "((part.p_type)::text = 'ECONOMY ANODIZED STEEL'::text)"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Disabled": false,
+                          "Output": ["orders.o_orderdate", "orders.o_orderkey"],
+                          "Plans": [
+                            {
+                              "Node Type": "Hash Join",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Join Type": "Inner",
+                              "Disabled": false,
+                              "Output": ["orders.o_orderdate", "orders.o_orderkey"],
+                              "Inner Unique": false,
+                              "Hash Cond": "(orders.o_custkey = customer.c_custkey)",
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Relation Name": "orders",
+                                  "Schema": "public",
+                                  "Alias": "orders",
+                                  "Disabled": false,
+                                  "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                                  "Filter": "((orders.o_orderdate >= '1995-01-01'::date) AND (orders.o_orderdate <= '1996-12-31'::date))"
+                                },
+                                {
+                                  "Node Type": "Hash",
+                                  "Parent Relationship": "Inner",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Disabled": false,
+                                  "Output": ["customer.c_custkey"],
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Hash Join",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Join Type": "Inner",
+                                      "Disabled": false,
+                                      "Output": ["customer.c_custkey"],
+                                      "Inner Unique": false,
+                                      "Hash Cond": "(customer.c_nationkey = n1.n_nationkey)",
+                                      "Plans": [
+                                        {
+                                          "Node Type": "Seq Scan",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Relation Name": "customer",
+                                          "Schema": "public",
+                                          "Alias": "customer",
+                                          "Disabled": false,
+                                          "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"]
+                                        },
+                                        {
+                                          "Node Type": "Hash",
+                                          "Parent Relationship": "Inner",
+                                          "Parallel Aware": false,
+                                          "Async Capable": false,
+                                          "Disabled": false,
+                                          "Output": ["n1.n_nationkey"],
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Hash Join",
+                                              "Parent Relationship": "Outer",
+                                              "Parallel Aware": false,
+                                              "Async Capable": false,
+                                              "Join Type": "Inner",
+                                              "Disabled": false,
+                                              "Output": ["n1.n_nationkey"],
+                                              "Inner Unique": false,
+                                              "Hash Cond": "(n1.n_regionkey = region.r_regionkey)",
+                                              "Plans": [
+                                                {
+                                                  "Node Type": "Seq Scan",
+                                                  "Parent Relationship": "Outer",
+                                                  "Parallel Aware": false,
+                                                  "Async Capable": false,
+                                                  "Relation Name": "nation",
+                                                  "Schema": "public",
+                                                  "Alias": "n1",
+                                                  "Disabled": false,
+                                                  "Output": ["n1.n_nationkey", "n1.n_name", "n1.n_regionkey", "n1.n_comment"]
+                                                },
+                                                {
+                                                  "Node Type": "Hash",
+                                                  "Parent Relationship": "Inner",
+                                                  "Parallel Aware": false,
+                                                  "Async Capable": false,
+                                                  "Disabled": false,
+                                                  "Output": ["region.r_regionkey"],
+                                                  "Plans": [
+                                                    {
+                                                      "Node Type": "Seq Scan",
+                                                      "Parent Relationship": "Outer",
+                                                      "Parallel Aware": false,
+                                                      "Async Capable": false,
+                                                      "Relation Name": "region",
+                                                      "Schema": "public",
+                                                      "Alias": "region",
+                                                      "Disabled": false,
+                                                      "Output": ["region.r_regionkey"],
+                                                      "Filter": "((region.r_name)::text = 'AMERICA'::text)"
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Disabled": false,
+                      "Output": ["supplier.s_suppkey", "supplier.s_nationkey"],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "supplier",
+                          "Schema": "public",
+                          "Alias": "supplier",
+                          "Disabled": false,
+                          "Output": ["supplier.s_suppkey", "supplier.s_nationkey"]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Output": ["n2.n_name", "n2.n_nationkey"],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "nation",
+                      "Schema": "public",
+                      "Alias": "n2",
+                      "Disabled": false,
+                      "Output": ["n2.n_name", "n2.n_nationkey"]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

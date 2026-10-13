@@ -13,7 +13,7 @@ use std::ops::ControlFlow;
 use datafusion::sql::sqlparser::ast::{
     self, BinaryOperator, Expr, Query, SelectItem, SetExpr, TableFactor, Visit, Visitor, visit_expressions,
 };
-use datafusion::sql::sqlparser::dialect::DuckDbDialect;
+use datafusion::sql::sqlparser::dialect::{Dialect, DuckDbDialect};
 use datafusion::sql::sqlparser::parser::Parser;
 
 use super::Catalog;
@@ -39,6 +39,9 @@ pub struct QueryText {
     /// Each `LIMIT` (or `FETCH`) clause's row count, `None` if not a
     /// constant (`LIMIT ALL`, an expression, a percentage).
     limits: Vec<Option<u64>>,
+    /// The rows each of those clauses skips first (its `OFFSET`), `None` if
+    /// not a constant.
+    offsets: Vec<Option<u64>>,
     /// Each alias of a table the query reads more than once: the table, and
     /// the columns of tables read once its columns equal, as (its column,
     /// `table.column`). What tells its instance in a plan apart.
@@ -58,13 +61,25 @@ pub struct QueryText {
     /// Every comparison the query makes between base columns, as (column,
     /// operator, column), each column as `inner` names it.
     direct: HashSet<(String, String, String)>,
+    /// The column names of each CTE and derived table, in order, by its
+    /// name: of those every relation so named agrees on.
+    relations: HashMap<String, Vec<String>>,
+    /// Whether some `SELECT` is `DISTINCT ON`.
+    distinct_on: bool,
+    /// Every window function the query calls.
+    window_functions: Vec<Expr>,
 }
 
 impl QueryText {
     /// Reads `sql`, with any leading `EXPLAIN (...)` dropped. `None` if it
     /// does not parse.
     pub fn parse(catalog: &Catalog, sql: &str) -> Option<QueryText> {
-        let statements = Parser::parse_sql(&DuckDbDialect {}, strip_explain(sql)).ok()?;
+        QueryText::parse_in(catalog, sql, &DuckDbDialect {})
+    }
+
+    /// [`QueryText::parse`], for a query in `dialect`.
+    pub fn parse_in(catalog: &Catalog, sql: &str, dialect: &dyn Dialect) -> Option<QueryText> {
+        let statements = Parser::parse_sql(dialect, strip_explain(sql)).ok()?;
         let mut scan = Scan::default();
         let _ = statements.visit(&mut scan);
         let tables: HashSet<&String> = scan.tables.values().collect();
@@ -113,7 +128,17 @@ impl QueryText {
             })
         };
 
-        let mut q = QueryText { limits: scan.limits.clone(), ..Default::default() };
+        let mut q = QueryText {
+            limits: scan.limits.clone(),
+            offsets: scan.offsets.clone(),
+            distinct_on: scan.distinct_on,
+            ..Default::default()
+        };
+        for e in &scan.exprs {
+            if matches!(e, Expr::Function(f) if f.over.is_some()) && !q.window_functions.contains(e) {
+                q.window_functions.push(e.clone());
+            }
+        }
         // Aliases of tables read more than once, and their equalities with
         // columns of tables read once.
         for (alias, table) in &scan.tables {
@@ -232,6 +257,14 @@ impl QueryText {
         }
         q.compared.extend(scoped.compared);
         q.class = classes.classes();
+        q.relations = scoped
+            .named
+            .into_iter()
+            .filter_map(|(name, mut columns)| {
+                let first = columns.pop()?;
+                columns.iter().all(|c| *c == first).then_some((name, first))
+            })
+            .collect();
 
         let mut bound = HashMap::<String, HashSet<String>>::new();
         for (alias, e) in &scan.aliases {
@@ -328,10 +361,45 @@ impl QueryText {
         matches!(&e, Expr::Function(f) if f.over.is_some()).then(|| window(&e))
     }
 
+    /// The column names of the CTE or derived table `name`, in order, if
+    /// every relation the query so names has the same.
+    pub fn relation_columns(&self, name: &str) -> Option<&[String]> {
+        self.relations.get(&name.to_lowercase()).map(Vec::as_slice)
+    }
+
+    /// The definition (`PARTITION BY ... ORDER BY ...`) of the window the
+    /// query's one call of the window function `call` (`row_number()`) runs
+    /// over, if it calls one so, and defines its window there.
+    pub fn window_of(&self, call: &Expr) -> Option<ast::WindowSpec> {
+        let call = plain(call).to_lowercase();
+        let mut found = self.window_functions.iter().filter_map(|e| {
+            let Expr::Function(f) = e else { return None };
+            let Some(ast::WindowType::WindowSpec(spec)) = &f.over else { return None };
+            let mut bare = f.clone();
+            bare.over = None;
+            (plain(&Expr::Function(bare)).to_lowercase() == call && spec.window_name.is_none()).then_some(spec)
+        });
+        match (found.next(), found.next()) {
+            (Some(spec), None) => Some(spec.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether some `SELECT` of the query is `DISTINCT ON`.
+    pub fn distinct_on(&self) -> bool {
+        self.distinct_on
+    }
+
     /// The query's `LIMIT` (and `FETCH`) clauses: each one's row count, or
     /// `None` for one that is not a constant.
     pub fn limits(&self) -> &[Option<u64>] {
         &self.limits
+    }
+
+    /// The rows each clause of [`QueryText::limits`] skips first: its
+    /// `OFFSET`, 0 without one, or `None` for one that is not a constant.
+    pub fn offsets(&self) -> &[Option<u64>] {
+        &self.offsets
     }
 
     /// Whether the query itself compares base columns `a` and `b` with
@@ -389,7 +457,7 @@ fn unnested(mut e: &Expr) -> &Expr {
 
 /// `e` as an engine prints it, compared: without qualifiers, parentheses or
 /// case in names.
-fn plain(e: &Expr) -> String {
+pub(super) fn plain(e: &Expr) -> String {
     let mut e = e.clone();
     let _ = ast::visit_expressions_mut(&mut e, |e| {
         match e {
@@ -479,6 +547,8 @@ struct Scan {
     aliases: Vec<(String, Expr)>,
     comparisons: Vec<(Expr, BinaryOperator, Expr)>,
     limits: Vec<Option<u64>>,
+    offsets: Vec<Option<u64>>,
+    distinct_on: bool,
     /// Every expression.
     exprs: Vec<Expr>,
 }
@@ -504,22 +574,37 @@ impl Visitor for Scan {
             },
             _ => None,
         };
+        let skipped = |offset: &Option<ast::Offset>| offset.as_ref().map_or(Some(0), |o| count(&o.value));
         match &query.limit_clause {
-            Some(ast::LimitClause::LimitOffset { limit: Some(l), limit_by, .. }) if limit_by.is_empty() => {
-                self.limits.push(count(l))
+            Some(ast::LimitClause::LimitOffset { limit: Some(l), limit_by, offset }) if limit_by.is_empty() => {
+                self.limits.push(count(l));
+                self.offsets.push(skipped(offset));
             }
             // `LIMIT ALL`, with only an offset, keeps every row after it.
             Some(ast::LimitClause::LimitOffset { limit: None, limit_by, .. }) if limit_by.is_empty() => {}
-            Some(ast::LimitClause::OffsetCommaLimit { limit, .. }) => self.limits.push(count(limit)),
-            Some(_) => self.limits.push(None),
+            Some(ast::LimitClause::OffsetCommaLimit { limit, offset }) => {
+                self.limits.push(count(limit));
+                self.offsets.push(count(offset));
+            }
+            Some(_) => {
+                self.limits.push(None);
+                self.offsets.push(None);
+            }
             None => {}
         }
         if let Some(f) = &query.fetch {
             self.limits.push(f.quantity.as_ref().filter(|_| !f.percent && !f.with_ties).and_then(count));
+            // `OFFSET k FETCH FIRST n ROWS ONLY`.
+            self.offsets.push(match &query.limit_clause {
+                Some(ast::LimitClause::LimitOffset { limit: None, offset, .. }) => skipped(offset),
+                None => Some(0),
+                Some(_) => None,
+            });
         }
         let mut found = vec![];
         selects(&query.body, &mut found);
         for s in found {
+            self.distinct_on |= matches!(s.distinct, Some(ast::Distinct::On(_)));
             for item in &s.projection {
                 if let SelectItem::ExprWithAlias { expr, alias } = item {
                     self.aliases.push((alias.value.to_lowercase(), expr.clone()));
@@ -620,6 +705,9 @@ impl UnionFind {
 #[derive(Debug, Clone, Default)]
 struct Rel {
     columns: Vec<(String, Option<String>)>,
+    /// Whether it has columns not listed: those of a relation whose columns
+    /// are not known, which a `*` reads.
+    open: bool,
 }
 
 impl Rel {
@@ -671,17 +759,27 @@ struct Scoped<'a> {
     comparisons: Vec<Comparison>,
     /// The base columns each comparison reads.
     compared: Vec<BTreeSet<String>>,
+    /// The column names of every CTE and derived table, by its name.
+    named: HashMap<String, Vec<Vec<String>>>,
 }
 
 impl<'a> Scoped<'a> {
     fn new(catalog: &'a Catalog) -> Self {
-        Scoped { catalog, ctes: vec![], scopes: vec![], comparisons: vec![], compared: vec![] }
+        Scoped { catalog, ctes: vec![], scopes: vec![], comparisons: vec![], compared: vec![], named: HashMap::new() }
+    }
+
+    /// Notes the columns of the CTE or derived table `name`: none, so that
+    /// it has no known list, if not all are known.
+    fn name(&mut self, name: &str, rel: &Rel) {
+        let columns = if rel.open { vec![] } else { rel.columns.iter().map(|(n, _)| n.clone()).collect() };
+        self.named.entry(name.to_string()).or_default().push(columns);
     }
 
     fn query(&mut self, q: &Query) -> Rel {
         self.ctes.push(HashMap::new());
         for cte in q.with.iter().flat_map(|w| &w.cte_tables) {
             let rel = renamed(self.query(&cte.query), &cte.alias);
+            self.name(&cte.alias.name.value.to_lowercase(), &rel);
             self.ctes.last_mut().unwrap().insert(cte.alias.name.value.to_lowercase(), rel);
         }
         let rel = self.set_expr(&q.body);
@@ -698,9 +796,9 @@ impl<'a> Scoped<'a> {
             SetExpr::SetOperation { left, right, .. } => {
                 let l = self.set_expr(left);
                 self.set_expr(right);
-                Rel { columns: l.columns.into_iter().map(|(n, _)| (n, None)).collect() }
+                Rel { columns: l.columns.into_iter().map(|(n, _)| (n, None)).collect(), open: l.open }
             }
-            _ => Rel::default(),
+            _ => Rel { columns: vec![], open: true },
         }
     }
 
@@ -724,6 +822,7 @@ impl<'a> Scoped<'a> {
             self.expr(e, false);
         }
         let mut columns = vec![];
+        let mut open = false;
         for item in &s.projection {
             match item {
                 SelectItem::UnnamedExpr(e) => {
@@ -738,22 +837,27 @@ impl<'a> Scoped<'a> {
                 // A `USING` column once, as the relation it names.
                 SelectItem::Wildcard(_) => {
                     for r in self.scopes.last().unwrap() {
+                        open |= r.rel.open;
                         columns.extend(r.rel.columns.iter().filter(|(n, _)| !r.hidden.contains(n)).cloned());
                     }
                 }
                 SelectItem::QualifiedWildcard(ast::SelectItemQualifiedWildcardKind::ObjectName(n), _) => {
                     let q = n.0.last().map(|p| p.to_string().trim_matches('"').to_lowercase()).unwrap_or_default();
+                    let mut found = false;
                     for r in self.scopes.last().unwrap() {
                         if r.name == q {
+                            found = true;
+                            open |= r.rel.open;
                             columns.extend(r.rel.columns.iter().cloned());
                         }
                     }
+                    open |= !found;
                 }
-                _ => {}
+                _ => open = true,
             }
         }
         self.scopes.pop();
-        Rel { columns }
+        Rel { columns, open }
     }
 
     /// Adds the relations of `twj` to `scope`, its `ON` conditions to `on`
@@ -818,8 +922,9 @@ impl<'a> Scoped<'a> {
                     (Some(rel), _) => rel,
                     (None, Some(cols)) => Rel {
                         columns: cols.into_iter().map(|c| (c.to_lowercase(), Some(format!("{table}.{}", c.to_lowercase())))).collect(),
+                        open: false,
                     },
-                    (None, None) => Rel::default(),
+                    (None, None) => Rel { columns: vec![], open: true },
                 };
                 scope.push(match alias {
                     Some(a) => entry(a.name.value.to_lowercase(), renamed(rel, a)),
@@ -829,13 +934,17 @@ impl<'a> Scoped<'a> {
             TableFactor::Derived { subquery, alias, .. } => {
                 // A derived table sees the enclosing scopes, not its siblings.
                 let rel = self.query(subquery);
+                if let Some(a) = alias {
+                    self.name(&a.name.value.to_lowercase(), &renamed(rel.clone(), a));
+                }
                 scope.push(match alias {
                     Some(a) => entry(a.name.value.to_lowercase(), renamed(rel, a)),
                     None => entry(String::new(), rel),
                 });
             }
             TableFactor::NestedJoin { table_with_joins, .. } => self.from(table_with_joins, scope, on),
-            _ => {}
+            // A relation whose columns are not known (a table function).
+            _ => scope.push(entry(String::new(), Rel { columns: vec![], open: true })),
         }
     }
 

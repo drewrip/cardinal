@@ -198,3 +198,36 @@ async fn duckdb_plans() {
     }
     println!("{simple} of {required} selectivities are simple");
 }
+
+#[tokio::test]
+async fn postgres_plans() {
+    let catalog = fixtures::catalog().await;
+    let options = || Options { selectivity: true, foreign_keys: fixtures::foreign_keys(), ..Default::default() };
+    let (mut simple, mut required) = (0, 0);
+    for plan in fixtures::pg_plans("tpch").await {
+        let a = cardinal::analyze_observed(&catalog, &plan, options()).unwrap();
+        let out = a.simple_selectivities().unwrap();
+        println!("{}\n  {}", plan.name, a.selectivity.as_ref().unwrap());
+        for s in &out {
+            println!("    {s}");
+        }
+        simple += out.iter().filter(|s| s.simple.is_ok()).count();
+        required += out.len();
+    }
+    println!("{simple} of {required} selectivities are simple");
+}
+
+#[tokio::test]
+async fn a_quoted_date_part_reads_bare() {
+    let ctx = context().await;
+    let sql = "CREATE TABLE visits AS SELECT * FROM (VALUES (1, DATE '2024-01-05'), (2, DATE '2024-01-20'), (3, DATE '2024-03-02')) AS t(id, day)";
+    ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    for (sql, part) in [
+        ("SELECT extract('month' FROM day) AS m, count(*) FROM visits GROUP BY 1", "month"),
+        ("SELECT extract(month FROM day) AS m, count(*) FROM visits GROUP BY 1", "MONTH"),
+    ] {
+        let out = checked(&ctx, sql, vec![]).await;
+        assert_eq!(shapes(&out), [Some((Distinct, vec!["visits"]))], "{sql}");
+        assert_eq!(out[0].simple.as_ref().unwrap().fact.to_string(), format!("ndv(date_part('{part}', visits.\"day\") | visits)"));
+    }
+}

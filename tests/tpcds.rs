@@ -9,8 +9,16 @@
 //! counts and bounds too (`Pinned`). Each must hold the query's true row
 //! count, read off its own DuckDB profile, and no fact may be rejected.
 //!
-//! Needs the `duckdb` CLI with the `tpcds` extension; skipped without it.
-//! `CARDINAL_TPCDS_SF` sets the scale factor (default 1).
+//! The same runs in PostgreSQL, over a copy of the data DuckDB generates
+//! (`cardinal_tpcds_sf{N}`, made once through DuckDB's `postgres`
+//! extension) and with DuckDB's text of the queries: each profiled as
+//! PostgreSQL plans it, with hash joins only, and with merge joins. What it
+//! does not run, or not within the time limit, is skipped.
+//!
+//! Needs the `duckdb` CLI with the `tpcds` extension, and for PostgreSQL a
+//! server `psql` connects to; each is skipped without.
+//! `CARDINAL_TPCDS_SF` sets the scale factor (default 1), and
+//! `CARDINAL_LIVE_TIMEOUT` each call's time limit in seconds.
 //!
 //! ```sh
 //! cargo test --release --test tpcds -- --nocapture
@@ -23,27 +31,31 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cardinal::facts::{Fact, FactKind, FactSet, Ratio};
-use cardinal::observed::{Catalog, from_duckdb};
+use cardinal::observed::Catalog;
 use cardinal::{Analysis, FactMode, Informed, Options};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
-use live::{TIMED_OUT, duckdb_available, profile, run, values};
+use live::{Engine, TIMED_OUT, duckdb_available, run};
 
 /// TPC-DS at the scale factor asked for, made once.
 fn database() -> Option<PathBuf> {
-    let sf = std::env::var("CARDINAL_TPCDS_SF").unwrap_or_else(|_| "1".into());
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("tpcds_sf{sf}.duckdb"));
-    if !path.exists() {
-        let tmp = path.with_extension("tmp");
-        let _ = std::fs::remove_file(&tmp);
-        if let Err(e) = run(&tmp, &format!("INSTALL tpcds; LOAD tpcds; CALL dsdgen(sf = {sf});"), &[]) {
-            eprintln!("skipped: cannot generate TPC-DS: {e}");
-            return None;
+    static MADE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    MADE.get_or_init(|| {
+        let sf = std::env::var("CARDINAL_TPCDS_SF").unwrap_or_else(|_| "1".into());
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("tpcds_sf{sf}.duckdb"));
+        if !path.exists() {
+            let tmp = path.with_extension("tmp");
+            let _ = std::fs::remove_file(&tmp);
+            if let Err(e) = run(&tmp, &format!("INSTALL tpcds; LOAD tpcds; CALL dsdgen(sf = {sf});"), &[]) {
+                eprintln!("skipped: cannot generate TPC-DS: {e}");
+                return None;
+            }
+            std::fs::rename(&tmp, &path).unwrap();
         }
-        std::fs::rename(&tmp, &path).unwrap();
-    }
-    Some(path)
+        Some(path)
+    })
+    .clone()
 }
 
 fn json(db: &PathBuf, sql: &str) -> serde_json::Value {
@@ -103,7 +115,7 @@ fn agrees(kind: &FactKind, value: Ratio, n: u64, of: Option<u64>) -> bool {
 
 /// Checks every fact and bound of `facts` against its count: the failures,
 /// and how many were counted and how many could not be.
-fn check(db: &PathBuf, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usize, usize, usize) {
+fn check(engine: &Engine, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usize, usize, usize) {
     let mut checks: Vec<(&Fact, bool, usize, Option<usize>)> = vec![];
     let mut sql: Vec<String> = vec![];
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -115,7 +127,7 @@ fn check(db: &PathBuf, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usiz
     };
     let mut uncountable = 0;
     for (f, bound) in facts.iter().map(|f| (f, false)).chain(facts.bounds().map(|f| (f, true))) {
-        match f.kind.count_sql(catalog, facts) {
+        match f.kind.count_sql_in(catalog, facts, engine.dialect()) {
             Some(c) => {
                 let v = at(c.value, &mut sql);
                 let of = c.of.map(|q| at(q, &mut sql));
@@ -124,7 +136,7 @@ fn check(db: &PathBuf, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usiz
             None => uncountable += 1,
         }
     }
-    let counted = values(db, &sql);
+    let counted = engine.values(&sql);
     let (mut failures, mut ok, mut slow) = (vec![], 0, 0);
     for (f, bound, v, of) in checks {
         let (n, of) = match (&counted[v], of.map(|o| &counted[o])) {
@@ -193,19 +205,43 @@ async fn odd_facts_bound_even_queries() {
         return;
     }
     let Some(db) = database() else { return };
+    bound(Engine::DuckDb(db.clone()), &db).await;
+}
+
+#[tokio::test]
+async fn odd_facts_bound_even_queries_in_postgres() {
+    if !duckdb_available() || !live::pg::available() {
+        eprintln!("skipped: no duckdb CLI or no PostgreSQL");
+        return;
+    }
+    let Some(db) = database() else { return };
+    let sf = std::env::var("CARDINAL_TPCDS_SF").unwrap_or_else(|_| "1".into());
+    let copy = format!("cardinal_tpcds_sf{}", sf.replace('.', "_"));
+    if let Err(e) = live::pg::mirror(&db, &copy, "public", None) {
+        eprintln!("skipped: cannot copy TPC-DS into PostgreSQL: {e}");
+        return;
+    }
+    bound(Engine::Postgres(copy), &db).await;
+}
+
+/// The odd queries' facts, read off `engine`'s profiles, bounding the even
+/// ones. `db` is the DuckDB database, for the schemas and the queries.
+async fn bound(engine: Engine, db: &std::path::Path) {
+    let db = db.to_path_buf();
     let ctx = context(&db);
-    let catalog = Catalog::from_context(&ctx).await.unwrap();
+    let catalog = Catalog::from_context(&ctx).await.unwrap().with_partial_indexes(engine.partial_indexes());
     let queries = queries(&db);
     let mut failures = vec![];
 
     // Every fact the odd queries' profiles show.
     let mut plans = vec![];
     let mut unprofiled = vec![];
+    let variants = engine.variants();
     for (n, sql) in queries.iter().filter(|(n, _)| n % 2 == 1) {
-        for threads in [1, 4] {
-            match profile(&db, sql, threads).and_then(|j| from_duckdb(&catalog, &format!("q{n:02}/t{threads}"), &j).map_err(|e| e.to_string())) {
+        for variant in &variants {
+            match engine.profile(sql, variant).and_then(|j| engine.read(&catalog, &format!("q{n:02}/{variant}"), &j, sql)) {
                 Ok(p) => plans.push(p),
-                Err(e) if threads == 1 => unprofiled.push(format!("q{n:02}: {}", e.lines().next().unwrap_or_default())),
+                Err(e) if *variant == variants[0] => unprofiled.push(format!("q{n:02}: {}", e.lines().next().unwrap_or_default())),
                 Err(_) => {}
             }
         }
@@ -218,10 +254,11 @@ async fn odd_facts_bound_even_queries() {
     for c in &facts.conflicts {
         failures.push(format!("conflict: {} = {} vs {}", c.kind, c.values.0, c.values.1));
     }
-    let (wrong, counted, uncountable, slow) = check(&db, &catalog, &facts);
+    let (wrong, counted, uncountable, slow) = check(&engine, &catalog, &facts);
     failures.extend(wrong);
     println!(
-        "odd queries: {} plans, {} facts and {} bounds; {counted} counted true, {uncountable} not countable, {slow} too slow to count",
+        "{}: odd queries: {} plans, {} facts and {} bounds; {counted} counted true, {uncountable} not countable, {slow} too slow to count",
+        engine.name(),
         plans.len(),
         facts.len(),
         facts.bounds().count()
@@ -240,7 +277,11 @@ async fn odd_facts_bound_even_queries() {
     let mut skipped = vec![];
     let mut misses: BTreeMap<&str, usize> = BTreeMap::new();
     for (n, sql) in queries.iter().filter(|(n, _)| n % 2 == 0) {
-        let truth = match profile(&db, sql, 1).and_then(|j| from_duckdb(&catalog, &format!("q{n:02}"), &j).map_err(|e| e.to_string())) {
+        let truth = match engine.profile(sql, &variants[0]).and_then(|j| engine.read(&catalog, &format!("q{n:02}"), &j, sql)) {
+            Ok(p) if !p.nodes[p.root].counted => {
+                skipped.push(format!("q{n:02}: its rows were not counted"));
+                continue;
+            }
             Ok(p) => p.nodes[p.root].rows,
             Err(e) => {
                 skipped.push(format!("q{n:02}: not profiled: {}", e.lines().next().unwrap_or_default()));

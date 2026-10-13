@@ -1,0 +1,59 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Nested Loop",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Anti",
+          "Actual Rows": 500,
+          "Actual Loops": 1,
+          "Inner Unique": false,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "customer",
+              "Schema": "public",
+              "Alias": "customer",
+              "Actual Rows": 1500,
+              "Actual Loops": 1,
+              "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"]
+            },
+            {
+              "Node Type": "Index Only Scan",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Scan Direction": "Forward",
+              "Index Name": "orders_o_custkey_idx",
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 1,
+              "Actual Loops": 1500,
+              "Output": ["orders.o_custkey"],
+              "Index Cond": "(orders.o_custkey = customer.c_custkey)",
+              "Rows Removed by Index Recheck": 0,
+              "Heap Fetches": 1000
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

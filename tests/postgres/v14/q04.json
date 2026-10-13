@@ -1,0 +1,109 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 5,
+      "Actual Loops": 1,
+      "Output": ["orders.o_orderpriority", "(count(*))"],
+      "Sort Key": ["orders.o_orderpriority"],
+      "Sort Method": "quicksort",
+      "Sort Space Used": 25,
+      "Sort Space Type": "Memory",
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Hashed",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 5,
+          "Actual Loops": 1,
+          "Output": ["orders.o_orderpriority", "count(*)"],
+          "Group Key": ["orders.o_orderpriority"],
+          "HashAgg Batches": 1,
+          "Peak Memory Usage": 24,
+          "Disk Usage": 0,
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Semi",
+              "Actual Rows": 535,
+              "Actual Loops": 1,
+              "Output": ["orders.o_orderpriority"],
+              "Inner Unique": false,
+              "Hash Cond": "(orders.o_orderkey = lineitem.l_orderkey)",
+              "Plans": [
+                {
+                  "Node Type": "Bitmap Heap Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "orders",
+                  "Schema": "public",
+                  "Alias": "orders",
+                  "Actual Rows": 582,
+                  "Actual Loops": 1,
+                  "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                  "Recheck Cond": "((orders.o_orderdate >= '1993-07-01'::date) AND (orders.o_orderdate < '1993-10-01 00:00:00'::timestamp without time zone))",
+                  "Rows Removed by Index Recheck": 0,
+                  "Exact Heap Blocks": 235,
+                  "Lossy Heap Blocks": 0,
+                  "Plans": [
+                    {
+                      "Node Type": "Bitmap Index Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Index Name": "orders_o_orderdate_idx",
+                      "Actual Rows": 582,
+                      "Actual Loops": 1,
+                      "Index Cond": "((orders.o_orderdate >= '1993-07-01'::date) AND (orders.o_orderdate < '1993-10-01 00:00:00'::timestamp without time zone))"
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 37897,
+                  "Actual Loops": 1,
+                  "Output": ["lineitem.l_orderkey"],
+                  "Hash Buckets": 65536,
+                  "Original Hash Buckets": 32768,
+                  "Hash Batches": 1,
+                  "Original Hash Batches": 1,
+                  "Peak Memory Usage": 1993,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "lineitem",
+                      "Schema": "public",
+                      "Alias": "lineitem",
+                      "Actual Rows": 37897,
+                      "Actual Loops": 1,
+                      "Output": ["lineitem.l_orderkey"],
+                      "Filter": "(lineitem.l_commitdate < lineitem.l_receiptdate)",
+                      "Rows Removed by Filter": 22278
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

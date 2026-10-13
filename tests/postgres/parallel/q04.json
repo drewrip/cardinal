@@ -1,0 +1,188 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Sorted",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 5.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["orders.o_orderpriority", "count(*)"],
+      "Group Key": ["orders.o_orderpriority"],
+      "Plans": [
+        {
+          "Node Type": "Gather Merge",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 5.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_orderpriority", "(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Workers Launched": 2,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Sorted",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 1.67,
+              "Actual Loops": 3,
+              "Disabled": false,
+              "Output": ["orders.o_orderpriority", "PARTIAL count(*)"],
+              "Group Key": ["orders.o_orderpriority"],
+              "Workers": [
+                {
+                  "Worker Number": 0,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1
+                },
+                {
+                  "Worker Number": 1,
+                  "Actual Rows": 0.00,
+                  "Actual Loops": 1
+                }
+              ],
+              "Plans": [
+                {
+                  "Node Type": "Sort",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Actual Rows": 178.33,
+                  "Actual Loops": 3,
+                  "Disabled": false,
+                  "Output": ["orders.o_orderpriority"],
+                  "Sort Key": ["orders.o_orderpriority"],
+                  "Sort Method": "quicksort",
+                  "Sort Space Used": 25,
+                  "Sort Space Type": "Memory",
+                  "Workers": [
+                    {
+                      "Worker Number": 0,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 25,
+                      "Sort Space Type": "Memory"
+                    },
+                    {
+                      "Worker Number": 1,
+                      "Actual Rows": 0.00,
+                      "Actual Loops": 1,
+                      "Sort Method": "quicksort",
+                      "Sort Space Used": 25,
+                      "Sort Space Type": "Memory"
+                    }
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Semi",
+                      "Actual Rows": 178.33,
+                      "Actual Loops": 3,
+                      "Disabled": false,
+                      "Output": ["orders.o_orderpriority"],
+                      "Inner Unique": false,
+                      "Workers": [
+                        {
+                          "Worker Number": 0,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        },
+                        {
+                          "Worker Number": 1,
+                          "Actual Rows": 0.00,
+                          "Actual Loops": 1
+                        }
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Bitmap Heap Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "orders",
+                          "Schema": "public",
+                          "Alias": "orders",
+                          "Actual Rows": 194.00,
+                          "Actual Loops": 3,
+                          "Disabled": false,
+                          "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+                          "Recheck Cond": "((orders.o_orderdate >= '1993-07-01'::date) AND (orders.o_orderdate < '1993-10-01 00:00:00'::timestamp without time zone))",
+                          "Rows Removed by Index Recheck": 0,
+                          "Exact Heap Blocks": 237,
+                          "Lossy Heap Blocks": 0,
+                          "Workers": [
+                            {
+                              "Worker Number": 0,
+                              "Actual Rows": 0.00,
+                              "Actual Loops": 1
+                            },
+                            {
+                              "Worker Number": 1,
+                              "Actual Rows": 0.00,
+                              "Actual Loops": 1
+                            }
+                          ],
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Index Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Index Name": "orders_o_orderdate_idx",
+                              "Actual Rows": 582.00,
+                              "Actual Loops": 1,
+                              "Disabled": false,
+                              "Index Cond": "((orders.o_orderdate >= '1993-07-01'::date) AND (orders.o_orderdate < '1993-10-01 00:00:00'::timestamp without time zone))",
+                              "Index Searches": 1,
+                              "Workers": [
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "lineitem_pkey",
+                          "Relation Name": "lineitem",
+                          "Schema": "public",
+                          "Alias": "lineitem",
+                          "Actual Rows": 0.92,
+                          "Actual Loops": 582,
+                          "Disabled": false,
+                          "Output": ["lineitem.l_orderkey", "lineitem.l_partkey", "lineitem.l_suppkey", "lineitem.l_linenumber", "lineitem.l_quantity", "lineitem.l_extendedprice", "lineitem.l_discount", "lineitem.l_tax", "lineitem.l_returnflag", "lineitem.l_linestatus", "lineitem.l_shipdate", "lineitem.l_commitdate", "lineitem.l_receiptdate", "lineitem.l_shipinstruct", "lineitem.l_shipmode", "lineitem.l_comment"],
+                          "Index Cond": "(lineitem.l_orderkey = orders.o_orderkey)",
+                          "Rows Removed by Index Recheck": 0,
+                          "Filter": "(lineitem.l_commitdate < lineitem.l_receiptdate)",
+                          "Rows Removed by Filter": 1,
+                          "Index Searches": 582,
+                          "Workers": [
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

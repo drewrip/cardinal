@@ -1,0 +1,99 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Nested Loop",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Left",
+      "Actual Rows": 322.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["customer.c_custkey", "orders.o_orderkey"],
+      "Inner Unique": false,
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 300.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["customer.c_custkey"],
+          "Inner Unique": true,
+          "Hash Cond": "(customer.c_nationkey = nation.n_nationkey)",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "customer",
+              "Schema": "public",
+              "Alias": "customer",
+              "Actual Rows": 1500.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["customer.c_custkey", "customer.c_name", "customer.c_address", "customer.c_nationkey", "customer.c_phone", "customer.c_acctbal", "customer.c_mktsegment", "customer.c_comment"]
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 5.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["nation.n_nationkey"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 9,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "nation",
+                  "Schema": "public",
+                  "Alias": "nation",
+                  "Actual Rows": 5.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["nation.n_nationkey"],
+                  "Filter": "(nation.n_regionkey = 1)",
+                  "Rows Removed by Filter": 20
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Node Type": "Index Scan",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Scan Direction": "Forward",
+          "Index Name": "orders_o_custkey_idx",
+          "Relation Name": "orders",
+          "Schema": "public",
+          "Alias": "orders",
+          "Actual Rows": 0.30,
+          "Actual Loops": 300,
+          "Disabled": false,
+          "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+          "Index Cond": "(orders.o_custkey = customer.c_custkey)",
+          "Rows Removed by Index Recheck": 0,
+          "Filter": "(orders.o_totalprice > '300000'::numeric)",
+          "Rows Removed by Filter": 9,
+          "Index Searches": 300
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]
