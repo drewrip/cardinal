@@ -326,9 +326,24 @@ pub(crate) fn normalize(e: Expr, schema: &dyn Fn(&str) -> Option<SchemaRef>) -> 
     let simplified = simplifier.simplify(coerced).unwrap_or(e);
     simplified
         .clone()
-        .transform_up(|e| date_comparison(e, &schema).transform_data(|e| Ok(like(e))))
+        .transform_up(|e| date_comparison(e, &schema).transform_data(|e| Ok(like(e)))?.transform_data(|e| Ok(date_part(e))))
         .map(|t| t.data)
         .unwrap_or(simplified)
+}
+
+/// `date_part`'s part as its bare name: `EXTRACT('month' FROM x)` names it
+/// quoted, and reads as `date_part('''month''', x)`, which no engine counts.
+fn date_part(e: Expr) -> Transformed<Expr> {
+    let Expr::ScalarFunction(f) = &e else { return Transformed::no(e) };
+    let [Expr::Literal(part, _), _] = f.args.as_slice() else { return Transformed::no(e) };
+    let Some(name) = part.try_as_str().flatten().filter(|_| f.name() == "date_part") else { return Transformed::no(e) };
+    let bare = name.trim_matches(['\'', '"']);
+    if bare.len() == name.len() {
+        return Transformed::no(e);
+    }
+    let mut f = f.clone();
+    f.args[0] = datafusion::logical_expr::lit(bare);
+    Transformed::yes(Expr::ScalarFunction(f))
 }
 
 /// `x LIKE 'abc%'`, `'%abc'` and `'%abc%'` as `starts_with`, `ends_with`

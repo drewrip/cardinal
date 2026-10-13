@@ -216,3 +216,18 @@ async fn postgres_plans() {
     }
     println!("{simple} of {required} selectivities are simple");
 }
+
+#[tokio::test]
+async fn a_quoted_date_part_reads_bare() {
+    let ctx = context().await;
+    let sql = "CREATE TABLE visits AS SELECT * FROM (VALUES (1, DATE '2024-01-05'), (2, DATE '2024-01-20'), (3, DATE '2024-03-02')) AS t(id, day)";
+    ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    for (sql, part) in [
+        ("SELECT extract('month' FROM day) AS m, count(*) FROM visits GROUP BY 1", "month"),
+        ("SELECT extract(month FROM day) AS m, count(*) FROM visits GROUP BY 1", "MONTH"),
+    ] {
+        let out = checked(&ctx, sql, vec![]).await;
+        assert_eq!(shapes(&out), [Some((Distinct, vec!["visits"]))], "{sql}");
+        assert_eq!(out[0].simple.as_ref().unwrap().fact.to_string(), format!("ndv(date_part('{part}', visits.\"day\") | visits)"));
+    }
+}
