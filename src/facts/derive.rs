@@ -17,7 +17,7 @@ pub(super) fn close(set: &mut FactSet) {
     loop {
         let mut added = false;
         for (kind, value, rule) in step(set) {
-            added |= set.insert(Fact { kind, value, origins: vec![Origin::Derived { rule }] });
+            added |= set.insert(Fact { kind, value, origins: vec![Origin::Derived { rule: rule.into() }] });
         }
         if !added {
             break;

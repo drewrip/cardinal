@@ -14,19 +14,24 @@ pub(crate) mod logical;
 mod rewrite;
 mod rules;
 mod sql;
+mod serialize;
 
 pub use context::{Context, Exists, ExistsKind, Pending, State, Taint, Term, Value, states};
 pub use rules::{FactRule, Observation, RULES};
 pub use sql::{CountDialect, Counts};
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::observed::ObservedPlan;
 use context::join;
 
 /// A non-negative rational, in lowest terms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "RawRatio")]
 pub struct Ratio {
     num: u64,
     den: u64,
@@ -90,6 +95,21 @@ impl Ratio {
     }
 }
 
+/// A ratio as read, before it is checked and reduced.
+#[derive(Deserialize)]
+struct RawRatio {
+    num: u64,
+    den: u64,
+}
+
+impl TryFrom<RawRatio> for Ratio {
+    type Error = &'static str;
+
+    fn try_from(r: RawRatio) -> Result<Ratio, Self::Error> {
+        Ratio::new(r.num, r.den).ok_or("a ratio over zero")
+    }
+}
+
 impl PartialOrd for Ratio {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -119,7 +139,7 @@ impl fmt::Display for Ratio {
 }
 
 /// What a fact is the value of.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FactKind {
     /// `|ctx|`: the rows in a context.
     Cardinality(Context),
@@ -162,12 +182,12 @@ impl fmt::Display for FactKind {
 }
 
 /// Where a fact came from.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Origin {
     /// Read off operator `node` of plan `query` by `rule`.
-    Observed { query: String, node: usize, rule: &'static str },
+    Observed { query: String, node: usize, rule: Cow<'static, str> },
     /// Inferred from other facts by `rule`.
-    Derived { rule: &'static str },
+    Derived { rule: Cow<'static, str> },
     /// Counted by a query of its own (see [`FactKind::counted`]).
     Counted,
 }
@@ -182,7 +202,7 @@ impl fmt::Display for Origin {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub kind: FactKind,
     pub value: Ratio,
@@ -197,7 +217,7 @@ impl fmt::Display for Fact {
 
 /// Two values for the same fact: the data changed between runs, or a rule
 /// is wrong.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conflict {
     pub kind: FactKind,
     pub values: (Ratio, Ratio),
@@ -205,13 +225,21 @@ pub struct Conflict {
 }
 
 /// Facts, one per kind, and upper bounds on what no fact gives exactly.
-#[derive(Debug, Clone, Default)]
+///
+/// Serde writes each map as the list of its values, and reads a list back
+/// as [`FactSet::insert`], [`FactSet::insert_bound`] and
+/// [`FactSet::insert_value`] would add it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FactSet {
+    #[serde(serialize_with = "serialize::values", deserialize_with = "facts")]
     facts: BTreeMap<FactKind, Fact>,
     /// The least upper bound seen on each size or distinct count: the rows
     /// of an operator that may have let through more than its context's.
+    #[serde(serialize_with = "serialize::values", deserialize_with = "bounds")]
     bounds: BTreeMap<FactKind, Fact>,
     /// What each aggregate value the facts read is, by name.
+    #[serde(serialize_with = "serialize::values", deserialize_with = "values")]
     values: BTreeMap<String, Value>,
     /// The facts of operators whose rows were not counted.
     unobserved: BTreeSet<FactKind>,
@@ -377,6 +405,30 @@ impl fmt::Display for FactSet {
         }
         Ok(())
     }
+}
+
+fn facts<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D::Error> {
+    let mut set = FactSet::default();
+    for fact in Vec::<Fact>::deserialize(d)? {
+        set.insert(fact);
+    }
+    Ok(set.facts)
+}
+
+fn bounds<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D::Error> {
+    let mut set = FactSet::default();
+    for bound in Vec::<Fact>::deserialize(d)? {
+        set.insert_bound(bound);
+    }
+    Ok(set.bounds)
+}
+
+fn values<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Value>, D::Error> {
+    let mut set = FactSet::default();
+    for value in Vec::<Value>::deserialize(d)? {
+        set.insert_value(value);
+    }
+    Ok(set.values)
 }
 
 /// Every fact `plans` show, and every fact that follows from them.

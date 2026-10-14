@@ -16,6 +16,7 @@ use datafusion::common::{DataFusionError, JoinType};
 use datafusion::logical_expr::utils::{conjunction, disjunction, split_conjunction_owned};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::sql::unparser::Unparser;
+use serde::{Deserialize, Serialize};
 
 use super::{FactKind, rewrite};
 use crate::observed::{ObservedPlan, Op, Pred, base_table, column_key, qualified, relation, requalify};
@@ -30,6 +31,11 @@ pub struct Term {
 impl Term {
     pub fn new(expr: Expr) -> Term {
         let expr = canonical(expr);
+        Term { key: expr.to_string(), expr }
+    }
+
+    /// The term of `expr`, already in canonical form.
+    pub(super) fn canonical(expr: Expr) -> Term {
         Term { key: expr.to_string(), expr }
     }
 
@@ -142,7 +148,7 @@ pub fn terms(exprs: impl IntoIterator<Item = Expr>) -> BTreeSet<Term> {
 /// computing the same rows in a different order name them the same: inner
 /// joins, filters, and semi and anti joins all flatten into one
 /// [`Context::Spj`].
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Context {
     /// The rows of the cross product of `tables` and `atoms` satisfying every
     /// predicate in `preds` and every condition in `exists`. No two inputs
@@ -155,14 +161,14 @@ pub enum Context {
 
 /// A condition on each row of a context: whether it has a partner in
 /// `other` under `on`. This is what a semi or anti join keeps.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Exists {
     pub kind: ExistsKind,
     pub on: BTreeSet<Term>,
     pub other: Context,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ExistsKind {
     /// Has a partner (a semi join, `EXISTS`, `IN`).
     Semi,
@@ -447,7 +453,7 @@ fn pending_text(p: &Pending) -> String {
 /// A value computed by an aggregate, read as the column `"value"."{name}"`:
 /// `aggregate` over the rows `over` (a GROUP BY's or an aggregate's), the
 /// two named canonically together.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Value {
     pub name: String,
     pub aggregate: Term,

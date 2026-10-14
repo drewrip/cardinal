@@ -47,10 +47,10 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Observed {
     let mut facts = vec![];
     let mut bounds = vec![];
     let mut unobserved = vec![];
-    let fact = |kind: FactKind, value, node, rule| Fact {
+    let fact = |kind: FactKind, value, node, rule: &'static str| Fact {
         kind: kind.canonical(),
         value,
-        origins: vec![Origin::Observed { query: plan.name.clone(), node, rule }],
+        origins: vec![Origin::Observed { query: plan.name.clone(), node, rule: rule.into() }],
     };
     for node in 0..plan.nodes.len() {
         for rule in RULES {

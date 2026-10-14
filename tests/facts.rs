@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use cardinal::facts::{Fact, FactKind, FactSet, Origin, Ratio, State, derive_facts, states};
 use cardinal::observed::{ObservedPlan, from_duckdb};
-use fixtures::{DIR, catalog, json, plans};
+use fixtures::{DIR, catalog, json, pg_plans, plans};
 use serde_json::{Value, json};
 
 async fn plan(name: &str) -> ObservedPlan {
@@ -365,4 +365,42 @@ async fn other_shapes() {
     let f = one("alias").await;
     let years = f.bounds().find(|b| b.kind.to_string().starts_with("ndv(date_part(")).unwrap_or_else(|| panic!("{f}"));
     assert_eq!(years.value.as_int(), Some(e["ndv(year|orders,price>100000)"]));
+}
+
+/// Facts written as JSON read back as they were: each by the same kind,
+/// with its value and origins, and so the same JSON again.
+#[tokio::test]
+async fn round_trip() {
+    let mut all = vec![];
+    for dir in ["extra", "tpch"] {
+        all.extend(plans(dir).await);
+    }
+    for dir in ["extra", "tpch", "indexed", "parallel", "v14"] {
+        all.extend(pg_plans(dir).await);
+    }
+    for p in &all {
+        let set = derive_facts(std::slice::from_ref(p));
+        let text = serde_json::to_string(&set).unwrap();
+        let read: FactSet = serde_json::from_str(&text).unwrap();
+        assert_eq!(serde_json::to_string(&read).unwrap(), text, "{}", p.name);
+        assert_eq!(read.to_string(), set.to_string(), "{}", p.name);
+        for f in set.iter() {
+            let r = read.get(&f.kind).unwrap_or_else(|| panic!("{}: no {f}", p.name));
+            assert_eq!((r.value, &r.origins), (f.value, &f.origins), "{}: {f}", p.name);
+        }
+        for b in set.bounds() {
+            assert_eq!(read.bound(&b.kind).map(|r| r.value), Some(b.value), "{}: {}", p.name, b.kind);
+        }
+        for v in set.values() {
+            assert_eq!(read.value(&v.name), Some(v), "{}: {}", p.name, v.name);
+        }
+        assert!(read.unobserved().eq(set.unobserved()), "{}", p.name);
+    }
+}
+
+#[test]
+fn ratio_reads_reduced() {
+    let r: Ratio = serde_json::from_value(json!({"num": 4, "den": 6})).unwrap();
+    assert_eq!((r.num(), r.den()), (2, 3));
+    assert!(serde_json::from_value::<Ratio>(json!({"num": 1, "den": 0})).is_err());
 }
