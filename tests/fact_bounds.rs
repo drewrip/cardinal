@@ -238,10 +238,12 @@ async fn match_rates() {
     }
 }
 
-/// A filter pushed into a scan gives no exact fact, only an upper bound on
-/// the rows it and what keeps them above name: pinned, those bounds meet
-/// the query's operators through pushed-down filters, a projection's alias,
-/// and a join's inputs, and cap the output at its true count.
+/// A required filter pushed into a scan is applied exactly, and gives a
+/// fact. An optional one gives only an upper bound on the rows it and what
+/// keeps them above name, until a filter above checks it: pinned, facts and
+/// bounds meet the query's operators through pushed-down filters, a
+/// projection's alias, and a join's inputs, and cap the output at its true
+/// count.
 #[tokio::test]
 async fn pushed_filters_bound() {
     let cases = cases().await;
@@ -251,13 +253,11 @@ async fn pushed_filters_bound() {
         (c.by(Planner::DataFusion).unwrap(), c.rows())
     };
 
-    // `select * from lineitem where l_quantity < 10`: the share is unknown,
-    // and the scan's rows are at most what it returned.
+    // `select * from lineitem where l_quantity < 10`: the share is known.
     let (a, rows) = case("scan_filter");
     let i = a.with_facts(&all, FactMode::Ratios).unwrap();
-    assert!(i.matched.is_empty(), "{i}");
+    assert!(!i.matched.is_empty(), "{i}");
     let i = a.with_facts(&all, FactMode::Pinned).unwrap();
-    assert!(i.capped.iter().any(|(_, n)| *n == rows), "{:?}", i.capped);
     assert_eq!(i.range().unwrap().1, Some(rows));
 
     // The GROUP BY reads `yr`, an alias of `extract(year from o_orderdate)`;

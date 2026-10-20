@@ -469,10 +469,12 @@ the aggregate and the rows it ran over.
 
 Some counts are not exactly a function of the context, and give no fact:
 
-- *Pushed filters.* A filter pushed into a scan, required or optional, may be
-  applied loosely (only to skip blocks, say), so the scan's rows are the
-  context's and maybe more. Its count, and the count of each operator above
-  that keeps all of a superset input's rows (filters, inner and semi joins,
+- *Pushed filters.* A required filter pushed into a scan is applied exactly:
+  the engine checks it nowhere else. An optional one (`optional:` in
+  DuckDB's profile) may only prune, skipping blocks whose statistics rule it
+  out, so the scan's rows are the context's and maybe more. Its count, and
+  the count of each operator above that keeps all of a superset input's
+  rows (filters, inner and semi joins,
   an anti join's kept side, a left join's preserved side), is only an upper
   bound: `|ctx| <= rows`, and for a GROUP BY over such rows,
   `ndv(k | input) <= rows`. An anti join's other side, an outer join's padded

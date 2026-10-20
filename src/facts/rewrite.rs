@@ -681,6 +681,9 @@ mod tests {
         let inner = join(&ab, &group(t("c"), "c.k"), eq("a.x", "c.k"));
         assert_eq!(unpadded(&inner, &[]), ab.exists(ExistsKind::Semi, eq("a.x", "c.k"), t("c")));
         assert_eq!(unpadded(&inner, &["c"]), inner);
+        // A GROUP BY above keyed on the group's key reads it.
+        let keyed = Context::Derived { op: "group".into(), args: vec![Term::new(col("c.k"))], inputs: vec![inner.clone()] };
+        assert_eq!(unpadded(&keyed, &[]), keyed);
     }
 }
 
@@ -701,7 +704,7 @@ pub(crate) fn unpadded(ctx: &Context, reads: &BTreeMap<String, usize>) -> Contex
             for g in s.atoms.clone() {
                 let Context::Derived { op, args: keys, inputs } = &g else { continue };
                 let mine = inputs[0].tables();
-                if op != "group" || keys.is_empty() || read_outside(&inputs[0], reads) {
+                if op != "group" || keys.is_empty() || read_outside(&g, reads) {
                     continue;
                 }
                 let on: BTreeSet<Term> = s.preds.iter().filter(|p| on_key(p, keys, &mine).is_some()).cloned().collect();
@@ -725,12 +728,12 @@ pub(crate) fn unpadded(ctx: &Context, reads: &BTreeMap<String, usize>) -> Contex
     }
 }
 
-/// True if `reads` reads an instance of `grouped` other than where
-/// `grouped` itself does.
-fn read_outside(grouped: &Context, reads: &BTreeMap<String, usize>) -> bool {
+/// True if `reads` reads an instance of `group` other than where `group`
+/// itself does, its keys included: a GROUP BY above it may be keyed on them.
+fn read_outside(group: &Context, reads: &BTreeMap<String, usize>) -> bool {
     let (mut within, mut values) = (BTreeMap::new(), false);
-    self::reads(grouped, &mut within, &mut values);
-    grouped.tables().iter().any(|t| reads.get(t).copied().unwrap_or(0) > within.get(t).copied().unwrap_or(0))
+    self::reads(group, &mut within, &mut values);
+    group.tables().iter().any(|t| reads.get(t).copied().unwrap_or(0) > within.get(t).copied().unwrap_or(0))
 }
 
 /// The key of `keys` that `p` equates with an expression reading none of
@@ -757,9 +760,9 @@ fn lookup(ctx: &Context, reads: &BTreeMap<String, usize>) -> Option<Context> {
     if op != "Left join" {
         return None;
     }
-    let [kept, Context::Derived { op: g, args: keys, inputs: grouped }] = &inputs[..] else { return None };
+    let [kept, group @ Context::Derived { op: g, args: keys, inputs: grouped }] = &inputs[..] else { return None };
     let mine = grouped[0].tables();
-    if g != "group" || keys.is_empty() || read_outside(&grouped[0], reads) {
+    if g != "group" || keys.is_empty() || read_outside(group, reads) {
         return None;
     }
     let outside = |e: &Expr| e.column_refs().iter().all(|c| c.relation.as_ref().is_some_and(|r| !mine.contains(r.table())));
@@ -775,9 +778,9 @@ fn lookup(ctx: &Context, reads: &BTreeMap<String, usize>) -> Option<Context> {
     keys.iter().all(|k| matches!(k.expr, Expr::Column(_)) && equated(k)).then(|| kept.clone())
 }
 
-/// How often `ctx`'s terms read each instance, into `out`, but for groups'
-/// keys and what joins them (a lookup's condition, an equality of a key);
-/// `values` if any reads an aggregate's value.
+/// How often `ctx`'s terms read each instance, into `out`, but for what
+/// joins a group (a lookup's condition, an equality of a key); `values` if
+/// any reads an aggregate's value.
 pub(crate) fn reads(ctx: &Context, out: &mut BTreeMap<String, usize>, values: &mut bool) {
     let mut term = |t: &Term, out: &mut BTreeMap<String, usize>| {
         for c in t.expr.column_refs() {
@@ -815,10 +818,10 @@ pub(crate) fn reads(ctx: &Context, out: &mut BTreeMap<String, usize>, values: &m
             }
         }
         Context::Derived { op, args, inputs } => {
-            // A group's keys and a lookup's condition are what a rewrite
-            // takes out with the group.
+            // A lookup's condition is what a rewrite takes out with the
+            // group.
             let on_group = op == "Left join" && matches!(&inputs[1], Context::Derived { op, .. } if op == "group");
-            if op != "group" && !on_group {
+            if !on_group {
                 args.iter().for_each(|a| term(a, out));
             }
             for i in inputs {

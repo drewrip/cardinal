@@ -375,9 +375,9 @@ pub enum Pending {
     /// output is the same whether or not it pruned, since it only removes
     /// rows without a partner.
     Join { column: Option<String>, text: String },
-    /// A filter pushed into a scan, which may have let through rows that
-    /// fail it: the rows are all of the context's, and maybe more, until a
-    /// filter above checks the same predicate. `None` if it did not resolve.
+    /// An optional filter pushed into a scan, which may have let through rows
+    /// that fail it: the rows are all of the context's, and maybe more, until
+    /// a filter above checks the same predicate. `None` if it did not resolve.
     Filter { term: Option<Term>, text: String },
 }
 
@@ -787,11 +787,12 @@ fn state(
     let node = &plan.nodes[i];
     match &node.op {
         Op::Scan { instance, filters, runtime_filters, .. } => {
-            // A filter pushed into a scan may be applied loosely (only to
-            // skip blocks, say): the scan's rows are the context's and maybe
-            // more, until a filter above checks the same predicate. Each is
-            // in the context, required or optional, so that the rows are a
-            // superset of the context's whichever were applied.
+            // A required filter pushed into a scan is applied exactly: the
+            // engine checks it nowhere else. An optional one may only prune
+            // (skip blocks whose statistics rule it out), so the rows are the
+            // context's and maybe more, until a filter above checks the same
+            // predicate. It is in the context too, so that the rows are a
+            // superset of the context's whether or not it was applied.
             let (optional, required): (Vec<Pred>, Vec<Pred>) = filters.iter().cloned().partition(|p| p.optional);
             let mut preds = match values.resolve(i, &required) {
                 Ok(p) => p,
@@ -801,7 +802,6 @@ fn state(
                 .iter()
                 .map(|r| Pending::Join { column: r.column.clone(), text: r.text.clone() })
                 .collect();
-            pending.extend(preds.iter().map(|t| Pending::Filter { term: Some(t.clone()), text: t.to_string() }));
             for p in optional {
                 let term = p.expr.map(Term::new);
                 preds.extend(term.clone());
