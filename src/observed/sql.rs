@@ -267,7 +267,7 @@ impl QueryText {
             .collect();
 
         let mut bound = HashMap::<String, HashSet<String>>::new();
-        for (alias, e) in &scan.aliases {
+        for ((alias, e), local) in scan.aliases.iter().zip(&scan.local) {
             // An alias of an aggregate's value (`round(avg(score), 3)`)
             // reads above the aggregate, where `avg(score)` is a column: the
             // reader takes no aggregate it would compute itself.
@@ -275,11 +275,16 @@ impl QueryText {
                 bound.entry(alias.clone()).or_default().insert(String::new());
                 continue;
             }
+            // A column of a table read more than once is ambiguous, unless
+            // its qualifier names the one instance in the defining `SELECT`
+            // (as each level of an unparsed query reads one table).
             let mut ambiguous = false;
             let _ = visit_expressions(e, |c| {
                 if let Expr::CompoundIdentifier(parts) = c
                     && parts.len() >= 2
-                    && scan.tables.get(&parts[parts.len() - 2].value.to_lowercase()).is_some_and(|t| seen.get(t).copied().unwrap_or(0) > 1)
+                    && let qualifier = parts[parts.len() - 2].value.to_lowercase()
+                    && !local.contains(&qualifier)
+                    && scan.tables.get(&qualifier).is_some_and(|t| seen.get(t).copied().unwrap_or(0) > 1)
                 {
                     ambiguous = true;
                 }
@@ -545,6 +550,10 @@ struct Scan {
     /// Table alias (or name) → table, lowercased.
     tables: HashMap<String, String>,
     aliases: Vec<(String, Expr)>,
+    /// For each of `aliases`, the qualifiers that name the only instance of
+    /// their table in the `SELECT` defining it: what they read is not
+    /// ambiguous there, however often the query reads the table elsewhere.
+    local: Vec<HashSet<String>>,
     comparisons: Vec<(Expr, BinaryOperator, Expr)>,
     limits: Vec<Option<u64>>,
     offsets: Vec<Option<u64>>,
@@ -621,6 +630,7 @@ impl Visitor for Scan {
                     };
                     if !passed_on {
                         self.aliases.push((alias, expr.clone()));
+                        self.local.push(alone(s));
                     }
                 }
             }
@@ -633,6 +643,7 @@ impl Visitor for Scan {
                 for (name, item) in cte.alias.columns.iter().zip(&s.projection) {
                     if let SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } = item {
                         self.aliases.push((name.name.value.to_lowercase(), e.clone()));
+                        self.local.push(alone(s));
                     }
                 }
             }
@@ -670,6 +681,39 @@ impl Visitor for Scan {
         }
         ControlFlow::Continue(())
     }
+}
+
+/// The names (alias, or the table's own) by which `s`'s `FROM` reads a
+/// table it reads only once.
+fn alone(s: &ast::Select) -> HashSet<String> {
+    fn tables(f: &TableFactor, out: &mut Vec<(String, String)>) {
+        match f {
+            TableFactor::Table { name, alias, .. } => {
+                let table = name.0.last().map(|p| p.to_string().to_lowercase()).unwrap_or_default();
+                let named = alias.as_ref().map_or_else(|| table.clone(), |a| a.name.value.to_lowercase());
+                out.push((named, table));
+            }
+            TableFactor::NestedJoin { table_with_joins, .. } => {
+                tables(&table_with_joins.relation, out);
+                for j in &table_with_joins.joins {
+                    tables(&j.relation, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = vec![];
+    for twj in &s.from {
+        tables(&twj.relation, &mut found);
+        for j in &twj.joins {
+            tables(&j.relation, &mut found);
+        }
+    }
+    let mut count = HashMap::<&String, usize>::new();
+    for (_, t) in &found {
+        *count.entry(t).or_default() += 1;
+    }
+    found.iter().filter(|(_, t)| count[t] == 1).map(|(n, _)| n.clone()).collect()
 }
 
 fn is_comparison(op: &BinaryOperator) -> bool {

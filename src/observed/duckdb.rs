@@ -466,6 +466,12 @@ impl Builder<'_> {
                 if let Some(c) = lookup(item, &child.columns, child.ordered) {
                     return c.clone();
                 }
+                // A column the query renames passes on as it was: a
+                // compressed one stays bijective, which `read` would lose.
+                let renamed = self.text.as_ref().and_then(|t| t.alias(item)).map(|a| a.trim().trim_matches('"'));
+                if let Some(c) = renamed.filter(|a| !a.contains('"')).and_then(|a| lookup(a, &child.columns, child.ordered)) {
+                    return OutCol { name: item.clone(), lineage: c.lineage.clone() };
+                }
                 // An expression, or an alias the query defines.
                 let read = |text: &str| self.read(text, &child.columns, child.ordered);
                 let alias = || self.text.as_ref().and_then(|t| t.alias(item)).and_then(read).filter(|e| !aggregates(e));

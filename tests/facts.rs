@@ -459,3 +459,36 @@ async fn aliases_passed_on() {
     let q = cardinal::observed::QueryText::parse(&catalog, sql).unwrap();
     assert_eq!(q.alias("twice"), None);
 }
+
+/// An alias over a table the query reads more than once names its
+/// expression where each definition reads the one instance in its own
+/// `SELECT`, as each level of an unparsed query does; not where one
+/// `SELECT` reads both.
+#[tokio::test]
+async fn aliases_over_one_instance() {
+    let catalog = catalog().await;
+    let sql = "select x.d, y.d from (select l1.l_quantity * 2 as d, l1.l_orderkey as k from lineitem l1) x \
+               join (select l2.l_quantity * 2 as d, l2.l_orderkey as k from lineitem l2) y on x.k = y.k";
+    let q = cardinal::observed::QueryText::parse(&catalog, sql).unwrap();
+    assert_eq!(q.alias("d"), Some("l_quantity * 2"));
+    let sql = "select l1.l_quantity * 2 as d from lineitem l1, lineitem l2 where l1.l_orderkey = l2.l_orderkey";
+    let q = cardinal::observed::QueryText::parse(&catalog, sql).unwrap();
+    assert_eq!(q.alias("d"), None);
+}
+
+/// A projection renaming a compressed column keeps it bijective, so a
+/// grouping on it reads.
+#[tokio::test]
+async fn renamed_compressed_key() {
+    let catalog = catalog().await;
+    let scan = node("TABLE_SCAN", 15000, json!({"Table": "tpch.main.orders", "Projections": ["o_orderpriority"]}), vec![]);
+    let compressed = node("PROJECTION", 15000, json!({"Projections": ["__internal_compress_string_uhugeint(#0)"]}), vec![scan]);
+    let renamed = node("PROJECTION", 15000, json!({"Projections": ["priority"]}), vec![compressed]);
+    let group = node("HASH_GROUP_BY", 5, json!({"Groups": ["#0"], "Aggregates": ["count_star()"]}), vec![renamed]);
+    let sql = "select \"o_orderpriority\" as priority, count(*) from orders group by 1";
+    let p = from_duckdb(&catalog, "renamed", &group.to_string(), Some(sql)).unwrap();
+    let at = p.nodes.iter().position(|n| n.engine_op == "HASH_GROUP_BY").unwrap();
+    assert!(matches!(states(&p)[at], State::Clean(_)), "{:?}", states(&p)[at]);
+    let facts = derive_facts(&[p]);
+    assert_eq!(starting(&facts, "ndv(orders.o_orderpriority | orders)").value.as_int(), Some(5));
+}
