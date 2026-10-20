@@ -21,7 +21,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use super::context::{Context, ExistsKind, Taint, Term};
 use super::FactKind;
-use crate::analyzer::Node;
+use crate::analyzer::{self, Node};
 use crate::first;
 use crate::observed::{base_table, normalize, qualified};
 
@@ -108,6 +108,11 @@ impl Logical {
                     (Err(t), _) => Err(t.clone()),
                     // A pushed-down fetch may cut the scan short.
                     (_, Some(_)) => Err(Taint::EarlyStop),
+                    // Filters applied inexactly may let through rows that
+                    // fail them, until a filter above checks them.
+                    (Ok(p), None) if analyzer::inexact_filters(scan) => {
+                        Err(Taint::Pruned(p.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" and ")))
+                    }
                     (Ok(p), None) => Ok(Context::table(&instance).filter(p)),
                 };
                 (ctx, preds.ok(), lineage)
@@ -152,7 +157,13 @@ impl Logical {
             }
             LogicalPlan::Filter(f) => {
                 let preds = self.terms(split_conjunction_owned(f.predicate.clone()), &|c| self.column(nodes, i, c));
-                let ctx = match (&preds, input(0)) {
+                // Re-checking a scan's inexact filters, its rows are the
+                // table's satisfying it.
+                let below = match analyzer::rechecked_scan(nodes, i) {
+                    Some(k) => self.instances[k].as_deref().map(Context::table).ok_or(Taint::Unsupported("TableScan".into())),
+                    None => input(0),
+                };
+                let ctx = match (&preds, below) {
                     (Err(t), _) => Err(t.clone()),
                     (_, Err(t)) => Err(t),
                     (Ok(p), Ok(c)) => Ok(c.filter(p)),

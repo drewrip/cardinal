@@ -3,11 +3,16 @@
 //!
 //! A selectivity is a share of its operator's input, and an input is often
 //! the output of other operators: a filtered table, a join, a GROUP BY. A
-//! simple selectivity is one whose input is one stored table, whole:
+//! simple selectivity is one whose input is one stored table, whole or
+//! filtered:
 //!
-//! - a filter's share of one table's rows, `s(p | T)`;
+//! - a filter's share of one table's rows, `s(p | T)`, or of the rows of a
+//!   chain of filters over it, `s(p | T where q)`;
 //! - a GROUP BY's or DISTINCT's distinct count per row of one table,
 //!   `ndv(k | T) / |T|`.
+//!
+//! Only filters (and scans' pushed filters) may stand between a filter and
+//! its table: an operator proven to keep its input's rows (below) does not.
 //!
 //! A join's share of pairs, or a semi join's of rows with a partner, is not
 //! simple.
@@ -45,7 +50,8 @@ use crate::{first, Analysis, Error, Result};
 /// What a simple selectivity is a share of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimpleKind {
-    /// `s(p | T)`: the share of one table's rows satisfying a predicate.
+    /// `s(p | T)`: the share of one table's rows satisfying a predicate, or
+    /// `s(p | T where q)` of the rows of a chain of filters over it.
     Filter,
     /// `ndv(k | T) / |T|`: distinct values of keys per row of one table.
     Distinct,
@@ -64,7 +70,7 @@ impl fmt::Display for SimpleKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Simple {
     pub kind: SimpleKind,
-    /// The stored table it is a share of.
+    /// The stored table it is a share of, whole or filtered.
     pub tables: Vec<String>,
     /// The fact that is its value, canonically named, over that table's
     /// rows: [`FactKind::Selectivity`] or [`FactKind::Distinct`] (whose value
@@ -115,9 +121,9 @@ pub(crate) fn simple(analysis: &Analysis) -> Result<Vec<SimpleSelectivity>> {
     };
     let mut out = vec![];
     for (s, ((name, plain), (_, reduced))) in report.required.iter().zip(plain.into_iter().zip(reduced)) {
-        let simple = match plain.and_then(|k| classify(&k)) {
+        let simple = match plain.and_then(|k| classify(&k, true)) {
             Ok(simple) => Ok(simple),
-            Err(why) => match reduced.and_then(|k| classify(&k)) {
+            Err(why) => match reduced.and_then(|k| classify(&k, false)) {
                 Ok(mut simple) => {
                     let at = nodes.iter().position(|n| n.var == s.operator);
                     simple.proof = at.map_or(vec![], |at| proof(nodes, &same, at));
@@ -132,8 +138,9 @@ pub(crate) fn simple(analysis: &Analysis) -> Result<Vec<SimpleSelectivity>> {
 }
 
 /// The fact `kind` (canonically named) as a simple selectivity, or why it is
-/// not one.
-fn classify(kind: &FactKind) -> std::result::Result<Simple, String> {
+/// not one. With `chain`, a filter's share of a table's filtered rows is
+/// simple too.
+fn classify(kind: &FactKind, chain: bool) -> std::result::Result<Simple, String> {
     let simple = |kind: SimpleKind, tables: Vec<&String>, fact: FactKind| Simple {
         kind,
         tables: tables.into_iter().map(|t| table(t).to_string()).collect(),
@@ -141,6 +148,9 @@ fn classify(kind: &FactKind) -> std::result::Result<Simple, String> {
         proof: vec![],
     };
     match kind {
+        FactKind::Selectivity { over, .. } if chain && filtered(over).is_some() => {
+            Ok(simple(SimpleKind::Filter, vec![filtered(over).unwrap()], kind.clone()))
+        }
         FactKind::Selectivity { pred, over } => {
             let tables = whole(over)?;
             match &tables[..] {
@@ -182,6 +192,17 @@ fn whole(ctx: &Context) -> std::result::Result<Vec<String>, String> {
             None => format!("over filtered rows: {ctx}"),
         }),
         Context::Derived { .. } => Err(format!("over {ctx}")),
+    }
+}
+
+/// The instance of `ctx`, if it is the rows of one table satisfying some
+/// predicates.
+fn filtered(ctx: &Context) -> Option<&String> {
+    match ctx {
+        Context::Spj { tables, atoms, exists, .. } if tables.len() == 1 && atoms.is_empty() && exists.is_empty() => {
+            tables.first()
+        }
+        _ => None,
     }
 }
 

@@ -8,11 +8,12 @@ mod fixtures;
 
 use cardinal::facts::{FactKind, FactSet};
 use cardinal::observed::Catalog;
-use cardinal::{ForeignKey, Options, SimpleKind, SimpleSelectivity, analyze_sql_with};
+use cardinal::{Analysis, ForeignKey, Options, SimpleKind, SimpleSelectivity, analyze_sql_with};
 use datafusion::arrow::array::AsArray;
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Int64Type};
-use datafusion::prelude::SessionContext;
+use datafusion::logical_expr::{JoinType, LogicalPlan};
+use datafusion::prelude::{SessionContext, col, lit};
 
 async fn context() -> SessionContext {
     let ctx = SessionContext::new();
@@ -54,24 +55,36 @@ async fn simple(sql: &str) -> Vec<SimpleSelectivity> {
 
 /// [`simple`] over `ctx`'s data, with `foreign_keys` declared.
 async fn checked(ctx: &SessionContext, sql: &str, foreign_keys: Vec<ForeignKey>) -> Vec<SimpleSelectivity> {
-    let ctx = ctx.clone();
     let options = Options { selectivity: true, foreign_keys, ..Default::default() };
-    let a = analyze_sql_with(&ctx, sql, options).await.unwrap();
-    let v = a.validate(&ctx).await.unwrap();
+    let a = analyze_sql_with(ctx, sql, options).await.unwrap();
+    verified(ctx, &a, sql).await
+}
+
+/// The simple selectivities of `plan`, built over `ctx`'s tables, checked as
+/// [`simple`] checks a query's.
+async fn checked_plan(ctx: &SessionContext, plan: &LogicalPlan) -> Vec<SimpleSelectivity> {
+    let options = Options { selectivity: true, foreign_keys: keys(), ..Default::default() };
+    let a = cardinal::analyze_plan_with(plan, options);
+    verified(ctx, &a, &plan.display_indent().to_string()).await
+}
+
+/// `a`'s simple selectivities, each checked against the execution of `sql`.
+async fn verified(ctx: &SessionContext, a: &Analysis, sql: &str) -> Vec<SimpleSelectivity> {
+    let v = a.validate(ctx).await.unwrap();
     assert_eq!(v.violation, None, "{sql}");
     let measured = v.selectivity.unwrap();
     assert_eq!(measured.violation, None, "{sql}");
     let out = a.simple_selectivities().unwrap();
     println!("{sql}\n  {}", a.selectivity.as_ref().unwrap());
-    let catalog = Catalog::from_context(&ctx).await.unwrap();
+    let catalog = Catalog::from_context(ctx).await.unwrap();
     for s in &out {
         println!("    {s}");
         let (Ok(simple), Some(value)) = (&s.simple, measured.values.get(&s.name)) else { continue };
         let counts = simple.fact.count_sql(&catalog, &FactSet::default()).expect("a table fact has a count");
-        let n = count(&ctx, &counts.value).await as f64;
+        let n = count(ctx, &counts.value).await as f64;
         let of = match (&simple.fact, &counts.of) {
-            (FactKind::Distinct { .. }, _) => count(&ctx, &format!("SELECT count(*) FROM {}", simple.tables[0])).await,
-            (_, Some(of)) => count(&ctx, of).await,
+            (FactKind::Distinct { .. }, _) => count(ctx, &format!("SELECT count(*) FROM {}", simple.tables[0])).await,
+            (_, Some(of)) => count(ctx, of).await,
             (_, None) => panic!("a share counts what it is a share of"),
         } as f64;
         if of > 0.0 {
@@ -104,6 +117,41 @@ async fn views_and_ctes_read_as_their_tables() {
         assert_eq!(simple.fact.to_string(), "s(orders.amount > 10 | orders)");
         assert!(simple.proof.is_empty());
     }
+}
+
+#[tokio::test]
+async fn chains_of_filters_are_simple() {
+    let ctx = context().await;
+    let orders = ctx.table("orders").await.unwrap();
+    let plan = orders.filter(col("amount").gt(lit(10))).unwrap().filter(col("cust").eq(lit(1))).unwrap();
+    let out = checked_plan(&ctx, &plan.into_unoptimized_plan()).await;
+    assert_eq!(shapes(&out), [Some((Filter, vec!["orders"])), Some((Filter, vec!["orders"]))]);
+    let facts: Vec<String> = out.iter().map(|s| s.simple.as_ref().unwrap().fact.to_string()).collect();
+    assert_eq!(facts, ["s(orders.amount > 10 | orders)", "s(orders.cust = 1 | orders where orders.amount > 10)"]);
+
+    // A join between the filters, though it keeps each item once.
+    let items = ctx.table("items").await.unwrap().filter(col("part").gt(lit(1))).unwrap();
+    let orders = ctx.table("orders").await.unwrap().select_columns(&["id"]).unwrap();
+    let joined = items.join(orders, JoinType::Inner, &["order_id"], &["id"], None).unwrap();
+    let plan = joined.filter(col("supp").eq(lit(1))).unwrap().into_unoptimized_plan();
+    let out = checked_plan(&ctx, &plan).await;
+    assert_eq!(shapes(&out).last(), Some(&None), "{}", out.last().unwrap());
+}
+
+#[tokio::test]
+async fn a_filter_rechecking_a_parquet_scan_is_a_share_of_the_table() {
+    let ctx = context().await;
+    let dir = std::env::temp_dir().join(format!("cardinal-simple-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("orders.parquet");
+    let copy = format!("COPY orders TO '{}' STORED AS PARQUET", path.display());
+    ctx.sql(&copy).await.unwrap().collect().await.unwrap();
+    ctx.register_parquet("orders_file", path.to_str().unwrap(), Default::default()).await.unwrap();
+    // The scan takes the filter only to prune, and a filter above checks it.
+    let out = checked(&ctx, "SELECT * FROM orders_file WHERE amount > 10", vec![]).await;
+    assert_eq!(shapes(&out), [Some((Filter, vec!["orders_file"]))]);
+    assert_eq!(out[0].simple.as_ref().unwrap().fact.to_string(), "s(orders_file.amount > 10 | orders_file)");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]

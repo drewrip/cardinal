@@ -10,11 +10,14 @@ use std::collections::HashMap;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, Constraint, JoinType, NullEquality};
+use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::logical_plan::{
     Aggregate, Distinct, FetchType, Join, LogicalPlan, SkipType, TableScan,
 };
 use datafusion::logical_expr::utils::split_conjunction;
-use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
+use datafusion::logical_expr::{
+    BinaryExpr, Cast, Expr, ExprSchemable, Operator, TableProviderFilterPushDown, TryCast,
+};
 use z3::ast::{Bool, Int};
 use z3::{Params, Solver};
 
@@ -136,6 +139,37 @@ pub(crate) struct Node {
     /// For an equi-join: whether each left row matches at most one right row
     /// (a unique right key, or a foreign key from the left), and the mirror.
     pub(crate) at_most_once: (bool, bool),
+}
+
+/// True if `scan`'s provider may return rows that fail its pushed filters:
+/// it takes each only to prune (a parquet scan skipping row groups, say),
+/// and DataFusion keeps a filter above to check it.
+pub(crate) fn inexact_filters(scan: &TableScan) -> bool {
+    let Ok(provider) = source_as_provider(&scan.source) else {
+        return false;
+    };
+    let filters: Vec<&Expr> = scan.filters.iter().collect();
+    !filters.is_empty()
+        && provider
+            .supports_filters_pushdown(&filters)
+            .is_ok_and(|s| s.iter().all(|s| *s == TableProviderFilterPushDown::Inexact))
+}
+
+/// For filter node `i` over a scan whose pushed filters are all inexact and
+/// each among its own conjuncts, that scan's node. The scan's rows are a
+/// subset of the table's and hold every row satisfying its filters, so the
+/// filter's rows are exactly the table's rows satisfying its predicate.
+pub(crate) fn rechecked_scan(nodes: &[Node], i: usize) -> Option<usize> {
+    let LogicalPlan::Filter(f) = &nodes[i].plan else {
+        return None;
+    };
+    let k = *nodes[i].inputs.first()?;
+    let LogicalPlan::TableScan(scan) = &nodes[k].plan else {
+        return None;
+    };
+    let conjuncts = split_conjunction(&f.predicate);
+    let rechecked = scan.filters.iter().all(|p| conjuncts.contains(&p));
+    (nodes[k].raw_scan.is_some() && scan.fetch.is_none() && inexact_filters(scan) && rechecked).then_some(k)
 }
 
 /// How long Z3 may spend on one check before answering unknown.
@@ -664,8 +698,11 @@ impl<'a> Analyzer<'a> {
             self.assert(f.card.le(&out.card));
             self.subset_ndv(&f, &out);
             f.facts = out.facts.clone();
-            for filter in &scan.filters {
-                f.facts.assume(filter, plan.schema());
+            // Filters applied inexactly may let through rows that fail them.
+            if !inexact_filters(scan) {
+                for filter in &scan.filters {
+                    f.facts.assume(filter, plan.schema());
+                }
             }
             f.origin = out.origin.clone().map(|x| x.narrow(&f.facts, plan.schema()));
             out = f;

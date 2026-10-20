@@ -724,12 +724,16 @@ plans at their true count as PostgreSQL planned them, 57 as DataFusion does.
 
 A selectivity is a share of its operator's input, and that input is often
 other operators' output. A *simple* selectivity is a share of the rows of
-one stored table alone, whole:
+one stored table alone, whole or, for a filter, filtered:
 
 | Kind | Fact | Over |
 |---|---|---|
-| Filter | `s(p \| T)` | one table |
+| Filter | `s(p \| T)`, or `s(p \| T where q)` | one table, or a chain of filters over it |
 | Distinct | `ndv(k \| T)`, over `\|T\|` | one table |
+
+A filter of a filter over a table is simple, and only filters (or a scan's
+pushed filters) may stand between them: an operator in between, even one
+proven to keep its input's rows (below), makes it not simple.
 
 A join's share of pairs, `s(c | T × U)`, and a semi join's of rows with a
 partner, `m(c | T ⋉ U)`, are not simple.
@@ -748,6 +752,13 @@ scans below them, and predicates and keys as expressions over their columns.
 Only scans of tables count: a view is inlined, and its definition read. A
 join's share whose condition reads one table only is that table's filter
 share, `s(p | T × U) = s(p | T)`.
+
+A scan whose provider takes its pushed filters only to prune (a parquet
+scan skipping row groups, which DataFusion shows as `partial_filters`) may
+let through rows that fail them, and DataFusion keeps a filter above to
+check them. That filter's rows are exactly the table's rows satisfying its
+predicate, so its selectivity is a share of the table's rows, `s(p | T)`,
+and what the scan let through is in no formula.
 
 Where an input is more than whole tables, the constraints may prove it holds
 the same rows as one. Each operator that does is seen through, and listed in
@@ -769,7 +780,12 @@ its share is not of `items` alone. `tests/simple.rs`
 executes every query and checks that each simple selectivity's fact, counted
 over its tables alone, gives the value the execution measured. On TPC-H with
 its foreign keys, 17 of the 67 selectivities DataFusion's plans need are
-simple, and 33 of 101 for DuckDB's.
+simple, and 36 of 101 for DuckDB's.
+
+`examples/selectivity_sample.rs` estimates the simple selectivities of a
+query over real tables and plugs them into its formula: a filter's share on
+a 1% `TABLESAMPLE SYSTEM` of its table, a distinct count with
+`approx_distinct`, each counted by a query `sqlser` writes from the fact.
 
 ## Validation
 

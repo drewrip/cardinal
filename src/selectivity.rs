@@ -13,11 +13,11 @@ use std::collections::HashMap;
 use std::fmt;
 
 use datafusion::common::{Column, JoinType, NullEquality};
+use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, Join, LogicalPlan, SkipType};
 use datafusion::logical_expr::utils::conjunction;
-use datafusion::logical_expr::Expr;
 
-use crate::analyzer::Node;
+use crate::analyzer::{self, Node};
 use crate::bounds::Search;
 use crate::facts::Ratio;
 use crate::first;
@@ -82,7 +82,11 @@ impl Card {
         if constant != Card::Const(1) || out.is_empty() {
             out.insert(0, constant);
         }
-        if out.len() == 1 { out.remove(0) } else { Card::Mul(out) }
+        if out.len() == 1 {
+            out.remove(0)
+        } else {
+            Card::Mul(out)
+        }
     }
 
     fn add(parts: Vec<Card>) -> Card {
@@ -106,7 +110,11 @@ impl Card {
         if constant.num() != 0 || out.is_empty() {
             out.push(Card::ratio(constant));
         }
-        if out.len() == 1 { out.remove(0) } else { Card::Add(out) }
+        if out.len() == 1 {
+            out.remove(0)
+        } else {
+            Card::Add(out)
+        }
     }
 
     /// The exact fraction `r`.
@@ -146,7 +154,9 @@ impl Card {
     pub(crate) fn substitute(&self, f: &dyn Fn(&Card) -> Option<Card>) -> Card {
         match self {
             Card::Const(_) | Card::Ratio(..) => self.clone(),
-            Card::Table(_) | Card::Sel(_) | Card::Operator(_) => f(self).unwrap_or_else(|| self.clone()),
+            Card::Table(_) | Card::Sel(_) | Card::Operator(_) => {
+                f(self).unwrap_or_else(|| self.clone())
+            }
             Card::Mul(ps) => Card::mul(ps.iter().map(|p| p.substitute(f)).collect()),
             Card::Add(ps) => Card::add(ps.iter().map(|p| p.substitute(f)).collect()),
             Card::Not(c) => {
@@ -181,14 +191,21 @@ impl Card {
         match (self, k) {
             (c, 0) => c,
             (Card::Const(n), k) => Card::Const(n.saturating_sub(k)),
-            (c, k) => Card::Max(Box::new(Card::Sub(Box::new(c), k)), Box::new(Card::Const(0))),
+            (c, k) => Card::Max(
+                Box::new(Card::Sub(Box::new(c), k)),
+                Box::new(Card::Const(0)),
+            ),
         }
     }
 
     /// Calls `f` on every leaf.
     pub(crate) fn leaves<'a>(&'a self, f: &mut dyn FnMut(&'a Card)) {
         match self {
-            Card::Const(_) | Card::Ratio(..) | Card::Table(_) | Card::Sel(_) | Card::Operator(_) => f(self),
+            Card::Const(_)
+            | Card::Ratio(..)
+            | Card::Table(_)
+            | Card::Sel(_)
+            | Card::Operator(_) => f(self),
             Card::Mul(ps) | Card::Add(ps) => ps.iter().for_each(|p| p.leaves(f)),
             Card::Not(c) | Card::Sub(c, _) => c.leaves(f),
             Card::Min(a, b) | Card::Max(a, b) => {
@@ -567,7 +584,11 @@ impl fmt::Display for SelectivityReport {
 /// Builds the report for `nodes` (children before parents, the root last).
 /// `scans` maps each base-table scan's variable to its table, and `search`
 /// holds the constraint set.
-pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search) -> SelectivityReport {
+pub(crate) fn build(
+    nodes: &[Node],
+    scans: &[(String, String)],
+    search: &Search,
+) -> SelectivityReport {
     let mut b = Builder {
         all: vec![],
         ratios: vec![],
@@ -579,7 +600,7 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
     let mut operators = vec![];
     let mut local = vec![];
     let mut resolved = vec![];
-    for node in nodes {
+    for (i, node) in nodes.iter().enumerate() {
         // The operator's inputs: variable and cardinality.
         let mut inputs: Vec<(String, Card)> = node
             .inputs
@@ -595,11 +616,23 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
                 }
             }
         }
+        // A filter re-checking a scan's inexact filters keeps exactly the
+        // table's rows satisfying it: its share is of the table's rows, not
+        // of the rows the scan happened to let through.
+        if let Some(k) = analyzer::rechecked_scan(nodes, i) {
+            let raw = &nodes[k].raw_scan.as_ref().expect("checked").0;
+            if let Some((_, table)) = scans.iter().find(|(s, _)| s == raw) {
+                inputs[0] = (raw.clone(), Card::Table(table.clone()));
+            }
+        }
         // The same rule over the inputs' variables, naming the same
         // selectivities: the operator's cardinality relative to its inputs'.
         let inputs_local: Vec<(String, Card)> = match node.plan {
             LogicalPlan::TableScan(_) => inputs.clone(),
-            _ => inputs.iter().map(|(v, _)| (v.clone(), Card::Operator(v.clone()))).collect(),
+            _ => inputs
+                .iter()
+                .map(|(v, _)| (v.clone(), Card::Operator(v.clone())))
+                .collect(),
         };
         let mut relative = b.clone().rule(node, &inputs_local);
         let first = b.all.len();
@@ -624,7 +657,9 @@ pub(crate) fn build(nodes: &[Node], scans: &[(String, String)], search: &Search)
                 b.ratios.truncate(first);
             }
             for i in first..b.all.len() {
-                let Some(complement) = b.ratios[i] else { continue };
+                let Some(complement) = b.ratios[i] else {
+                    continue;
+                };
                 let s = &mut b.all[i];
                 let (lo, hi) = search.ratio(&node.var, &s.over[0]);
                 let (lo, hi) = (lo.0 as f64 / lo.1 as f64, hi.0 as f64 / hi.1 as f64);
@@ -694,11 +729,21 @@ impl Builder<'_> {
         if self.search.zero(v) {
             return Some(Card::Const(0));
         }
-        inputs.iter().find(|(var, _)| self.search.equal(v, var)).map(|(_, c)| (*c).clone())
+        inputs
+            .iter()
+            .find(|(var, _)| self.search.equal(v, var))
+            .map(|(_, c)| (*c).clone())
     }
 
     /// A new selectivity of `node`, measured as `measure / Π over`.
-    fn sel(&mut self, node: &Node, kind: Kind, over: &[&str], measure: String, ratio: Option<bool>) -> Card {
+    fn sel(
+        &mut self,
+        node: &Node,
+        kind: Kind,
+        over: &[&str],
+        measure: String,
+        ratio: Option<bool>,
+    ) -> Card {
         self.count += 1;
         let name = format!("s{}", self.count);
         self.all.push(Selectivity {
@@ -780,7 +825,11 @@ impl Builder<'_> {
                 self.share(node, Kind::Distinct(on.on_expr.clone()), &inputs[0])
             }
             LogicalPlan::Aggregate(agg) => {
-                if agg.group_expr.iter().any(|e| matches!(e, Expr::GroupingSet(_))) {
+                if agg
+                    .group_expr
+                    .iter()
+                    .any(|e| matches!(e, Expr::GroupingSet(_)))
+                {
                     unknown()
                 } else if agg.group_expr.is_empty() {
                     Card::Const(1)
@@ -806,7 +855,12 @@ impl Builder<'_> {
         // auxiliary count, which the analysis also names (`{var}_{suffix}`)
         // and may determine.
         let own = (node.var.clone(), None);
-        let aux = |suffix: &str| (format!("{}#{suffix}", node.var), Some(format!("{}_{suffix}", node.var)));
+        let aux = |suffix: &str| {
+            (
+                format!("{}#{suffix}", node.var),
+                Some(format!("{}_{suffix}", node.var)),
+            )
+        };
         let pairs = |b: &mut Builder, (measure, count): (String, Option<String>)| {
             let kind = Kind::Join {
                 on: on.clone(),
@@ -820,7 +874,11 @@ impl Builder<'_> {
             Card::mul(vec![l.clone(), r.clone(), s])
         };
         // The rows of one side with a match, or (`anti`) without one.
-        let matched = |b: &mut Builder, left: bool, (measure, count): (String, Option<String>), anti: bool, ratio: bool| {
+        let matched = |b: &mut Builder,
+                       left: bool,
+                       (measure, count): (String, Option<String>),
+                       anti: bool,
+                       ratio: bool| {
             let kind = Kind::Match {
                 on: on.clone(),
                 filter: filter.clone(),
@@ -832,7 +890,11 @@ impl Builder<'_> {
             if let Some(known) = count.and_then(|c| b.known(&c, &[(v, side)])) {
                 b.resolve_last();
                 let all = known != Card::Const(0);
-                return if all != anti { side.clone() } else { Card::Const(0) };
+                return if all != anti {
+                    side.clone()
+                } else {
+                    Card::Const(0)
+                };
             }
             let m = if anti { Card::Not(Box::new(m)) } else { m };
             Card::mul(vec![side.clone(), m])
@@ -840,7 +902,9 @@ impl Builder<'_> {
         // On exactly the partition of a side's first rows, a row of the other
         // side has one partner if it has any: the rows of a semi join.
         let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
-        let plain = join.join_type == JoinType::Inner && filter.is_none() && join.null_equality == NullEquality::NullEqualsNothing;
+        let plain = join.join_type == JoinType::Inner
+            && filter.is_none()
+            && join.null_equality == NullEquality::NullEqualsNothing;
         if plain && first::on_partition(&join.right, &rk) {
             return matched(self, true, own, false, true);
         }
