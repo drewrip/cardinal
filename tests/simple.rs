@@ -88,7 +88,7 @@ fn shapes(out: &[SimpleSelectivity]) -> Vec<Option<(SimpleKind, Vec<&str>)>> {
         .collect()
 }
 
-use SimpleKind::{Distinct, Filter, Join, Semi};
+use SimpleKind::{Distinct, Filter};
 
 #[tokio::test]
 async fn views_and_ctes_read_as_their_tables() {
@@ -107,15 +107,20 @@ async fn views_and_ctes_read_as_their_tables() {
 }
 
 #[tokio::test]
-async fn joins_of_two_tables() {
+async fn joins_and_semi_joins_are_not_simple() {
     for sql in [
         "SELECT * FROM orders o JOIN items i ON o.id = i.part",
         "SELECT * FROM all_orders o JOIN items i ON o.order_id = i.part",
+        "SELECT * FROM orders o1 JOIN orders o2 ON o1.cust = o2.id",
     ] {
-        assert_eq!(shapes(&simple(sql).await), [Some((Join, vec!["items", "orders"]))], "{sql}");
+        let out = simple(sql).await;
+        assert_eq!(shapes(&out), [None], "{sql}");
+        assert!(out[0].simple.as_ref().unwrap_err().contains("join condition"), "{}", out[0]);
     }
-    let sql = "SELECT * FROM orders o1 JOIN orders o2 ON o1.cust = o2.id";
-    assert_eq!(shapes(&simple(sql).await), [Some((Join, vec!["orders", "orders"]))]);
+    let sql = "SELECT * FROM orders o WHERE EXISTS (SELECT 1 FROM items i WHERE i.part = o.id)";
+    let out = simple(sql).await;
+    assert_eq!(shapes(&out), [None]);
+    assert!(out[0].simple.as_ref().unwrap_err().contains("semi join"), "{}", out[0]);
 }
 
 #[tokio::test]
@@ -134,9 +139,7 @@ async fn shares_of_filtered_rows_are_not_simple() {
 }
 
 #[tokio::test]
-async fn semi_joins_and_distinct_counts() {
-    let sql = "SELECT * FROM orders o WHERE EXISTS (SELECT 1 FROM items i WHERE i.part = o.id)";
-    assert_eq!(shapes(&simple(sql).await), [Some((Semi, vec!["orders", "items"]))]);
+async fn distinct_counts() {
     for sql in ["SELECT cust, count(*) FROM orders GROUP BY cust", "SELECT DISTINCT customer FROM all_orders"] {
         let out = simple(sql).await;
         assert_eq!(shapes(&out), [Some((Distinct, vec!["orders"]))], "{sql}");
@@ -150,8 +153,8 @@ async fn joins_on_foreign_keys_drop_what_nothing_reads() {
     for (sql, shape) in [
         ("SELECT i.part, count(*) FROM items i JOIN orders o ON i.order_id = o.id GROUP BY i.part", (Distinct, vec!["items"])),
         (
-            "SELECT * FROM (SELECT i.* FROM items i JOIN orders o ON i.order_id = o.id) x JOIN customers c ON x.part = c.id",
-            (Join, vec!["customers", "items"]),
+            "SELECT DISTINCT x.supp FROM (SELECT i.* FROM items i JOIN orders o ON i.order_id = o.id) x",
+            (Distinct, vec!["items"]),
         ),
     ] {
         let out = simple(sql).await;
@@ -159,9 +162,9 @@ async fn joins_on_foreign_keys_drop_what_nothing_reads() {
         assert_eq!(out[0].simple.as_ref().unwrap().proof.len(), 1, "{}", out[0]);
     }
     // Every order has a customer: the semi join keeps every order.
-    let sql = "SELECT * FROM (SELECT * FROM orders WHERE cust IN (SELECT id FROM customers)) o JOIN items i ON o.id = i.part";
+    let sql = "SELECT cust, count(*) FROM (SELECT * FROM orders WHERE cust IN (SELECT id FROM customers)) o GROUP BY cust";
     let out = simple(sql).await;
-    assert_eq!(shapes(&out), [Some((Join, vec!["items", "orders"]))]);
+    assert_eq!(shapes(&out), [Some((Distinct, vec!["orders"]))]);
     assert!(out[0].simple.as_ref().unwrap().proof[0].contains("keeps every row"), "{}", out[0]);
     // A filter on the order reads it.
     let sql = "SELECT * FROM items i JOIN orders o ON i.order_id = o.id WHERE o.amount > 10";

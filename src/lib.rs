@@ -199,9 +199,8 @@ impl Analysis {
     }
 
     /// Each selectivity of [`Analysis::selectivity`]'s `required`, and
-    /// whether it is *simple*: a filter's share of one stored table's rows, a
-    /// join's of two tables' pairs, a semi join's of one table's rows with a
-    /// partner in another, or a distinct count per row of one table. Views,
+    /// whether it is *simple*: a filter's share of one stored table's rows,
+    /// or a distinct count per row of one table. Views,
     /// CTEs and projections are seen through, and operators the constraints
     /// prove keep their input's rows one for one are too. Needs
     /// [`Options::selectivity`].

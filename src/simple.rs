@@ -3,14 +3,14 @@
 //!
 //! A selectivity is a share of its operator's input, and an input is often
 //! the output of other operators: a filtered table, a join, a GROUP BY. A
-//! simple selectivity is one whose input is one or two stored tables, whole:
+//! simple selectivity is one whose input is one stored table, whole:
 //!
 //! - a filter's share of one table's rows, `s(p | T)`;
-//! - a join's share of the pairs of two tables' rows, `s(c | T × U)`;
-//! - a semi join's share of one table's rows with a partner in another,
-//!   `m(c | T ⋉ U)`;
 //! - a GROUP BY's or DISTINCT's distinct count per row of one table,
 //!   `ndv(k | T) / |T|`.
+//!
+//! A join's share of pairs, or a semi join's of rows with a partner, is not
+//! simple.
 //!
 //! An operator's rows are named as facts name them ([`Logical`]): views,
 //! CTEs, subqueries, projections and aliases are seen through to the scans of
@@ -47,12 +47,6 @@ use crate::{first, Analysis, Error, Result};
 pub enum SimpleKind {
     /// `s(p | T)`: the share of one table's rows satisfying a predicate.
     Filter,
-    /// `s(c | T × U)`: the share of pairs of two tables' rows satisfying a
-    /// join condition.
-    Join,
-    /// `m(c | T ⋉ U)`: the share of one table's rows with a partner in
-    /// another.
-    Semi,
     /// `ndv(k | T) / |T|`: distinct values of keys per row of one table.
     Distinct,
 }
@@ -61,8 +55,6 @@ impl fmt::Display for SimpleKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             SimpleKind::Filter => "filter",
-            SimpleKind::Join => "join",
-            SimpleKind::Semi => "semi join",
             SimpleKind::Distinct => "distinct",
         })
     }
@@ -72,13 +64,11 @@ impl fmt::Display for SimpleKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Simple {
     pub kind: SimpleKind,
-    /// The stored tables it is a share of: one, or two for a join, or for a
-    /// semi join the kept table, then the other. A table read twice is named
-    /// twice.
+    /// The stored table it is a share of.
     pub tables: Vec<String>,
-    /// The fact that is its value, canonically named, over those tables'
-    /// rows: [`FactKind::Selectivity`], [`FactKind::Match`] or
-    /// [`FactKind::Distinct`] (whose value is over the table's size).
+    /// The fact that is its value, canonically named, over that table's
+    /// rows: [`FactKind::Selectivity`] or [`FactKind::Distinct`] (whose value
+    /// is over the table's size).
     pub fact: FactKind,
     /// What the constraints proved to name it over the tables, if more than
     /// seeing through views, CTEs and projections: each operator below it
@@ -156,7 +146,7 @@ fn classify(kind: &FactKind) -> std::result::Result<Simple, String> {
             match &tables[..] {
                 [t] => Ok(simple(SimpleKind::Filter, vec![t], kind.clone())),
                 [t, u] => match (reads(pred, t), reads(pred, u)) {
-                    (true, true) => Ok(simple(SimpleKind::Join, vec![t, u], kind.clone())),
+                    (true, true) => Err("a join condition".into()),
                     // A condition on one side's rows: that side's share.
                     (true, false) | (false, true) => {
                         let t = if reads(pred, t) { t } else { u };
@@ -170,13 +160,7 @@ fn classify(kind: &FactKind) -> std::result::Result<Simple, String> {
                 _ => Err(format!("over {} tables", tables.len())),
             }
         }
-        FactKind::Match { kept, other, .. } => {
-            let (k, o) = (whole(kept)?, whole(other)?);
-            match (&k[..], &o[..]) {
-                ([k], [o]) => Ok(simple(SimpleKind::Semi, vec![k, o], kind.clone())),
-                _ => Err(format!("a semi join of {} tables with {}", k.len(), o.len())),
-            }
-        }
+        FactKind::Match { .. } => Err("a semi join".into()),
         FactKind::Distinct { over, .. } => match &whole(over)?[..] {
             [t] => Ok(simple(SimpleKind::Distinct, vec![t], kind.clone())),
             tables => Err(format!("distinct over {} tables", tables.len())),

@@ -724,14 +724,15 @@ plans at their true count as PostgreSQL planned them, 57 as DataFusion does.
 
 A selectivity is a share of its operator's input, and that input is often
 other operators' output. A *simple* selectivity is a share of the rows of
-stored tables alone, whole:
+one stored table alone, whole:
 
 | Kind | Fact | Over |
 |---|---|---|
 | Filter | `s(p \| T)` | one table |
-| Join | `s(c \| T × U)` | two tables (a table read twice counts twice) |
-| Semi join | `m(c \| T ⋉ U)` | a kept table, and the other |
 | Distinct | `ndv(k \| T)`, over `\|T\|` | one table |
+
+A join's share of pairs, `s(c | T × U)`, and a semi join's of rows with a
+partner, `m(c | T ⋉ U)`, are not simple.
 
 ```rust
 for s in analysis.simple_selectivities()? {
@@ -763,11 +764,11 @@ the same rows as one. Each operator that does is seen through, and listed in
 
 So `SELECT i.part, count(*) FROM items i JOIN orders o ON i.order_id = o.id
 GROUP BY i.part`, with a foreign key from `items` to `orders`, needs
-`ndv(items.part | items)`. A filter on `o.amount` above reads the order, and
-the join's share stays one of pairs of filtered rows. `tests/simple.rs`
+`ndv(items.part | items)`. A filter on `o.amount` above reads the order, so
+its share is not of `items` alone. `tests/simple.rs`
 executes every query and checks that each simple selectivity's fact, counted
 over its tables alone, gives the value the execution measured. On TPC-H with
-its foreign keys, 18 of the 67 selectivities DataFusion's plans need are
+its foreign keys, 17 of the 67 selectivities DataFusion's plans need are
 simple, and 33 of 101 for DuckDB's.
 
 ## Validation
