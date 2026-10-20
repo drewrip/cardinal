@@ -30,8 +30,12 @@ use crate::{Error, Result};
 
 /// Reads a DuckDB profile, as printed by `EXPLAIN (ANALYZE, FORMAT JSON)`,
 /// against the tables in `catalog`. `name` names the query in provenance.
-pub fn from_duckdb(catalog: &Catalog, name: &str, json: &str) -> Result<ObservedPlan> {
-    read(catalog, name, json, None, true)
+/// `sql`, the query, names what the plan prints only by alias and vouches for
+/// join conditions; without it, the profile's own query text is used. Pass it
+/// when that text does not compare what the plan joins: a `CREATE TABLE AS`
+/// whose joins are written in the views it reads, say.
+pub fn from_duckdb(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>) -> Result<ObservedPlan> {
+    read(catalog, name, json, sql, true)
 }
 
 /// Reads the plan DuckDB chose for a query, as printed by `EXPLAIN (FORMAT

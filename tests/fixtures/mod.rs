@@ -77,7 +77,7 @@ fn fixtures_in(dir: &str) -> Vec<(String, String)> {
 
 pub async fn plans(dir: &str) -> Vec<ObservedPlan> {
     let catalog = catalog().await;
-    fixtures(dir).iter().map(|(name, json)| from_duckdb(&catalog, name, json).unwrap()).collect()
+    fixtures(dir).iter().map(|(name, json)| from_duckdb(&catalog, name, json, None).unwrap()).collect()
 }
 
 /// The query each profile of `dir` ran, by name: TPC-H's from `tests/tpch`,

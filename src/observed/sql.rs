@@ -607,7 +607,21 @@ impl Visitor for Scan {
             self.distinct_on |= matches!(s.distinct, Some(ast::Distinct::On(_)));
             for item in &s.projection {
                 if let SelectItem::ExprWithAlias { expr, alias } = item {
-                    self.aliases.push((alias.value.to_lowercase(), expr.clone()));
+                    let alias = alias.value.to_lowercase();
+                    // `t.x AS x` passes a column on under its own name, as
+                    // unparsed queries do at every level: it names nothing
+                    // new, and would make `x` name two expressions where
+                    // another level defines it.
+                    let passed_on = match expr {
+                        Expr::Identifier(i) => i.value.to_lowercase() == alias,
+                        Expr::CompoundIdentifier(p) => {
+                            p.last().is_some_and(|i| i.value.to_lowercase() == alias)
+                        }
+                        _ => false,
+                    };
+                    if !passed_on {
+                        self.aliases.push((alias, expr.clone()));
+                    }
                 }
             }
         }

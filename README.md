@@ -270,7 +270,7 @@ number known exactly from an executed plan: `|lineitem| = 60175`,
 
 ```rust
 let catalog = Catalog::from_context(&ctx).await?;           // schemas only
-let plan = observed::from_duckdb(&catalog, "q1", &json)?;   // EXPLAIN (ANALYZE, FORMAT JSON)
+let plan = observed::from_duckdb(&catalog, "q1", &json, None)?;   // EXPLAIN (ANALYZE, FORMAT JSON)
 let facts = facts::derive_facts(&[plan, ...]);
 println!("{facts}");
 // or, from PostgreSQL's EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON):
@@ -300,8 +300,10 @@ are written that way.
 `from_duckdb` reads DuckDB's profile, resolving names only when one column
 has the name, and positions (`#2`) only where the column order is known (not
 above a join, which drops and reorders columns unseen). What does not resolve
-is kept as text and gives no facts. It also reads the query text the profile
-includes, for two things the plan does not print reliably:
+is kept as text and gives no facts. It also reads the query text, for things
+the plan does not print reliably: the profile's own, or the query passed as
+`sql`. Pass it when the profile's text does not compare what the plan joins,
+as a `CREATE TABLE AS` over views whose definitions hold the joins:
 
 - *Aliases.* A projection may print only `nation` or `o_year`; the alias's
   row-level expression in the query (`extract(year from o_orderdate)`) is

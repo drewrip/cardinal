@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 async fn plan(name: &str) -> ObservedPlan {
     let catalog = catalog().await;
-    from_duckdb(&catalog, name, &std::fs::read_to_string(format!("{DIR}/extra/{name}.json")).unwrap()).unwrap()
+    from_duckdb(&catalog, name, &std::fs::read_to_string(format!("{DIR}/extra/{name}.json")).unwrap(), None).unwrap()
 }
 
 /// True counts, by the names in `expected.sql`.
@@ -209,7 +209,7 @@ async fn projections_pass_through() {
     let direct = node("FILTER", 6959, json!({"Expression": "((l_extendedprice * 2) > 10000.00)"}), vec![scan()]);
     let key = "s(lineitem.l_extendedprice * 2 > 10000.00 | lineitem)";
     for (name, plan) in [("over", over), ("direct", direct)] {
-        let facts = derive_facts(&[from_duckdb(&catalog, name, &plan.to_string()).unwrap()]);
+        let facts = derive_facts(&[from_duckdb(&catalog, name, &plan.to_string(), None).unwrap()]);
         assert_eq!(value(&facts, key), ratio(6959, 60175), "{name}");
     }
 }
@@ -334,10 +334,33 @@ async fn misnamed_condition() {
         j["query_name"] = json!(sql);
         j.to_string()
     };
-    let vouched = from_duckdb(&catalog, "ok", &join("select * from orders, customer where o_custkey = c_custkey")).unwrap();
+    let vouched = from_duckdb(&catalog, "ok", &join("select * from orders, customer where o_custkey = c_custkey"), None).unwrap();
     assert!(matches!(states(&vouched)[2], State::Clean(_)));
-    let wrong = from_duckdb(&catalog, "wrong", &join("select * from orders, customer where o_orderkey = c_custkey")).unwrap();
+    let wrong = from_duckdb(&catalog, "wrong", &join("select * from orders, customer where o_orderkey = c_custkey"), None).unwrap();
     assert!(matches!(states(&wrong)[2], State::Tainted(_)), "{:?}", states(&wrong)[2]);
+}
+
+/// A query passed in vouches in place of the profile's own text: here a
+/// `CREATE TABLE AS` over a view, which does not compare what it joins.
+#[tokio::test]
+async fn query_passed_in() {
+    let catalog = catalog().await;
+    let scan = |table: &str, cols: Vec<&str>, rows| {
+        node("TABLE_SCAN", rows, json!({"Table": format!("tpch.main.{table}"), "Projections": cols}), vec![])
+    };
+    let mut j = node(
+        "HASH_JOIN",
+        100,
+        json!({"Join Type": "INNER", "Conditions": "o_custkey = c_custkey"}),
+        vec![scan("orders", vec!["o_custkey"], 15000), scan("customer", vec!["c_custkey"], 1500)],
+    );
+    j["query_name"] = json!("CREATE TABLE t AS SELECT * FROM v");
+    let json = j.to_string();
+    let own = from_duckdb(&catalog, "own", &json, None).unwrap();
+    assert!(matches!(states(&own)[2], State::Tainted(_)), "{:?}", states(&own)[2]);
+    let sql = "select * from orders join customer on o_custkey = c_custkey";
+    let passed = from_duckdb(&catalog, "passed", &json, Some(sql)).unwrap();
+    assert!(matches!(states(&passed)[2], State::Clean(_)), "{:?}", states(&passed)[2]);
 }
 
 /// Self-joins, CTEs, aggregate values, and aliases.
@@ -403,4 +426,18 @@ fn ratio_reads_reduced() {
     let r: Ratio = serde_json::from_value(json!({"num": 4, "den": 6})).unwrap();
     assert_eq!((r.num(), r.den()), (2, 3));
     assert!(serde_json::from_value::<Ratio>(json!({"num": 1, "den": 0})).is_err());
+}
+
+/// A column passed on under its own name, as an unparsed query does at
+/// every level, leaves the alias naming what the level below defines.
+#[tokio::test]
+async fn aliases_passed_on() {
+    let catalog = catalog().await;
+    let sql = "select q.twice as twice from (select l_quantity * 2 as twice from lineitem) q";
+    let q = cardinal::observed::QueryText::parse(&catalog, sql).unwrap();
+    assert_eq!(q.alias("twice"), Some("l_quantity * 2"));
+    // A real rename still names two expressions, and so neither.
+    let sql = "select q.other as twice from (select l_quantity * 2 as twice, l_tax as other from lineitem) q";
+    let q = cardinal::observed::QueryText::parse(&catalog, sql).unwrap();
+    assert_eq!(q.alias("twice"), None);
 }

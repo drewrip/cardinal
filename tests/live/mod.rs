@@ -370,7 +370,7 @@ impl Engine {
     /// A profile of `sql`, read.
     pub fn read(&self, catalog: &Catalog, name: &str, json: &str, sql: &str) -> Result<ObservedPlan, String> {
         match self {
-            Engine::DuckDb(_) => from_duckdb(catalog, name, json),
+            Engine::DuckDb(_) => from_duckdb(catalog, name, json, None),
             Engine::Postgres(_) => from_postgres(catalog, name, json, Some(sql)),
         }
         .map_err(|e| e.to_string())
