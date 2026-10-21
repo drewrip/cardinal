@@ -35,7 +35,7 @@ pub(crate) struct Logical {
     /// Each base-table scan's instance, by node.
     pub instances: Vec<Option<String>>,
     /// Each node's output columns, over instance columns.
-    lineage: Vec<Vec<Option<Expr>>>,
+    pub lineage: Vec<Vec<Option<Expr>>>,
     /// The schema of every table scanned, by name.
     tables: HashMap<String, SchemaRef>,
     /// Every aggregate value's column, with its type.

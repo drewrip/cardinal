@@ -1,6 +1,8 @@
 //! Facts about rows related to an operator's, but not its own: a count of
 //! the same join over a filtered input is a lower bound on the join, since
-//! dropping a filter only adds rows.
+//! dropping a filter only adds rows, and a count of wider rows an upper
+//! bound. A column's distinct count over a table bounds every GROUP BY on
+//! it above that table, through the constraints.
 //!
 //! Each fact is a count of the data, taken with SQL, so every bound must
 //! hold of the query's true row count.
@@ -22,6 +24,8 @@ async fn context() -> SessionContext {
         "INSERT INTO products VALUES (1, 7), (2, 7), (3, 11), (4, 12), (5, 3), (6, 3)",
         "CREATE TABLE sales (product_id INT, store INT)",
         "INSERT INTO sales VALUES (1, 1), (1, 2), (2, 1), (3, 1), (3, 2), (3, 2), (4, 1), (5, 2), (5, 1), (7, 1)",
+        "CREATE TABLE reviews (emp_id INT, score INT)",
+        "INSERT INTO reviews VALUES (1, 3), (1, NULL), (2, 4), (2, 5), (3, NULL), (4, 1), (4, 2), (4, 3), (5, 5), (6, NULL)",
     ] {
         ctx.sql(sql).await.unwrap().collect().await.unwrap();
     }
@@ -70,6 +74,22 @@ async fn counted(facts: &[(Context, &str)]) -> FactSet {
         set.insert(Fact { kind: FactKind::Cardinality(c.canonical()), value, origins: vec![Origin::Counted] });
     }
     set
+}
+
+/// Facts `ndv(column | table)`, each counted by SQL.
+async fn distinct(set: &mut FactSet, columns: &[(&str, &str)]) {
+    for (table, column) in columns {
+        let kind = FactKind::Distinct { keys: terms([col(format!("{table}.{column}"))]), over: t(table) };
+        let value = Ratio::int(count(&format!("SELECT DISTINCT {column} FROM {table}")).await);
+        set.insert(Fact { kind: kind.canonical(), value, origins: vec![Origin::Counted] });
+    }
+}
+
+/// Facts `|table|` for each of `tables`.
+async fn sizes(tables: &[&str]) -> FactSet {
+    let facts: Vec<(Context, String)> = tables.iter().map(|n| (t(n), format!("SELECT * FROM {n}"))).collect();
+    let facts: Vec<(Context, &str)> = facts.iter().map(|(c, sql)| (c.clone(), sql.as_str())).collect();
+    counted(&facts).await
 }
 
 /// `sql` informed by `facts`; checks its true row count lies in the range.
@@ -175,4 +195,48 @@ async fn limits_and_groups_bound_nothing_yet() {
     let facts = counted(&[(group, sql)]).await;
     let all = "SELECT p.category FROM sales s JOIN products p ON s.product_id = p.id GROUP BY p.category";
     assert!(informed(all, &facts, FactMode::Ratios).await.0.floors.is_empty());
+}
+
+#[tokio::test]
+async fn a_tables_distinct_count_bounds_a_filtered_group_by() {
+    // dee's review_agg: only the unfiltered distinct count is known.
+    let mut facts = sizes(&["reviews"]).await;
+    distinct(&mut facts, &[("reviews", "emp_id")]).await;
+    let sql = "SELECT emp_id, count(*) FROM reviews WHERE score IS NOT NULL GROUP BY emp_id";
+    let ndv = count("SELECT DISTINCT emp_id FROM reviews").await;
+    let (i, range) = informed(sql, &facts, FactMode::Pinned).await;
+    assert_eq!(range.1, Some(ndv), "{i}");
+    assert!(ndv < count("SELECT * FROM reviews").await);
+}
+
+#[tokio::test]
+async fn a_dimensions_distinct_count_bounds_a_group_by_over_a_join() {
+    let mut facts = sizes(&["sales", "products"]).await;
+    distinct(&mut facts, &[("products", "category"), ("sales", "store")]).await;
+    let categories = count("SELECT DISTINCT category FROM products").await;
+    let stores = count("SELECT DISTINCT store FROM sales").await;
+    let sql = "SELECT p.category, count(*) FROM sales s JOIN products p ON s.product_id = p.id GROUP BY p.category";
+    assert_eq!(informed(sql, &facts, FactMode::Pinned).await.1.1, Some(categories));
+    let sql = "SELECT p.category, s.store, count(*) FROM sales s JOIN products p ON s.product_id = p.id
+               GROUP BY p.category, s.store";
+    assert_eq!(informed(sql, &facts, FactMode::Pinned).await.1.1, Some(categories * stores));
+    // A left join pads with NULL: one more value.
+    let sql = "SELECT p.category, count(*) FROM sales s LEFT JOIN products p ON s.product_id = p.id GROUP BY p.category";
+    assert_eq!(informed(sql, &facts, FactMode::Pinned).await.1.1, Some(categories + 1));
+    // Ratios leave the counts to grow with the tables.
+    assert_eq!(informed(sql, &facts, FactMode::Ratios).await.0.pinned_ndv, vec![]);
+}
+
+#[tokio::test]
+async fn wider_rows_bound_narrower_above() {
+    let store = terms([col("sales.store").eq(lit(1))]);
+    let wide = "SELECT * FROM sales WHERE store = 1";
+    let mut facts = counted(&[(t("sales").filter(&store), wide)]).await;
+    let narrow = "SELECT * FROM sales WHERE store = 1 AND product_id > 2";
+    assert_eq!(informed(narrow, &facts, FactMode::Pinned).await.1.1, Some(count(wide).await));
+    // So does a join's count bound it over a narrower input.
+    for f in counted(&[(joined(), JOIN)]).await.iter() {
+        facts.insert(f.clone());
+    }
+    assert_eq!(informed(SEVEN, &facts, FactMode::Pinned).await.1.1, Some(count(JOIN).await));
 }

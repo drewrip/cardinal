@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use datafusion::common::JoinType;
+use datafusion::logical_expr::Expr;
 use z3::ast::{Int, Real};
 
 use crate::analyzer::Node;
@@ -76,6 +77,9 @@ pub struct Informed {
     pub pinned: Vec<(String, u64)>,
     /// Operator variables capped by a known upper bound on their rows.
     pub capped: Vec<(String, u64)>,
+    /// NDV variables, of an operator's output column, held at (or capped by)
+    /// the distinct count a fact gives of it. Pinned only.
+    pub pinned_ndv: Vec<(String, u64)>,
     /// Operator variables held at or above a row count the facts give of
     /// narrower rows: the same rows with more filters, say. These hold in
     /// either mode, as the tables grow too.
@@ -238,6 +242,7 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
     // where consistent.
     let mut pinned = vec![];
     let mut capped = vec![];
+    let mut pinned_ndv = vec![];
     if mode == FactMode::Pinned {
         for (var, n) in lookup.sizes() {
             let claim = Int::new_const(var.as_str()).eq(Int::from_u64(n));
@@ -247,6 +252,20 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
                     pinned.push((var, n));
                 }
                 Some(false) => rejected.push((var, format!("{n} rows contradicts the constraints"))),
+                None => {}
+            }
+        }
+        // Each column's distinct values: the constraints carry them up
+        // through filters and joins to the GROUP BYs and DISTINCTs above.
+        for (var, n, exact) in lookup.ndvs() {
+            let (v, k) = (Int::new_const(var.as_str()), Int::from_u64(n));
+            let claim = if exact { v.eq(k) } else { v.le(k) };
+            match search.assume(&claim) {
+                Some(true) => {
+                    extra.push(claim);
+                    pinned_ndv.push((var, n));
+                }
+                Some(false) => rejected.push((var, format!("{n} distinct values contradicts the constraints"))),
                 None => {}
             }
         }
@@ -319,6 +338,7 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         rejected,
         pinned,
         capped,
+        pinned_ndv,
         floors,
         unchecked,
         report: report.clone(),
@@ -526,8 +546,8 @@ impl<'a> Lookup<'a> {
         }
     }
 
-    /// Every operator's upper bound on its rows that a bound gives, by
-    /// variable.
+    /// Every operator's upper bound on its rows that a bound gives, or a
+    /// row count of wider rows than its own ([`fewer`]), by variable.
     fn caps(&self) -> Vec<(String, u64)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
@@ -540,6 +560,54 @@ impl<'a> Lookup<'a> {
             };
             if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
                 out.push((node.var.clone(), n));
+            }
+            // Row counts, exact or bounds, of wider rows than the operator's.
+            let ctx = ctx.canonical();
+            let tables = ctx.tables();
+            for f in self.facts.iter().chain(self.facts.bounds()) {
+                let FactKind::Cardinality(c) = &f.kind else { continue };
+                if *c != ctx
+                    && !self.conflicted.contains(&f.kind)
+                    && c.tables().is_subset(&tables)
+                    && let Some(n) = f.value.as_int()
+                    && renamed(&ctx, c, fewer)
+                {
+                    out.push((node.var.clone(), n));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every output column's distinct count that a fact gives over its
+    /// operator's rows, by NDV variable, and whether it is exact (else an
+    /// upper bound). A scan with pushed filters gives its table's too, on
+    /// the raw scan's variables. Float columns are left out: the
+    /// constraints count their values by bits, the facts by SQL equality.
+    fn ndvs(&self) -> Vec<(String, u64, bool)> {
+        let mut out = vec![];
+        for (i, node) in self.nodes.iter().enumerate() {
+            let schema = node.plan.schema();
+            let mut over = vec![];
+            if let Ok(ctx) = &self.logical.contexts[i] {
+                over.push((ctx.clone(), &node.ndv_vars));
+            }
+            if let (Some((_, raw, _)), Some(instance)) = (&node.raw_scan, &self.logical.instances[i]) {
+                over.push((Context::table(instance), raw));
+            }
+            for (ctx, vars) in over {
+                for (j, var) in vars.iter().enumerate() {
+                    let Some(Some(e @ Expr::Column(_))) = self.logical.lineage[i].get(j) else { continue };
+                    if j >= schema.fields().len() || schema.field(j).data_type().is_floating() {
+                        continue;
+                    }
+                    let kind = FactKind::Distinct { keys: [Term::new(e.clone())].into(), over: ctx.clone() };
+                    if let Some(n) = self.fact(kind.clone()).and_then(|(v, _)| v.as_int()) {
+                        out.push((var.clone(), n, true));
+                    } else if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
+                        out.push((var.clone(), n, false));
+                    }
+                }
             }
         }
         out
