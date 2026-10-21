@@ -8,6 +8,7 @@
 //! that follows from it.
 
 mod canonical;
+pub(crate) mod contain;
 mod context;
 mod derive;
 pub(crate) mod logical;

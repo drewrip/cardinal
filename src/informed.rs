@@ -22,6 +22,7 @@ use z3::ast::{Int, Real};
 
 use crate::analyzer::Node;
 use crate::bounds::{Bounds, Search};
+use crate::facts::contain::{fewer, renamed};
 use crate::facts::logical::Logical;
 use crate::facts::{Context, FactKind, FactSet, Ratio, Term};
 use crate::selectivity::{Card, Interval, Kind, Selectivity, SelectivityReport};
@@ -75,6 +76,10 @@ pub struct Informed {
     pub pinned: Vec<(String, u64)>,
     /// Operator variables capped by a known upper bound on their rows.
     pub capped: Vec<(String, u64)>,
+    /// Operator variables held at or above a row count the facts give of
+    /// narrower rows: the same rows with more filters, say. These hold in
+    /// either mode, as the tables grow too.
+    pub floors: Vec<(String, u64)>,
     /// Selectivities whose relation to the constraints could not be checked
     /// in time, and so is not among them.
     pub unchecked: Vec<String>,
@@ -110,7 +115,8 @@ impl Informed {
     }
 
     /// The proven `lo <= X <= hi`, with no `hi` if none is proven: a constant
-    /// range, cheaper than [`Informed::bounds`].
+    /// range, cheaper than [`Informed::bounds`]. `lo` takes in the
+    /// [`Informed::floors`].
     pub fn range(&self) -> Result<(u64, Option<u64>)> {
         let search = self.search()?;
         Ok((search.lower(), search.constant()))
@@ -139,6 +145,9 @@ impl fmt::Display for Informed {
         }
         for (s, why) in &self.rejected {
             write!(f, "\n  {s}: rejected ({why})")?;
+        }
+        for (v, n) in &self.floors {
+            write!(f, "\n  {v} >= {n}")?;
         }
         Ok(())
     }
@@ -257,6 +266,20 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         }
     }
 
+    // Every row count of narrower rows than an operator's: a lower bound.
+    let mut floors = vec![];
+    for (var, n, fact) in lookup.floors() {
+        let claim = Int::new_const(var.as_str()).ge(Int::from_u64(n));
+        match search.assume(&claim) {
+            Some(true) => {
+                extra.push(claim);
+                floors.push((var, n));
+            }
+            Some(false) => rejected.push((var, format!("at least {n} rows from {fact} contradicts the constraints"))),
+            None => {}
+        }
+    }
+
     // The formula, with the values substituted.
     let tables: HashMap<String, u64> = match mode {
         FactMode::Ratios => HashMap::new(),
@@ -296,6 +319,7 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         rejected,
         pinned,
         capped,
+        floors,
         unchecked,
         report: report.clone(),
         constraints,
@@ -516,6 +540,33 @@ impl<'a> Lookup<'a> {
             };
             if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
                 out.push((node.var.clone(), n));
+            }
+        }
+        out
+    }
+
+    /// Each operator's lower bounds on its rows that facts give of narrower
+    /// rows ([`fewer`]), by variable, with the fact each is from. Each is
+    /// asserted, and the solver keeps the largest.
+    fn floors(&self) -> Vec<(String, u64, String)> {
+        let counts: Vec<(&Context, u64, String)> = self
+            .facts
+            .iter()
+            .filter(|f| !self.conflicted.contains(&f.kind))
+            .filter_map(|f| match &f.kind {
+                FactKind::Cardinality(c) => Some((c, f.value.as_int()?, f.kind.to_string())),
+                _ => None,
+            })
+            .collect();
+        let mut out = vec![];
+        for (i, node) in self.nodes.iter().enumerate() {
+            let Ok(ctx) = &self.logical.contexts[i] else { continue };
+            let ctx = ctx.canonical();
+            let tables = ctx.tables();
+            for (c, n, fact) in &counts {
+                if **c != ctx && tables.is_subset(&c.tables()) && renamed(c, &ctx, fewer) {
+                    out.push((node.var.clone(), *n, fact.clone()));
+                }
             }
         }
         out

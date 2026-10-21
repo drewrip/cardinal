@@ -14,7 +14,7 @@ use crate::observed::base_table;
 
 /// More orders than this are not tried: instances are then numbered as they
 /// first appear, which is deterministic but may keep equal facts apart.
-const MAX_ORDERS: usize = 5040;
+pub(crate) const MAX_ORDERS: usize = 5040;
 
 impl FactKind {
     /// This fact with its table instances canonically renamed.
@@ -242,7 +242,7 @@ fn labels(groups: &[(&str, Vec<&String>)], order: &[Vec<&String>]) -> HashMap<St
 }
 
 /// Calls `f` with every choice of an order for each group's instances.
-fn each_order<'a>(
+pub(crate) fn each_order<'a>(
     groups: &[(&str, Vec<&'a String>)],
     at: usize,
     choice: &mut Vec<Vec<&'a String>>,
