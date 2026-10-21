@@ -7,7 +7,8 @@ mod common;
 
 use std::collections::HashMap;
 
-use cardinal::{Kind, Options, SelectivityReport, analyze_sql, analyze_sql_with};
+use cardinal::facts::FactSet;
+use cardinal::{FactMode, Kind, Options, SelectivityReport, analyze_sql, analyze_sql_with};
 
 const ON: Options = common::SELECTIVITY;
 
@@ -236,6 +237,21 @@ async fn evaluate_plugs_values_in() {
 
     // A missing table size is an error.
     assert!(r.evaluate(&sizes(&[("users", 100)]), &values).is_err());
+}
+
+#[tokio::test]
+async fn informed_takes_values_for_what_the_facts_left() {
+    let sql = "SELECT o.id, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE u.age > 30";
+    let d = common::shop_datasets().into_iter().find(|d| d.unique_keys).unwrap();
+    let a = analyze_sql_with(&d.context(true), sql, ON).await.unwrap();
+    let r = a.selectivity.clone().unwrap();
+    let i = a.with_facts(&FactSet::default(), FactMode::Ratios).unwrap();
+    let tables = sizes(&[("users", 100), ("orders", 1000)]);
+    let values: HashMap<String, f64> = r.required.iter().map(|s| (s.name.clone(), 0.5)).collect();
+    let x = i.evaluate_with(&tables, &values).unwrap();
+    assert_eq!(x, r.evaluate(&tables, &values).unwrap());
+    assert_eq!(x.exact(), Some(25_000.0));
+    assert_eq!(i.evaluate_with(&tables, &HashMap::new()).unwrap(), i.evaluate(&tables).unwrap());
 }
 
 #[tokio::test]

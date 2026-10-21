@@ -95,6 +95,13 @@ impl Informed {
         self.report.eval(&self.output, tables, &HashMap::new())
     }
 
+    /// [`Informed::evaluate`], with a value for some of the selectivities
+    /// still unknown, by name, as [`SelectivityReport::evaluate`] takes
+    /// them: the facts' values first, then these for what they left.
+    pub fn evaluate_with(&self, tables: &HashMap<String, u64>, values: &HashMap<String, f64>) -> Result<Interval> {
+        self.report.eval(&self.output, tables, values)
+    }
+
     /// Bounds proven with the facts among the constraints, as
     /// [`Analysis::bounds`].
     pub fn bounds(&self) -> Result<Bounds> {
