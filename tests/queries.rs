@@ -398,7 +398,7 @@ async fn validate_catches_a_false_primary_key() {
     assert_eq!(v.rows["op0_Scan_people_c0"], 1);
 }
 
-// --- Join keys: only declared primary keys count as unique ------------------
+// --- Join keys: only declared keys count as unique --------------------------
 
 #[tokio::test]
 async fn non_key_equijoin_is_bounded_by_product() {
@@ -409,7 +409,9 @@ async fn non_key_equijoin_is_bounded_by_product() {
 }
 
 #[tokio::test]
-async fn unique_constraint_is_not_trusted() {
+async fn unique_constraint_matches_once() {
+    // A UNIQUE column may repeat NULL, but NULL keys never match, so each
+    // row still has at most one partner.
     use datafusion::common::{Constraint, Constraints};
     let ctx = setup();
     let schema = Arc::new(Schema::new(vec![Field::new("email", DataType::Utf8, true)]));
@@ -425,8 +427,8 @@ async fn unique_constraint_is_not_trusted() {
     )
     .await
     .unwrap();
-    assert!(matches!(a.verdict, Verdict::MightGrow(_)));
-    assert!(has_op(&a, "InnerEquiJoin"));
+    assert_eq!(a.verdict, Verdict::Reduces);
+    assert!(has_op(&a, "InnerKeyJoin"));
 }
 
 #[tokio::test]

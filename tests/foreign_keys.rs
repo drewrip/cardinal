@@ -120,3 +120,13 @@ async fn outer_joins_keep_the_inner_part() {
     let sql = "SELECT * FROM orders o FULL JOIN customers c ON o.cust = c.id";
     assert_eq!(formula(sql, true).await.0, "|orders| + (1 - s3)·|customers|");
 }
+
+#[tokio::test]
+async fn widening_casts_keep_the_key() {
+    // Each side's key widened to a decimal that holds every BIGINT: still
+    // one value per key.
+    let sql = "SELECT * FROM orders o JOIN customers c ON CAST(o.cust AS DECIMAL(20, 0)) = CAST(c.id AS DECIMAL(20, 0))";
+    assert_eq!(formula(sql, true).await, ("|orders|".into(), "X = |orders|".into()));
+    let sql = "SELECT * FROM orders o JOIN customers c ON CAST(o.cust AS DECIMAL(20, 0)) = CAST(c.id AS DECIMAL(20, 0)) WHERE o.amount > 10";
+    assert_eq!(formula(sql, true).await.0, "s1·|orders|");
+}

@@ -289,13 +289,13 @@ impl<'a> Analyzer<'a> {
         rel
     }
 
-    /// A column that traces to a declared primary key takes a distinct value on
-    /// every row: its NDV equals the cardinality.
+    /// A column that traces to a declared key takes a distinct value on every
+    /// row: its NDV (NULL counted as one value) equals the cardinality.
     fn unique_columns(&self, plan: &LogicalPlan, rel: &Rel) {
         let schema = plan.schema();
         for j in 0..schema.fields().len() {
             let col = Column::from(schema.qualified_field(j));
-            if covers_primary_key(plan, &[col]) {
+            if covers_key(plan, &[col], Nulls::Equal) {
                 self.assert(rel.ndv[j].eq(&rel.card));
             }
         }
@@ -521,7 +521,7 @@ impl<'a> Analyzer<'a> {
                 let cols: Vec<Column> = (0..input.schema().fields().len())
                     .map(|i| Column::from(input.schema().qualified_field(i)))
                     .collect();
-                if covers_primary_key(input, &cols) {
+                if covers_key(input, &cols, Nulls::Equal) {
                     self.assert(o.card.eq(&l.card));
                 }
                 o
@@ -710,15 +710,19 @@ impl<'a> Analyzer<'a> {
         (out, raw_scan)
     }
 
-    /// A composite primary key is unique as a tuple: the table has at most as
-    /// many rows as the product of its key columns' NDVs.
+    /// A composite primary key, or a composite UNIQUE constraint on NOT NULL
+    /// columns, is unique as a tuple: the table has at most as many rows as
+    /// the product of its key columns' NDVs.
     fn composite_key(&self, scan: &TableScan, rel: &Rel) {
         let Some(constraints) = scan.source.constraints() else {
             return;
         };
+        let schema = scan.source.schema();
         for c in constraints.iter() {
-            let Constraint::PrimaryKey(pk) = c else {
-                continue;
+            let pk = match c {
+                Constraint::PrimaryKey(pk) => pk,
+                Constraint::Unique(u) if u.iter().all(|i| !schema.field(*i).is_nullable()) => u,
+                Constraint::Unique(_) => continue,
             };
             if pk.len() < 2 {
                 continue;
@@ -902,7 +906,7 @@ impl<'a> Analyzer<'a> {
             .iter()
             .map(|e| key_column(&agg.input, e))
             .collect();
-        if cols.is_some_and(|cols| covers_primary_key(&agg.input, &cols)) {
+        if cols.is_some_and(|cols| covers_key(&agg.input, &cols, Nulls::Equal)) {
             self.assert(o.card.eq(&l.card));
         }
         o
@@ -916,8 +920,8 @@ impl<'a> Analyzer<'a> {
         let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
         // A unique key on one side means each row of the other side matches at
         // most once.
-        let ru = equi && key_is_unique(&join.right, &rk);
-        let lu = equi && key_is_unique(&join.left, &lk);
+        let ru = equi && key_is_unique(join, &join.right, &rk);
+        let lu = equi && key_is_unique(join, &join.left, &lk);
         // A foreign key from one side to every row of the other's table: each
         // of the first side's rows matches exactly once.
         let (fl, fr) = self.foreign_key(join);
@@ -1445,9 +1449,11 @@ fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int>
     product(&factors?, cap)
 }
 
-/// True if the join key expressions `keys` of `side` are unique in `side`'s
-/// output (see `covers_primary_key`). Non-column keys are never unique.
-fn key_is_unique(side: &LogicalPlan, keys: &[&Expr]) -> bool {
+/// True if each row of the other side of `join` matches at most one row of
+/// `side` on its key expressions `keys` (see `covers_key`): the keys are
+/// columns, possibly under injective casts, unique in `side`'s output. NULL
+/// keys match nothing unless the join compares them as equal.
+fn key_is_unique(join: &Join, side: &LogicalPlan, keys: &[&Expr]) -> bool {
     let Some(cols) = keys
         .iter()
         .map(|e| key_column(side, e))
@@ -1455,7 +1461,11 @@ fn key_is_unique(side: &LogicalPlan, keys: &[&Expr]) -> bool {
     else {
         return false;
     };
-    covers_primary_key(side, &cols)
+    let nulls = match join.null_equality {
+        NullEquality::NullEqualsNothing => Nulls::Distinct,
+        NullEquality::NullEqualsNull => Nulls::Equal,
+    };
+    covers_key(side, &cols, nulls)
 }
 
 /// The column `e` reads from `input`, if `e` is that column possibly wrapped in
@@ -1475,6 +1485,15 @@ fn key_column(input: &LogicalPlan, e: &Expr) -> Option<Column> {
 /// True if casting `from` to `to` maps distinct values to distinct values.
 fn injective_cast(from: &DataType, to: &DataType) -> bool {
     use DataType::*;
+    // Decimal digits an integer type's values need.
+    let digits = match from {
+        Int8 | UInt8 => Some(3),
+        Int16 | UInt16 => Some(5),
+        Int32 | UInt32 => Some(10),
+        Int64 => Some(19),
+        UInt64 => Some(20),
+        _ => None,
+    };
     from == to
         || matches!(
             (from, to),
@@ -1485,7 +1504,14 @@ fn injective_cast(from: &DataType, to: &DataType) -> bool {
                 | (UInt16, UInt32 | UInt64 | Int32 | Int64)
                 | (UInt32, UInt64 | Int64)
                 | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
+                // Floats hold integers exactly up to 2^24 and 2^53.
+                | (Int8 | Int16 | UInt8 | UInt16, Float32)
+                | (Int8 | Int16 | Int32 | UInt8 | UInt16 | UInt32, Float64)
         )
+        || match (digits, to) {
+            (Some(d), Decimal128(p, s) | Decimal256(p, s)) => i16::from(*p) - i16::from(*s) >= d,
+            _ => false,
+        }
 }
 
 /// The column of `child` feeding output position `i`, for operators whose output
@@ -1530,10 +1556,21 @@ fn output_indices(plan: &LogicalPlan, cols: &[Column]) -> Option<Vec<usize>> {
         .collect()
 }
 
-/// True if `cols` of `plan`'s output are unique: they trace back to a declared
-/// primary key, a GROUP BY key or a DISTINCT output through operators that
-/// never duplicate rows.
-fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
+/// Whether two NULLs count as the same key value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nulls {
+    /// As in a GROUP BY, DISTINCT or NDV, where NULLs form one value.
+    Equal,
+    /// As in an equi-join, where a NULL key matches nothing.
+    Distinct,
+}
+
+/// True if `cols` of `plan`'s output are unique, with NULLs compared as
+/// `nulls` says: they trace back to a declared primary key, a UNIQUE
+/// constraint, a GROUP BY key or a DISTINCT output through operators that
+/// never duplicate rows. A UNIQUE column may hold many NULLs, so it is
+/// unique with NULLs equal only if it is NOT NULL.
+fn covers_key(plan: &LogicalPlan, cols: &[Column], nulls: Nulls) -> bool {
     match plan {
         LogicalPlan::TableScan(scan) => {
             let schema = scan.source.schema();
@@ -1547,7 +1584,10 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
             scan.source.constraints().is_some_and(|cs| {
                 cs.iter().any(|c| match c {
                     Constraint::PrimaryKey(pk) => pk.iter().all(|i| indices.contains(i)),
-                    Constraint::Unique(_) => false,
+                    Constraint::Unique(u) => {
+                        u.iter().all(|i| indices.contains(i))
+                            && (nulls == Nulls::Distinct || u.iter().all(|i| !schema.field(*i).is_nullable()))
+                    }
                 })
             })
         }
@@ -1558,7 +1598,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
             let Some(cs) = same_positions(plan, &f.input, cols) else {
                 return false;
             };
-            if covers_primary_key(&f.input, &cs) {
+            if covers_key(&f.input, &cs, nulls) {
                 return true;
             }
             let mut with = cs.clone();
@@ -1567,7 +1607,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                     with.push(c);
                 }
             }
-            with.len() > cs.len() && covers_primary_key(&f.input, &with)
+            with.len() > cs.len() && covers_key(&f.input, &with, nulls)
         }
         // `row_number()` numbers each partition's rows 1, 2, ...: it is unique
         // with its partition columns. Otherwise the window keeps its input's
@@ -1591,7 +1631,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                 .filter(|&&i| i < n)
                 .map(|&i| Column::from(w.input.schema().qualified_field(i)))
                 .collect();
-            numbered || (!kept.is_empty() && covers_primary_key(&w.input, &kept))
+            numbered || (!kept.is_empty() && covers_key(&w.input, &kept, nulls))
         }
         // Operators whose output rows are a subset of their input's, with the
         // input's columns first and unchanged.
@@ -1600,7 +1640,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
         | LogicalPlan::Repartition(_)
         | LogicalPlan::SubqueryAlias(_) => {
             let child = plan.inputs()[0];
-            same_positions(plan, child, cols).is_some_and(|cs| covers_primary_key(child, &cs))
+            same_positions(plan, child, cols).is_some_and(|cs| covers_key(child, &cs, nulls))
         }
         // DISTINCT's output is unique on all its columns, and is a subset of its
         // input's rows, so its input's keys stay unique too.
@@ -1608,7 +1648,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
             let all = output_indices(plan, cols)
                 .is_some_and(|ix| (0..plan.schema().fields().len()).all(|i| ix.contains(&i)));
             all || same_positions(plan, input, cols)
-                .is_some_and(|cs| covers_primary_key(input, &cs))
+                .is_some_and(|cs| covers_key(input, &cs, nulls))
         }
         // DISTINCT ON is unique on its ON expressions, where they are selected
         // as columns; its rows are a subset of its input's.
@@ -1631,7 +1671,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                 .iter()
                 .map(|&i| key_column(&on.input, &on.select_expr[i]))
                 .collect();
-            by_on || mapped.is_some_and(|cs| covers_primary_key(&on.input, &cs))
+            by_on || mapped.is_some_and(|cs| covers_key(&on.input, &cs, nulls))
         }
         // GROUP BY emits one row per distinct combination of its keys (NULLs
         // forming one group), so it is unique on all its key columns, and on any
@@ -1666,7 +1706,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                     }
                 })
                 .collect();
-            mapped.is_some_and(|cs| covers_primary_key(&agg.input, &cs))
+            mapped.is_some_and(|cs| covers_key(&agg.input, &cs, nulls))
         }
         LogicalPlan::Projection(p) => {
             let mapped = cols
@@ -1676,7 +1716,7 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                     key_column(&p.input, &p.expr[i])
                 })
                 .collect::<Option<Vec<Column>>>();
-            mapped.is_some_and(|cs| covers_primary_key(&p.input, &cs))
+            mapped.is_some_and(|cs| covers_key(&p.input, &cs, nulls))
         }
         LogicalPlan::Join(join) => {
             let left_len = join.left.schema().fields().len();
@@ -1705,14 +1745,14 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
             match join.join_type {
                 // Semi, anti and mark joins emit each row of one side at most once.
                 JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                    left_cols().is_some_and(|cs| covers_primary_key(&join.left, &cs))
+                    left_cols().is_some_and(|cs| covers_key(&join.left, &cs, nulls))
                 }
                 // These output the right side's schema (plus a mark column).
                 JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => indices
                     .iter()
                     .map(|i| child_column(&join.right, *i))
                     .collect::<Option<Vec<Column>>>()
-                    .is_some_and(|cs| covers_primary_key(&join.right, &cs)),
+                    .is_some_and(|cs| covers_key(&join.right, &cs, nulls)),
                 // A row of one side appears at most once if it matches at most one
                 // row of the other side, i.e. the join is on the other side's key.
                 // Only the preserved side of an outer join keeps its key, since the
@@ -1720,12 +1760,12 @@ fn covers_primary_key(plan: &LogicalPlan, cols: &[Column]) -> bool {
                 JoinType::Inner | JoinType::Left | JoinType::Right => {
                     let left_ok = on_left
                         && join.join_type != JoinType::Right
-                        && key_is_unique(&join.right, &rk)
-                        && left_cols().is_some_and(|cs| covers_primary_key(&join.left, &cs));
+                        && key_is_unique(join, &join.right, &rk)
+                        && left_cols().is_some_and(|cs| covers_key(&join.left, &cs, nulls));
                     let right_ok = on_right
                         && join.join_type != JoinType::Left
-                        && key_is_unique(&join.left, &lk)
-                        && right_cols().is_some_and(|cs| covers_primary_key(&join.right, &cs));
+                        && key_is_unique(join, &join.left, &lk)
+                        && right_cols().is_some_and(|cs| covers_key(&join.right, &cs, nulls));
                     left_ok || right_ok
                 }
                 JoinType::Full => false,
