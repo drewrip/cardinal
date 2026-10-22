@@ -840,6 +840,7 @@ pub const SELECTIVITY: Options = Options {
     max_product: 3,
     selectivity: true,
     foreign_keys: Vec::new(),
+    trace: false,
 };
 
 /// The formula or selectivity range that one real execution contradicts, if

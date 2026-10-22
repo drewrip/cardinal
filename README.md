@@ -787,6 +787,35 @@ query over real tables and plugs them into its formula: a filter's share on
 a 1% `TABLESAMPLE SYSTEM` of its table, a distinct count with
 `approx_distinct`, each counted by a query `sqlser` writes from the fact.
 
+## Debugging
+
+`Options::trace` keeps every constraint Z3 is given in `Analysis::trace`: its
+SMT-LIB and infix forms, the plan node it describes, and the analyzer line
+(function and source) that made it. `Trace::to_smt2` writes them as a script
+Z3 loads, each constraint under a comment naming its node and rule.
+`Analysis::explain(Some(&bounds))` proves the verdict's claim `X <= Σ` and each
+bound again, and names a minimal set of constraints each proof needs (an
+unsat core shrunk until dropping any one constraint breaks the proof): the
+operators and rules a bound comes from.
+
+The `cardinal-debug` crate is a CLI over this. It reads tables from
+`CREATE TABLE` statements (with `PRIMARY KEY`s) and a query as SQL, or as
+DuckDB's or PostgreSQL's `EXPLAIN` JSON:
+
+```sh
+B="cargo run -p cardinal-debug --"
+$B analyze --schema cardinal-debug/tests/fixtures/tpch.sql --sql tests/tpch/q03.sql
+$B analyze ... --proof verdict          # only the constraints proving X <= Σ
+$B analyze ... --node 12                # one node's constraints in full
+$B analyze ... --html q03.html          # plan tree beside its constraints
+$B dump ... -o q03.json --smt2 q03.smt2 # the JSON dump, and annotated SMT-LIB
+$B view q03.json [--html q03.html]      # show a dump
+```
+
+`--fk 'orders(o_custkey)->customer(c_custkey)'` declares a foreign key. The
+HTML page links each plan node to its constraints both ways, and its proof
+selector dims every constraint the chosen proof does not need.
+
 ## Validation
 
 `validate` evaluates the plan bottom-up, running each operator over its

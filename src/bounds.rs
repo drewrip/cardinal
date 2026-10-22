@@ -180,8 +180,7 @@ impl Search {
 
     /// `den·X <= num·s + den·add`
     fn upper(&self, x: &Int, num: u64, den: u64, add: u64) -> Bool {
-        let lhs = &self.output * Int::from_u64(den);
-        let rhs = x * Int::from_u64(num) + Int::from_u64(den * add);
+        let (lhs, rhs) = sides(&self.output, x, &Linear { num, den, add });
         lhs.le(rhs)
     }
 
@@ -231,11 +230,18 @@ impl Search {
         let add = smallest(0, CAP, |d| self.proves(self.upper(x, num, den, d)));
         let bound = Linear { num, den, add };
         // Also at least the bound?
-        let lhs = &self.output * Int::from_u64(den);
-        let rhs = x * Int::from_u64(num) + Int::from_u64(den * add);
+        let (lhs, rhs) = sides(&self.output, x, &bound);
         let exact = self.proves(lhs.ge(rhs));
         Some((bound, exact))
     }
+}
+
+/// `den·output` and `num·x + den·add`: the sides of `output <= bound` over `x`
+/// with the fraction cleared.
+pub(crate) fn sides(output: &Int, x: &Int, bound: &Linear) -> (Int, Int) {
+    let lhs = output * Int::from_u64(bound.den);
+    let rhs = x * Int::from_u64(bound.num) + Int::from_u64(bound.den * bound.add);
+    (lhs, rhs)
 }
 
 /// The smallest value in `lo..=hi` satisfying a monotone `pred` that holds at `hi`.

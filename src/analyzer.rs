@@ -5,7 +5,9 @@
 //! counted as one value). Constraints relate each operator's variables to its
 //! inputs'.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::Location;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -121,6 +123,23 @@ pub(crate) struct Analyzer<'a> {
     foreign_keys: &'a [ForeignKey],
     /// The last join visited's [`Node::at_most_once`], for its node to take.
     at_most_once: (bool, bool),
+    /// Whether to log every assertion, for [`crate::trace`].
+    trace: bool,
+    /// Every assertion, in order, if `trace` is set.
+    pub(crate) log: RefCell<Vec<Logged>>,
+    /// Frames of the nodes being visited, innermost last.
+    owners: Vec<usize>,
+    next_frame: usize,
+    /// The node each finished frame became.
+    pub(crate) frame_node: HashMap<usize, usize>,
+}
+
+/// One assertion: the frame of the node it was made for (none for
+/// partitions), and the line of the analyzer that made it.
+pub(crate) struct Logged {
+    pub(crate) expr: Bool,
+    pub(crate) frame: Option<usize>,
+    pub(crate) at: &'static Location<'static>,
 }
 
 /// One plan node and the variables describing its output.
@@ -227,6 +246,7 @@ impl<'a> Analyzer<'a> {
         resolve: &'a dyn Fn(&TableScan) -> ScanKind,
         max_product: usize,
         foreign_keys: &'a [ForeignKey],
+        trace: bool,
     ) -> Self {
         Self {
             solver: new_solver(),
@@ -241,9 +261,15 @@ impl<'a> Analyzer<'a> {
             max_product,
             foreign_keys,
             at_most_once: (false, false),
+            trace,
+            log: RefCell::new(Vec::new()),
+            owners: Vec::new(),
+            next_frame: 0,
+            frame_node: HashMap::new(),
         }
     }
 
+    #[track_caller]
     fn new_var(&mut self, name: String) -> Int {
         let v = Int::new_const(name.as_str());
         self.assert(v.ge(int(0)));
@@ -314,7 +340,15 @@ impl<'a> Analyzer<'a> {
         rel.ndv.iter().map(|v| self.name_of(v)).collect()
     }
 
+    #[track_caller]
     fn assert(&self, b: Bool) {
+        if self.trace {
+            self.log.borrow_mut().push(Logged {
+                expr: b.clone(),
+                frame: self.owners.last().copied(),
+                at: Location::caller(),
+            });
+        }
         self.solver.assert(b);
     }
 
@@ -340,6 +374,8 @@ impl<'a> Analyzer<'a> {
 
     /// Returns the abstract state of `plan`'s output.
     pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> Rel {
+        let frame = self.next_frame;
+        self.next_frame += 1;
         // Subqueries left inside expressions (e.g. an uncorrelated scalar subquery
         // in a Filter) are not plan inputs, but their scans still read rows, so
         // visit them to register those scans in the sum.
@@ -350,6 +386,7 @@ impl<'a> Analyzer<'a> {
         });
         // Subquery nodes stand on their own; they are not inputs of this node.
         self.frontier.truncate(mark);
+        self.owners.push(frame);
         let (out, raw_scan) = self.visit_node(plan);
         let at_most_once = std::mem::take(&mut self.at_most_once);
         self.apply_domains(plan, &out);
@@ -370,6 +407,8 @@ impl<'a> Analyzer<'a> {
             raw_scan,
             at_most_once,
         });
+        self.owners.pop();
+        self.frame_node.insert(frame, self.nodes.len() - 1);
         self.frontier.push(self.nodes.len() - 1);
         out
     }

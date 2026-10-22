@@ -15,12 +15,14 @@ pub mod observed;
 mod origin;
 mod selectivity;
 mod simple;
+pub mod trace;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};
 pub use informed::{FactMode, Informed, Matched};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 pub use simple::{Simple, SimpleKind, SimpleSelectivity};
+pub use trace::{Constraint, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -107,6 +109,9 @@ pub struct Analysis {
     /// The output cardinality as a formula over table sizes and operator
     /// selectivities, if [`Options::selectivity`] is set.
     pub selectivity: Option<SelectivityReport>,
+    /// Every constraint with the plan node and analyzer line it comes from,
+    /// if [`Options::trace`] is set.
+    pub trace: Option<Trace>,
     /// The constraint set `S` alone, without the claim, and how many assertions
     /// it holds (to check that it parses back completely).
     constraints: String,
@@ -207,6 +212,48 @@ impl Analysis {
     pub fn simple_selectivities(&self) -> Result<Vec<SimpleSelectivity>> {
         simple::simple(self)
     }
+
+    /// Proves the verdict's claim `X <= Σ` and each of `bounds` again, each
+    /// with a minimal set of the constraints that proves it: which operators
+    /// and rules a bound comes from. Needs [`Options::trace`].
+    ///
+    /// Proof names are `verdict`, `constant`, `sum`, `table:{name}`, and
+    /// `exact:{name}` for the lower side of an exact table bound.
+    pub fn explain(&self, bounds: Option<&Bounds>) -> Result<Vec<Proof>> {
+        let Some(trace) = &self.trace else {
+            return Err(Error::Internal("explain needs Options::trace".into()));
+        };
+        let x = Int::new_const(self.root.as_str());
+        let sum = if self.scans.is_empty() {
+            Int::from_i64(0)
+        } else {
+            let scans: Vec<Int> = self.scans.iter().map(|(s, _)| Int::new_const(s.as_str())).collect();
+            Int::add(&scans)
+        };
+        let mut claims = vec![("verdict".to_string(), "X <= Σ".to_string(), x.le(&sum).to_string())];
+        if let Some(b) = bounds {
+            if let Some(n) = b.constant {
+                claims.push(("constant".into(), format!("X <= {n}"), x.le(Int::from_u64(n)).to_string()));
+            }
+            // A bound with no term of its quantity is the constant bound again.
+            if let Some(s) = b.sum.as_ref().filter(|s| s.num > 0) {
+                let (lhs, rhs) = bounds::sides(&x, &sum, s);
+                claims.push(("sum".into(), format!("X <= {}", s.render("Σ")), lhs.le(rhs).to_string()));
+            }
+            for t in b.tables.iter().filter(|t| t.bound.num > 0) {
+                let Some((_, symbol)) = self.tables.iter().find(|(name, _)| *name == t.table) else {
+                    continue;
+                };
+                let (lhs, rhs) = bounds::sides(&x, &Int::new_const(symbol.as_str()), &t.bound);
+                let shown = t.bound.render(&format!("|{}|", t.table));
+                claims.push((format!("table:{}", t.table), format!("X <= {shown}"), lhs.le(&rhs).to_string()));
+                if t.exact {
+                    claims.push((format!("exact:{}", t.table), format!("X >= {shown}"), lhs.ge(&rhs).to_string()));
+                }
+            }
+        }
+        trace.explain(&claims)
+    }
 }
 
 /// The bounds `search` proves on its output: a constant, relative to the sum
@@ -289,6 +336,10 @@ pub struct Options {
     /// once. DataFusion has no foreign key constraints, so they are declared
     /// here. Defaults to none.
     pub foreign_keys: Vec<ForeignKey>,
+    /// Keep every constraint with the plan node and analyzer line it comes
+    /// from ([`Analysis::trace`]), to inspect or explain the analysis.
+    /// Defaults to false.
+    pub trace: bool,
 }
 
 impl Default for Options {
@@ -297,6 +348,7 @@ impl Default for Options {
             max_product: analyzer::DEFAULT_MAX_PRODUCT,
             selectivity: false,
             foreign_keys: Vec::new(),
+            trace: false,
         }
     }
 }
@@ -428,7 +480,7 @@ fn analyze_with(
     resolve: &dyn Fn(&TableScan) -> ScanKind,
     options: Options,
 ) -> Analysis {
-    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys);
+    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace);
     let root = a.visit(plan).card;
     a.assert_partitions();
     let root_name = a.name_of(&root);
@@ -510,6 +562,10 @@ fn analyze_with(
         .iter()
         .map(|(s, t, _)| (s.clone(), t.clone()))
         .collect();
+    let trace = options.trace.then(|| Trace::build(&a, &constraints, &root_name, &scans, &tables));
+    if let Some(t) = &trace {
+        assert_eq!(t.constraints.len(), assertions, "every assertion is traced");
+    }
     let selectivity = options.selectivity.then(|| {
         let (search, _) = bounds::Search::new(&constraints, &root_name);
         selectivity::build(&a.nodes, &scans, &search)
@@ -522,6 +578,7 @@ fn analyze_with(
         scans,
         plan: plan.display_indent().to_string(),
         selectivity,
+        trace,
         constraints,
         assertions,
         nodes: a.nodes,
