@@ -77,8 +77,9 @@ pub struct Informed {
     pub pinned: Vec<(String, u64)>,
     /// Operator variables capped by a known upper bound on their rows.
     pub capped: Vec<(String, u64)>,
-    /// NDV variables, of an operator's output column, held at (or capped by)
-    /// the distinct count a fact gives of it. Pinned only.
+    /// NDV variables of base-table scans' columns, held at (or capped by)
+    /// the distinct count a fact gives over the table. The constraints
+    /// carry them to the operators above. Pinned only.
     pub pinned_ndv: Vec<(String, u64)>,
     /// Operator variables held at or above a row count the facts give of
     /// narrower rows: the same rows with more filters, say. These hold in
@@ -579,34 +580,30 @@ impl<'a> Lookup<'a> {
         out
     }
 
-    /// Every output column's distinct count that a fact gives over its
-    /// operator's rows, by NDV variable, and whether it is exact (else an
-    /// upper bound). A scan with pushed filters gives its table's too, on
-    /// the raw scan's variables. Float columns are left out: the
-    /// constraints count their values by bits, the facts by SQL equality.
+    /// Every base-table column's distinct count that a fact gives over its
+    /// table, by the scan's NDV variable (the raw scan's, under pushed
+    /// filters), and whether it is exact (else an upper bound). The
+    /// constraints carry each up through filters, joins and GROUP BYs, so
+    /// no operator above a scan needs its own. Float columns are left out:
+    /// the constraints count their values by bits, the facts by SQL
+    /// equality.
     fn ndvs(&self) -> Vec<(String, u64, bool)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
+            let Some(instance) = &self.logical.instances[i] else { continue };
+            let vars = node.raw_scan.as_ref().map_or(&node.ndv_vars, |(_, raw, _)| raw);
             let schema = node.plan.schema();
-            let mut over = vec![];
-            if let Ok(ctx) = &self.logical.contexts[i] {
-                over.push((ctx.clone(), &node.ndv_vars));
-            }
-            if let (Some((_, raw, _)), Some(instance)) = (&node.raw_scan, &self.logical.instances[i]) {
-                over.push((Context::table(instance), raw));
-            }
-            for (ctx, vars) in over {
-                for (j, var) in vars.iter().enumerate() {
-                    let Some(Some(e @ Expr::Column(_))) = self.logical.lineage[i].get(j) else { continue };
-                    if j >= schema.fields().len() || schema.field(j).data_type().is_floating() {
-                        continue;
-                    }
-                    let kind = FactKind::Distinct { keys: [Term::new(e.clone())].into(), over: ctx.clone() };
-                    if let Some(n) = self.fact(kind.clone()).and_then(|(v, _)| v.as_int()) {
-                        out.push((var.clone(), n, true));
-                    } else if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
-                        out.push((var.clone(), n, false));
-                    }
+            let over = Context::table(instance);
+            for (j, var) in vars.iter().enumerate() {
+                let Some(Some(e @ Expr::Column(_))) = self.logical.lineage[i].get(j) else { continue };
+                if j >= schema.fields().len() || schema.field(j).data_type().is_floating() {
+                    continue;
+                }
+                let kind = FactKind::Distinct { keys: [Term::new(e.clone())].into(), over: over.clone() };
+                if let Some(n) = self.fact(kind.clone()).and_then(|(v, _)| v.as_int()) {
+                    out.push((var.clone(), n, true));
+                } else if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
+                    out.push((var.clone(), n, false));
                 }
             }
         }
