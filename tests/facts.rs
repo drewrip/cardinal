@@ -229,6 +229,48 @@ async fn taint() {
     assert_eq!(value(&facts, joined), e["orders⋈customer|BUILDING"] as f64);
 }
 
+/// A floor printed as `text` (without its value), as an integer.
+fn floor(facts: &FactSet, text: &str) -> Option<u64> {
+    facts.floors().find(|f| f.kind.to_string() == text).and_then(|f| f.value.as_int())
+}
+
+/// A runtime filter only drops rows without a partner, so a scan it pruned
+/// has at most its table's rows, and so does an inner join over it: each
+/// gives a floor. The padded side of an outer join gains rows when pruned:
+/// above it, the rows are no longer among the context's.
+#[tokio::test]
+async fn pruned_rows_give_floors() {
+    let p = plan("join_filtered").await;
+    let facts = derive_facts(&[p]);
+    assert_eq!(floor(&facts, "|orders|"), Some(14860), "{facts}");
+
+    let catalog = catalog().await;
+    let scan = |table: &str, cols: Value, rows, dynamic: Option<&str>| {
+        let mut info = json!({"Table": format!("tpch.main.{table}"), "Projections": cols});
+        if let Some(d) = dynamic {
+            info["Dynamic Filters"] = json!(d);
+        }
+        node("TABLE_SCAN", rows, info, vec![])
+    };
+    let pruned = scan("partsupp", json!(["ps_suppkey", "ps_partkey", "ps_availqty"]), 900, Some("optional: ps_partkey>=1 AND optional: ps_partkey<=100"));
+    let left = node(
+        "HASH_JOIN",
+        950,
+        json!({"Join Type": "LEFT", "Conditions": "s_suppkey = ps_suppkey"}),
+        vec![scan("supplier", json!(["s_suppkey"]), 100, None), pruned],
+    );
+    let unmatched = node("FILTER", 50, json!({"Expression": "(ps_availqty IS NULL)"}), vec![left]);
+    let top = node(
+        "HASH_JOIN",
+        10,
+        json!({"Join Type": "INNER", "Conditions": "ps_partkey = p_partkey"}),
+        vec![unmatched, scan("part", json!(["p_partkey"]), 100, None)],
+    );
+    let facts = derive_facts(&[from_duckdb(&catalog, "padded", &top.to_string(), None).unwrap()]);
+    assert_eq!(floor(&facts, "|partsupp|"), Some(900), "{facts}");
+    assert!(!facts.floors().any(|f| f.kind.to_string().contains("Left join")), "{facts}");
+}
+
 /// A required filter pushed into a scan gives a fact on its table. An
 /// optional one gives only a bound, until a filter above checks it: then
 /// the filter's rows give the fact on the table it was pushed into.
@@ -431,6 +473,9 @@ async fn round_trip() {
         }
         for b in set.bounds() {
             assert_eq!(read.bound(&b.kind).map(|r| r.value), Some(b.value), "{}: {}", p.name, b.kind);
+        }
+        for f in set.floors() {
+            assert_eq!(read.floor(&f.kind).map(|r| r.value), Some(f.value), "{}: {}", p.name, f.kind);
         }
         for v in set.values() {
             assert_eq!(read.value(&v.name), Some(v), "{}: {}", p.name, v.name);

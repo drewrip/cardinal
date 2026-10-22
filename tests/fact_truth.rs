@@ -7,7 +7,8 @@
 //! with merge joins.
 //! Every fact derived from all the profiles is then counted from what its
 //! context means ([`FactKind::count_sql`]) and must equal its value, every
-//! bound must be at least the true count, and no two plans may disagree.
+//! bound must be at least the true count, every floor at most it, and no
+//! two plans may disagree.
 //! Last, each query DataFusion can plan is bounded with the facts, and each
 //! bound must hold its true row count.
 //!
@@ -24,6 +25,7 @@
 mod fixtures;
 mod live;
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use cardinal::facts::{Fact, FactKind, Ratio, derive_facts};
@@ -347,8 +349,9 @@ async fn truth(engine: Engine) {
         failures.push(format!("conflict: {} = {} vs {}\n  {:?}\n  {:?}", c.kind, c.values.0, c.values.1, c.origins.0, c.origins.1));
     }
 
-    // Every fact and bound, counted.
-    let mut checks: Vec<(&Fact, bool, usize, Option<usize>)> = vec![];
+    // Every fact, bound and floor, counted: how the count may compare with
+    // each, `Less` for a bound and `Greater` for a floor.
+    let mut checks: Vec<(&Fact, Ordering, usize, Option<usize>)> = vec![];
     let mut sql: Vec<String> = vec![];
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut at = |q: String, sql: &mut Vec<String>| {
@@ -359,7 +362,10 @@ async fn truth(engine: Engine) {
     };
     let mut unchecked = 0;
     let mut uncountable: std::collections::BTreeMap<&str, usize> = Default::default();
-    for (f, bound) in facts.iter().map(|f| (f, false)).chain(facts.bounds().map(|f| (f, true))) {
+    let exact_facts = facts.iter().map(|f| (f, Ordering::Equal));
+    let bounds = facts.bounds().map(|f| (f, Ordering::Less));
+    let floors = facts.floors().map(|f| (f, Ordering::Greater));
+    for (f, bound) in exact_facts.chain(bounds).chain(floors) {
         match f.kind.count_sql_in(&catalog, &facts, engine.dialect()) {
             Some(c) => {
                 let v = at(c.value, &mut sql);
@@ -388,7 +394,7 @@ async fn truth(engine: Engine) {
         }
     }
     let counted = engine.values(&sql);
-    let (mut exact, mut bounded) = (0, 0);
+    let (mut exact, mut bounded, mut floored) = (0, 0, 0);
     for (f, bound, v, of) in &checks {
         let (n, of) = match (&counted[*v], of.map(|o| &counted[o])) {
             (Ok(n), None) => (*n, None),
@@ -402,10 +408,15 @@ async fn truth(engine: Engine) {
                 continue;
             }
         };
-        if *bound {
+        if *bound == Ordering::Less {
             bounded += 1;
             if f.value.as_int().is_none_or(|b| b < n) {
                 failures.push(format!("{} <= {} but is {n}, from {:?}", f.kind, f.value, f.origins));
+            }
+        } else if *bound == Ordering::Greater {
+            floored += 1;
+            if f.value.as_int().is_none_or(|b| b > n) {
+                failures.push(format!("{} >= {} but is {n}, from {:?}", f.kind, f.value, f.origins));
             }
         } else {
             exact += 1;
@@ -456,13 +467,14 @@ async fn truth(engine: Engine) {
         }
     }
     println!(
-        "{}: {} queries, {} plans: {observed} facts and {} bounds; {exact} facts and {bounded} bounds counted, {unchecked} not countable; \
+        "{}: {} queries, {} plans: {observed} facts and {} bounds and {} floors; {exact} facts, {bounded} bounds and {floored} floors counted, {unchecked} not countable; \
          {filled} facts the profiles did not count counted since ({unfilled} not), {} with what follows; \
          {analyzed} queries bounded, {matched} selectivities matched; {slow} timed out; not countable: {uncountable:?}",
         engine.name(),
         queries.len(),
         plans.len(),
         facts.bounds().count(),
+        facts.floors().count(),
         facts.len(),
     );
     let _ = DIR;

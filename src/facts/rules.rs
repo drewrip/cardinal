@@ -33,6 +33,8 @@ pub(crate) struct Observed {
     pub facts: Vec<Fact>,
     /// Upper bounds.
     pub bounds: Vec<Fact>,
+    /// Lower bounds.
+    pub floors: Vec<Fact>,
     /// The facts of operators whose rows were not counted: all of them,
     /// for a plan that was not run.
     pub unobserved: Vec<FactKind>,
@@ -46,6 +48,7 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Observed {
     let obs = Observation { plan, states: &states, values: Values { plan, states: &states, stopped: &stopped, hidden: &hidden } };
     let mut facts = vec![];
     let mut bounds = vec![];
+    let mut floors = vec![];
     let mut unobserved = vec![];
     let fact = |kind: FactKind, value, node, rule: &'static str| Fact {
         kind: kind.canonical(),
@@ -64,8 +67,9 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Observed {
             }
         }
         bounds.extend(upper_bound(&obs, node).map(|(kind, value)| fact(kind, value, node, "upper bound")));
+        floors.extend(lower_bound(&obs, node).map(|(kind, value)| fact(kind, value, node, "lower bound")));
     }
-    Observed { facts, bounds, unobserved, values: obs.values.definitions() }
+    Observed { facts, bounds, floors, unobserved, values: obs.values.definitions() }
 }
 
 /// The rows operator `node` output, if they were counted.
@@ -90,6 +94,16 @@ fn upper_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
     let (State::Pending(..), Some(over)) = (input, input.upper()) else { return None };
     let keys = obs.values.keys(node, keys).filter(|k| !k.is_empty())?;
     Some((FactKind::Distinct { keys, over: over.clone() }, Ratio::int(out)))
+}
+
+/// `|ctx| >= rows` for an operator whose rows may be fewer than its
+/// context's: pruned by runtime filters, which only drop rows without a
+/// partner, and kept a subset by everything above them.
+fn lower_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
+    let out = rows(obs, node)?;
+    let State::Pending(..) = obs.states[node] else { return None };
+    let ctx = obs.states[node].lower()?;
+    Some((FactKind::Cardinality(ctx.clone()), Ratio::int(out)))
 }
 
 /// An input's clean context, and its rows, if they were counted.

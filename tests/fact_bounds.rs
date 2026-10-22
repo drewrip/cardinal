@@ -84,6 +84,9 @@ fn facts(cases: &[Case], except: Option<&str>) -> FactSet {
         for b in c.observed.bounds() {
             set.insert_bound(b.clone());
         }
+        for f in c.observed.floors() {
+            set.insert_floor(f.clone());
+        }
     }
     set.close();
     set

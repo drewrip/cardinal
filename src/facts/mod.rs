@@ -225,11 +225,12 @@ pub struct Conflict {
     pub origins: (Vec<Origin>, Vec<Origin>),
 }
 
-/// Facts, one per kind, and upper bounds on what no fact gives exactly.
+/// Facts, one per kind, and upper and lower bounds on what no fact gives
+/// exactly.
 ///
 /// Serde writes each map as the list of its values, and reads a list back
-/// as [`FactSet::insert`], [`FactSet::insert_bound`] and
-/// [`FactSet::insert_value`] would add it.
+/// as [`FactSet::insert`], [`FactSet::insert_bound`],
+/// [`FactSet::insert_floor`] and [`FactSet::insert_value`] would add it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactSet {
@@ -239,6 +240,10 @@ pub struct FactSet {
     /// of an operator that may have let through more than its context's.
     #[serde(serialize_with = "serialize::values", deserialize_with = "bounds")]
     bounds: BTreeMap<FactKind, Fact>,
+    /// The greatest lower bound seen on each size: the rows of an operator
+    /// that may have kept fewer than its context's.
+    #[serde(serialize_with = "serialize::values", deserialize_with = "floors")]
+    floors: BTreeMap<FactKind, Fact>,
     /// What each aggregate value the facts read is, by name.
     #[serde(serialize_with = "serialize::values", deserialize_with = "values")]
     values: BTreeMap<String, Value>,
@@ -297,6 +302,24 @@ impl FactSet {
         }
     }
 
+    /// Adds a lower bound, keeping the greatest known. A floor above the
+    /// exact value is recorded as a conflict.
+    pub fn insert_floor(&mut self, floor: Fact) {
+        match self.floors.get_mut(&floor.kind) {
+            Some(known) if known.value > floor.value => {}
+            Some(known) if known.value == floor.value => {
+                for o in floor.origins {
+                    if !known.origins.contains(&o) {
+                        known.origins.push(o);
+                    }
+                }
+            }
+            _ => {
+                self.floors.insert(floor.kind.clone(), floor);
+            }
+        }
+    }
+
     /// Adds every fact and bound the rules read off `plan`, and notes the
     /// facts it could not give a value (see [`FactSet::unobserved`]).
     pub fn observe(&mut self, plan: &ObservedPlan) {
@@ -306,6 +329,9 @@ impl FactSet {
         }
         for bound in observed.bounds {
             self.insert_bound(bound);
+        }
+        for floor in observed.floors {
+            self.insert_floor(floor);
         }
         for value in observed.values {
             self.insert_value(value);
@@ -358,12 +384,24 @@ impl FactSet {
         self.bounds.values()
     }
 
-    /// Records as a conflict each bound below its kind's exact value: the
-    /// rows were named wrongly, or the data changed.
+    /// The greatest lower bound known on `kind`, a size.
+    pub fn floor(&self, kind: &FactKind) -> Option<&Fact> {
+        self.floors.get(kind)
+    }
+
+    pub fn floors(&self) -> impl Iterator<Item = &Fact> {
+        self.floors.values()
+    }
+
+    /// Records as a conflict each bound below its kind's exact value, and
+    /// each floor above it: the rows were named wrongly, or the data
+    /// changed.
     fn check_bounds(&mut self) {
-        for (kind, bound) in &self.bounds {
+        let bounds = self.bounds.iter().map(|b| (b, std::cmp::Ordering::Greater));
+        let floors = self.floors.iter().map(|f| (f, std::cmp::Ordering::Less));
+        for ((kind, bound), wrong) in bounds.chain(floors) {
             if let Some(exact) = self.facts.get(kind)
-                && exact.value > bound.value
+                && exact.value.cmp(&bound.value) == wrong
                 && !self.conflicts.iter().any(|c| c.kind == *kind && c.values == (exact.value, bound.value))
             {
                 self.conflicts.push(Conflict {
@@ -401,6 +439,9 @@ impl fmt::Display for FactSet {
         for bound in self.bounds.values() {
             writeln!(f, "{} <= {}", bound.kind, bound.value)?;
         }
+        for floor in self.floors.values() {
+            writeln!(f, "{} >= {}", floor.kind, floor.value)?;
+        }
         for c in &self.conflicts {
             writeln!(f, "CONFLICT {} = {} vs {}", c.kind, c.values.0, c.values.1)?;
         }
@@ -422,6 +463,14 @@ fn bounds<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D
         set.insert_bound(bound);
     }
     Ok(set.bounds)
+}
+
+fn floors<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D::Error> {
+    let mut set = FactSet::default();
+    for floor in Vec::<Fact>::deserialize(d)? {
+        set.insert_floor(floor);
+    }
+    Ok(set.floors)
 }
 
 fn values<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Value>, D::Error> {

@@ -60,8 +60,9 @@ async fn fact_constraints_are_traced() {
 
 #[tokio::test]
 async fn tighter_bound_needs_facts() {
-    let a = traced("q03").await;
-    let facts = derive_facts(&profiles(&["q03"]).await);
+    // q04 is bounded by `|orders|` alone, and by 5 with its facts.
+    let a = traced("q04").await;
+    let facts = derive_facts(&profiles(&["q04"]).await);
     let i = a.with_facts(&facts, FactMode::Pinned).unwrap();
     let bounds = i.bounds().unwrap();
     assert_ne!(Some(&bounds), a.bounds().ok().as_ref(), "the facts tighten nothing");

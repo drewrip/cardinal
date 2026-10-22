@@ -1,7 +1,9 @@
 //! Declared foreign keys: a join on exactly one, against every row of the
 //! table it references, keeps each referencing row exactly once.
 
-use cardinal::{Analysis, ForeignKey, Options, analyze_sql_with};
+mod fixtures;
+
+use cardinal::{Analysis, ForeignKey, Options, analyze_observed, analyze_sql_with};
 use datafusion::prelude::SessionContext;
 
 /// Data satisfying every key of `keys()`.
@@ -129,4 +131,22 @@ async fn widening_casts_keep_the_key() {
     assert_eq!(formula(sql, true).await, ("|orders|".into(), "X = |orders|".into()));
     let sql = "SELECT * FROM orders o JOIN customers c ON CAST(o.cust AS DECIMAL(20, 0)) = CAST(c.id AS DECIMAL(20, 0)) WHERE o.amount > 10";
     assert_eq!(formula(sql, true).await.0, "s1·|orders|");
+}
+
+/// A foreign key references a key, so the referenced columns are unique
+/// even where their table is filtered: TPC-H q16 as DuckDB planned it, with
+/// only the foreign keys declared, joins `partsupp` to the parts of some
+/// brands, types and sizes on `p_partkey`, matching each row at most once.
+#[tokio::test]
+async fn referenced_columns_are_unique() {
+    let catalog = fixtures::catalog().await;
+    let plan = fixtures::plans("tpch").await.into_iter().find(|p| p.name == "q16").unwrap();
+    let analyze = |foreign_keys| {
+        let options = Options { selectivity: true, foreign_keys, ..Default::default() };
+        analyze_observed(&catalog, &plan, options).unwrap()
+    };
+    let declared = analyze(fixtures::foreign_keys());
+    assert!(declared.smtlib.contains("InnerKeyJoin"), "{}", declared.plan);
+    let undeclared = analyze(vec![]);
+    assert!(!undeclared.smtlib.contains("InnerKeyJoin"), "{}", undeclared.plan);
 }

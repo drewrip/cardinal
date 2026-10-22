@@ -6,7 +6,7 @@
 //! inputs'.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::panic::Location;
 
 use datafusion::arrow::datatypes::DataType;
@@ -321,7 +321,7 @@ impl<'a> Analyzer<'a> {
         let schema = plan.schema();
         for j in 0..schema.fields().len() {
             let col = Column::from(schema.qualified_field(j));
-            if covers_key(plan, &[col], Nulls::Equal) {
+            if self.covers_key(plan, &[col], Nulls::Equal) {
                 self.assert(rel.ndv[j].eq(&rel.card));
             }
         }
@@ -557,10 +557,18 @@ impl<'a> Analyzer<'a> {
                 if let Some(p) = product(&all, self.max_product) {
                     self.assert(o.card.le(p));
                 }
+                // Columns the others determine add no distinct rows.
+                let determining = self.determining_keys(input, all.len());
+                if determining.len() < all.len() {
+                    let factors: Vec<&Int> = determining.iter().map(|&j| &l.ndv[j]).collect();
+                    if let Some(p) = product(&factors, self.max_product) {
+                        self.assert(o.card.le(p));
+                    }
+                }
                 let cols: Vec<Column> = (0..input.schema().fields().len())
                     .map(|i| Column::from(input.schema().qualified_field(i)))
                     .collect();
-                if covers_key(input, &cols, Nulls::Equal) {
+                if self.covers_key(input, &cols, Nulls::Equal) {
                     self.assert(o.card.eq(&l.card));
                 }
                 o
@@ -939,13 +947,21 @@ impl<'a> Analyzer<'a> {
         if let Some(p) = product(&factors, self.max_product) {
             self.assert(o.card.le(p));
         }
+        // Keys the others determine add no groups.
+        let determining = self.determining_keys(plan, agg.group_expr.len());
+        if determining.len() < factors.len() {
+            let factors: Vec<&Int> = determining.iter().map(|&j| &o.ndv[j]).collect();
+            if let Some(p) = product(&factors, self.max_product) {
+                self.assert(o.card.le(p));
+            }
+        }
         // Grouping by a unique key leaves every row its own group.
         let cols: Option<Vec<Column>> = agg
             .group_expr
             .iter()
             .map(|e| key_column(&agg.input, e))
             .collect();
-        if cols.is_some_and(|cols| covers_key(&agg.input, &cols, Nulls::Equal)) {
+        if cols.is_some_and(|cols| self.covers_key(&agg.input, &cols, Nulls::Equal)) {
             self.assert(o.card.eq(&l.card));
         }
         o
@@ -959,8 +975,8 @@ impl<'a> Analyzer<'a> {
         let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
         // A unique key on one side means each row of the other side matches at
         // most once.
-        let ru = equi && key_is_unique(join, &join.right, &rk);
-        let lu = equi && key_is_unique(join, &join.left, &lk);
+        let ru = equi && self.key_is_unique(join, &join.right, &rk);
+        let lu = equi && self.key_is_unique(join, &join.left, &lk);
         // A foreign key from one side to every row of the other's table: each
         // of the first side's rows matches exactly once.
         let (fl, fr) = self.foreign_key(join);
@@ -1455,16 +1471,10 @@ fn join_facts(plan: &LogicalPlan, join: &Join, l: &Facts, r: &Facts) -> Facts {
     out
 }
 
-/// An upper bound on the number of distinct values `e` takes over the rows of
-/// `input`, or `None` if nothing better than the row count is known. A
-/// deterministic function of some columns takes at most as many values as
-/// there are combinations of theirs.
-fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int> {
-    if let Some(c) = key_column(input, e) {
-        let i = input.schema().index_of_column(&c).ok()?;
-        return Some(l.ndv[i].clone());
-    }
-    let opaque = e.is_volatile()
+/// True unless `e` is a deterministic function of the columns it reads: it
+/// is volatile, or reads a subquery, an outer query or a parameter.
+fn opaque(e: &Expr) -> bool {
+    e.is_volatile()
         || e.exists(|x| {
             Ok(matches!(
                 x,
@@ -1476,8 +1486,73 @@ fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int>
                     | Expr::Placeholder(_)
             ))
         })
-        .unwrap_or(true);
-    if opaque {
+        .unwrap_or(true)
+}
+
+/// True if `e`, over the rows of `input`, takes one value on rows that agree
+/// on the columns `determined` (positions in `input`'s output).
+fn determined(e: &Expr, input: &LogicalPlan, determined: &BTreeSet<usize>) -> bool {
+    !opaque(e)
+        && e.column_refs()
+            .into_iter()
+            .all(|c| input.schema().index_of_column(c).is_ok_and(|i| determined.contains(&i)))
+}
+
+/// Pairs of `input`'s output positions that `predicate` holds equal on every
+/// row it keeps. Floats are left out: SQL equality identifies values that
+/// are distinct as bits (`-0.0 = 0.0`).
+fn equalities(predicate: &Expr, input: &LogicalPlan) -> Vec<(usize, usize)> {
+    split_conjunction(predicate)
+        .into_iter()
+        .filter_map(|conj| match conj {
+            Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
+                Some((exact_index(input, left)?, exact_index(input, right)?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`column_index`], of a column whose type is not a float.
+fn exact_index(input: &LogicalPlan, e: &Expr) -> Option<usize> {
+    let i = column_index(input, e)?;
+    (!input.schema().field(i).data_type().is_floating()).then_some(i)
+}
+
+/// The closure `close` gives of `keys`, where each of `pairs` holds two
+/// columns equal on every row: a column equal to a determined one is
+/// determined too.
+fn with_equalities(
+    mut keys: Vec<usize>,
+    pairs: &[(usize, usize)],
+    close: impl Fn(&[usize]) -> BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    loop {
+        let closed = close(&keys);
+        let before = keys.len();
+        for &(a, b) in pairs {
+            for (x, y) in [(a, b), (b, a)] {
+                if closed.contains(&x) && !closed.contains(&y) && !keys.contains(&y) {
+                    keys.push(y);
+                }
+            }
+        }
+        if keys.len() == before {
+            return closed;
+        }
+    }
+}
+
+/// An upper bound on the number of distinct values `e` takes over the rows of
+/// `input`, or `None` if nothing better than the row count is known. A
+/// deterministic function of some columns takes at most as many values as
+/// there are combinations of theirs.
+fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int> {
+    if let Some(c) = key_column(input, e) {
+        let i = input.schema().index_of_column(&c).ok()?;
+        return Some(l.ndv[i].clone());
+    }
+    if opaque(e) {
         return None;
     }
     let factors: Option<Vec<&Int>> = e
@@ -1486,25 +1561,6 @@ fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int>
         .map(|c| input.schema().index_of_column(c).ok().map(|i| &l.ndv[i]))
         .collect();
     product(&factors?, cap)
-}
-
-/// True if each row of the other side of `join` matches at most one row of
-/// `side` on its key expressions `keys` (see `covers_key`): the keys are
-/// columns, possibly under injective casts, unique in `side`'s output. NULL
-/// keys match nothing unless the join compares them as equal.
-fn key_is_unique(join: &Join, side: &LogicalPlan, keys: &[&Expr]) -> bool {
-    let Some(cols) = keys
-        .iter()
-        .map(|e| key_column(side, e))
-        .collect::<Option<Vec<Column>>>()
-    else {
-        return false;
-    };
-    let nulls = match join.null_equality {
-        NullEquality::NullEqualsNothing => Nulls::Distinct,
-        NullEquality::NullEqualsNull => Nulls::Equal,
-    };
-    covers_key(side, &cols, nulls)
 }
 
 /// The column `e` reads from `input`, if `e` is that column possibly wrapped in
@@ -1519,6 +1575,12 @@ fn key_column(input: &LogicalPlan, e: &Expr) -> Option<Column> {
         }
         _ => None,
     }
+}
+
+/// The position in `input`'s output of the column `e` reads (see
+/// [`key_column`]).
+fn column_index(input: &LogicalPlan, e: &Expr) -> Option<usize> {
+    input.schema().index_of_column(&key_column(input, e)?).ok()
 }
 
 /// True if casting `from` to `to` maps distinct values to distinct values.
@@ -1604,214 +1666,380 @@ enum Nulls {
     Distinct,
 }
 
-/// True if `cols` of `plan`'s output are unique, with NULLs compared as
-/// `nulls` says: they trace back to a declared primary key, a UNIQUE
-/// constraint, a GROUP BY key or a DISTINCT output through operators that
-/// never duplicate rows. A UNIQUE column may hold many NULLs, so it is
-/// unique with NULLs equal only if it is NOT NULL.
-fn covers_key(plan: &LogicalPlan, cols: &[Column], nulls: Nulls) -> bool {
-    match plan {
-        LogicalPlan::TableScan(scan) => {
-            let schema = scan.source.schema();
-            let Some(indices) = cols
-                .iter()
-                .map(|c| schema.index_of(&c.name).ok())
-                .collect::<Option<Vec<usize>>>()
-            else {
-                return false;
-            };
-            scan.source.constraints().is_some_and(|cs| {
-                cs.iter().any(|c| match c {
-                    Constraint::PrimaryKey(pk) => pk.iter().all(|i| indices.contains(i)),
-                    Constraint::Unique(u) => {
-                        u.iter().all(|i| indices.contains(i))
-                            && (nulls == Nulls::Distinct || u.iter().all(|i| !schema.field(*i).is_nullable()))
-                    }
-                })
-            })
-        }
-        // A column the filter pins to one value adds nothing to tell its rows
-        // apart: if the input is unique on it with `cols`, the filter's rows
-        // are unique on `cols` alone, e.g. `rn = 1` over `row_number()`.
-        LogicalPlan::Filter(f) => {
-            let Some(cs) = same_positions(plan, &f.input, cols) else {
-                return false;
-            };
-            if covers_key(&f.input, &cs, nulls) {
-                return true;
-            }
-            let mut with = cs.clone();
-            for c in pinned(&f.predicate) {
-                if f.input.schema().has_column(&c) && !with.contains(&c) {
-                    with.push(c);
-                }
-            }
-            with.len() > cs.len() && covers_key(&f.input, &with, nulls)
-        }
-        // `row_number()` numbers each partition's rows 1, 2, ...: it is unique
-        // with its partition columns. Otherwise the window keeps its input's
-        // rows, so the input's keys among `cols` stay unique.
-        LogicalPlan::Window(w) => {
-            let Some(ix) = output_indices(plan, cols) else {
-                return false;
-            };
-            let n = w.input.schema().fields().len();
-            let numbered = ix.iter().filter(|&&i| i >= n).any(|&i| match strip_alias(&w.window_expr[i - n]) {
-                Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
-                    f.params.partition_by.iter().all(|p| match strip_alias(p) {
-                        Expr::Column(c) => w.input.schema().index_of_column(c).is_ok_and(|j| ix.contains(&j)),
-                        _ => false,
+impl<'a> Analyzer<'a> {
+    /// True if each row of the other side of `join` matches at most one row of
+    /// `side` on its key expressions `keys` (see `covers_key`): the keys are
+    /// columns, possibly under injective casts, unique in `side`'s output. NULL
+    /// keys match nothing unless the join compares them as equal.
+    fn key_is_unique(&self, join: &Join, side: &LogicalPlan, keys: &[&Expr]) -> bool {
+        let Some(cols) = keys
+            .iter()
+            .map(|e| key_column(side, e))
+            .collect::<Option<Vec<Column>>>()
+        else {
+            return false;
+        };
+        let nulls = match join.null_equality {
+            NullEquality::NullEqualsNothing => Nulls::Distinct,
+            NullEquality::NullEqualsNull => Nulls::Equal,
+        };
+        self.covers_key(side, &cols, nulls)
+    }
+
+    /// True if `cols` of `plan`'s output are unique, with NULLs compared as
+    /// `nulls` says: they trace back to a declared primary key, a UNIQUE
+    /// constraint, a GROUP BY key or a DISTINCT output through operators that
+    /// never duplicate rows. A UNIQUE column may hold many NULLs, so it is
+    /// unique with NULLs equal only if it is NOT NULL.
+    fn covers_key(&self, plan: &LogicalPlan, cols: &[Column], nulls: Nulls) -> bool {
+        match plan {
+            LogicalPlan::TableScan(scan) => {
+                let schema = scan.source.schema();
+                let Some(indices) = cols
+                    .iter()
+                    .map(|c| schema.index_of(&c.name).ok())
+                    .collect::<Option<Vec<usize>>>()
+                else {
+                    return false;
+                };
+                let unique = |u: &[usize]| {
+                    u.iter().all(|i| indices.contains(i))
+                        && (nulls == Nulls::Distinct || u.iter().all(|i| !schema.field(*i).is_nullable()))
+                };
+                let declared = scan.source.constraints().is_some_and(|cs| {
+                    cs.iter().any(|c| match c {
+                        Constraint::PrimaryKey(pk) => pk.iter().all(|i| indices.contains(i)),
+                        Constraint::Unique(u) => unique(u),
                     })
+                });
+                // A foreign key references a key, so its referenced columns
+                // are unique, like a UNIQUE constraint's.
+                let ScanKind::Base { display, .. } = (self.resolve)(scan) else {
+                    return declared;
+                };
+                declared
+                    || self.foreign_keys.iter().filter(|fk| fk.references == display).any(|fk| {
+                        let referenced: Option<Vec<usize>> =
+                            fk.referenced.iter().map(|c| schema.index_of(c).ok()).collect();
+                        referenced.is_some_and(|r| unique(&r))
+                    })
+            }
+            // A column the filter pins to one value adds nothing to tell its rows
+            // apart: if the input is unique on it with `cols`, the filter's rows
+            // are unique on `cols` alone, e.g. `rn = 1` over `row_number()`.
+            LogicalPlan::Filter(f) => {
+                let Some(cs) = same_positions(plan, &f.input, cols) else {
+                    return false;
+                };
+                if self.covers_key(&f.input, &cs, nulls) {
+                    return true;
                 }
-                _ => false,
-            });
-            let kept: Vec<Column> = ix
-                .iter()
-                .filter(|&&i| i < n)
-                .map(|&i| Column::from(w.input.schema().qualified_field(i)))
-                .collect();
-            numbered || (!kept.is_empty() && covers_key(&w.input, &kept, nulls))
-        }
-        // Operators whose output rows are a subset of their input's, with the
-        // input's columns first and unchanged.
-        LogicalPlan::Sort(_)
-        | LogicalPlan::Limit(_)
-        | LogicalPlan::Repartition(_)
-        | LogicalPlan::SubqueryAlias(_) => {
-            let child = plan.inputs()[0];
-            same_positions(plan, child, cols).is_some_and(|cs| covers_key(child, &cs, nulls))
-        }
-        // DISTINCT's output is unique on all its columns, and is a subset of its
-        // input's rows, so its input's keys stay unique too.
-        LogicalPlan::Distinct(Distinct::All(input)) => {
-            let all = output_indices(plan, cols)
-                .is_some_and(|ix| (0..plan.schema().fields().len()).all(|i| ix.contains(&i)));
-            all || same_positions(plan, input, cols)
-                .is_some_and(|cs| covers_key(input, &cs, nulls))
-        }
-        // DISTINCT ON is unique on its ON expressions, where they are selected
-        // as columns; its rows are a subset of its input's.
-        LogicalPlan::Distinct(Distinct::On(on)) => {
-            let Some(ix) = output_indices(plan, cols) else {
-                return false;
-            };
-            let on_positions: Option<Vec<usize>> = on
-                .on_expr
-                .iter()
-                .map(|e| {
-                    let c = key_column(&on.input, e)?;
-                    on.select_expr
-                        .iter()
-                        .position(|s| key_column(&on.input, s).as_ref() == Some(&c))
-                })
-                .collect();
-            let by_on = on_positions.is_some_and(|ps| ps.iter().all(|p| ix.contains(p)));
-            let mapped: Option<Vec<Column>> = ix
-                .iter()
-                .map(|&i| key_column(&on.input, &on.select_expr[i]))
-                .collect();
-            by_on || mapped.is_some_and(|cs| covers_key(&on.input, &cs, nulls))
-        }
-        // GROUP BY emits one row per distinct combination of its keys (NULLs
-        // forming one group), so it is unique on all its key columns, and on any
-        // keys that are unique in its input. With no GROUP BY there is exactly
-        // one row, unique on anything. ROLLUP / CUBE / GROUPING SETS repeat keys
-        // across grouping levels.
-        LogicalPlan::Aggregate(agg) => {
-            if agg
-                .group_expr
-                .iter()
-                .any(|e| matches!(e, Expr::GroupingSet(_)))
-            {
-                return false;
-            }
-            if agg.group_expr.is_empty() {
-                return true;
-            }
-            let Some(ix) = output_indices(plan, cols) else {
-                return false;
-            };
-            let groups = agg.group_expr.len();
-            if (0..groups).all(|i| ix.contains(&i)) {
-                return true;
-            }
-            let mapped: Option<Vec<Column>> = ix
-                .iter()
-                .map(|&i| {
-                    if i < groups {
-                        key_column(&agg.input, &agg.group_expr[i])
-                    } else {
-                        None
+                let mut with = cs.clone();
+                for c in pinned(&f.predicate) {
+                    if f.input.schema().has_column(&c) && !with.contains(&c) {
+                        with.push(c);
                     }
-                })
-                .collect();
-            mapped.is_some_and(|cs| covers_key(&agg.input, &cs, nulls))
-        }
-        LogicalPlan::Projection(p) => {
-            let mapped = cols
-                .iter()
-                .map(|c| {
-                    let i = p.schema.index_of_column(c).ok()?;
-                    key_column(&p.input, &p.expr[i])
-                })
-                .collect::<Option<Vec<Column>>>();
-            mapped.is_some_and(|cs| covers_key(&p.input, &cs, nulls))
-        }
-        LogicalPlan::Join(join) => {
-            let left_len = join.left.schema().fields().len();
-            let Some(indices) = cols
-                .iter()
-                .map(|c| plan.schema().index_of_column(c).ok())
-                .collect::<Option<Vec<usize>>>()
-            else {
-                return false;
-            };
-            let on_left = indices.iter().all(|i| *i < left_len);
-            let on_right = indices.iter().all(|i| *i >= left_len);
-            let left_cols = || -> Option<Vec<Column>> {
-                indices
-                    .iter()
-                    .map(|i| child_column(&join.left, *i))
-                    .collect()
-            };
-            let right_cols = || -> Option<Vec<Column>> {
-                indices
-                    .iter()
-                    .map(|i| child_column(&join.right, i - left_len))
-                    .collect()
-            };
-            let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
-            match join.join_type {
-                // Semi, anti and mark joins emit each row of one side at most once.
-                JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                    left_cols().is_some_and(|cs| covers_key(&join.left, &cs, nulls))
                 }
-                // These output the right side's schema (plus a mark column).
-                JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => indices
+                with.len() > cs.len() && self.covers_key(&f.input, &with, nulls)
+            }
+            // `row_number()` numbers each partition's rows 1, 2, ...: it is unique
+            // with its partition columns. Otherwise the window keeps its input's
+            // rows, so the input's keys among `cols` stay unique.
+            LogicalPlan::Window(w) => {
+                let Some(ix) = output_indices(plan, cols) else {
+                    return false;
+                };
+                let n = w.input.schema().fields().len();
+                let numbered = ix.iter().filter(|&&i| i >= n).any(|&i| match strip_alias(&w.window_expr[i - n]) {
+                    Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
+                        f.params.partition_by.iter().all(|p| match strip_alias(p) {
+                            Expr::Column(c) => w.input.schema().index_of_column(c).is_ok_and(|j| ix.contains(&j)),
+                            _ => false,
+                        })
+                    }
+                    _ => false,
+                });
+                let kept: Vec<Column> = ix
                     .iter()
-                    .map(|i| child_column(&join.right, *i))
-                    .collect::<Option<Vec<Column>>>()
-                    .is_some_and(|cs| covers_key(&join.right, &cs, nulls)),
-                // A row of one side appears at most once if it matches at most one
-                // row of the other side, i.e. the join is on the other side's key.
-                // Only the preserved side of an outer join keeps its key, since the
-                // other side gains NULL-padded rows.
-                JoinType::Inner | JoinType::Left | JoinType::Right => {
-                    let left_ok = on_left
-                        && join.join_type != JoinType::Right
-                        && key_is_unique(join, &join.right, &rk)
-                        && left_cols().is_some_and(|cs| covers_key(&join.left, &cs, nulls));
-                    let right_ok = on_right
-                        && join.join_type != JoinType::Left
-                        && key_is_unique(join, &join.left, &lk)
-                        && right_cols().is_some_and(|cs| covers_key(&join.right, &cs, nulls));
-                    left_ok || right_ok
+                    .filter(|&&i| i < n)
+                    .map(|&i| Column::from(w.input.schema().qualified_field(i)))
+                    .collect();
+                numbered || (!kept.is_empty() && self.covers_key(&w.input, &kept, nulls))
+            }
+            // Operators whose output rows are a subset of their input's, with the
+            // input's columns first and unchanged.
+            LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::SubqueryAlias(_) => {
+                let child = plan.inputs()[0];
+                same_positions(plan, child, cols).is_some_and(|cs| self.covers_key(child, &cs, nulls))
+            }
+            // DISTINCT's output is unique on all its columns, and is a subset of its
+            // input's rows, so its input's keys stay unique too.
+            LogicalPlan::Distinct(Distinct::All(input)) => {
+                let all = output_indices(plan, cols)
+                    .is_some_and(|ix| (0..plan.schema().fields().len()).all(|i| ix.contains(&i)));
+                all || same_positions(plan, input, cols)
+                    .is_some_and(|cs| self.covers_key(input, &cs, nulls))
+            }
+            // DISTINCT ON is unique on its ON expressions, where they are selected
+            // as columns; its rows are a subset of its input's.
+            LogicalPlan::Distinct(Distinct::On(on)) => {
+                let Some(ix) = output_indices(plan, cols) else {
+                    return false;
+                };
+                let on_positions: Option<Vec<usize>> = on
+                    .on_expr
+                    .iter()
+                    .map(|e| {
+                        let c = key_column(&on.input, e)?;
+                        on.select_expr
+                            .iter()
+                            .position(|s| key_column(&on.input, s).as_ref() == Some(&c))
+                    })
+                    .collect();
+                let by_on = on_positions.is_some_and(|ps| ps.iter().all(|p| ix.contains(p)));
+                let mapped: Option<Vec<Column>> = ix
+                    .iter()
+                    .map(|&i| key_column(&on.input, &on.select_expr[i]))
+                    .collect();
+                by_on || mapped.is_some_and(|cs| self.covers_key(&on.input, &cs, nulls))
+            }
+            // GROUP BY emits one row per distinct combination of its keys (NULLs
+            // forming one group), so it is unique on all its key columns, and on any
+            // keys that are unique in its input. With no GROUP BY there is exactly
+            // one row, unique on anything. ROLLUP / CUBE / GROUPING SETS repeat keys
+            // across grouping levels.
+            LogicalPlan::Aggregate(agg) => {
+                if agg
+                    .group_expr
+                    .iter()
+                    .any(|e| matches!(e, Expr::GroupingSet(_)))
+                {
+                    return false;
                 }
-                JoinType::Full => false,
+                if agg.group_expr.is_empty() {
+                    return true;
+                }
+                let Some(ix) = output_indices(plan, cols) else {
+                    return false;
+                };
+                let groups = agg.group_expr.len();
+                if (0..groups).all(|i| ix.contains(&i)) {
+                    return true;
+                }
+                let mapped: Option<Vec<Column>> = ix
+                    .iter()
+                    .map(|&i| {
+                        if i < groups {
+                            key_column(&agg.input, &agg.group_expr[i])
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if mapped.is_some_and(|cs| self.covers_key(&agg.input, &cs, nulls)) {
+                    return true;
+                }
+                // Columns that determine every key pick out one group.
+                let closed = self.fd_closure(plan, &ix);
+                (0..groups).all(|i| closed.contains(&i))
+            }
+            LogicalPlan::Projection(p) => {
+                let mapped = cols
+                    .iter()
+                    .map(|c| {
+                        let i = p.schema.index_of_column(c).ok()?;
+                        key_column(&p.input, &p.expr[i])
+                    })
+                    .collect::<Option<Vec<Column>>>();
+                mapped.is_some_and(|cs| self.covers_key(&p.input, &cs, nulls))
+            }
+            LogicalPlan::Join(join) => {
+                let left_len = join.left.schema().fields().len();
+                let Some(indices) = cols
+                    .iter()
+                    .map(|c| plan.schema().index_of_column(c).ok())
+                    .collect::<Option<Vec<usize>>>()
+                else {
+                    return false;
+                };
+                let left_cols = || -> Option<Vec<Column>> {
+                    indices
+                        .iter()
+                        .map(|i| child_column(&join.left, *i))
+                        .collect()
+                };
+                let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
+                match join.join_type {
+                    // Semi, anti and mark joins emit each row of one side at most once.
+                    JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
+                        left_cols().is_some_and(|cs| self.covers_key(&join.left, &cs, nulls))
+                    }
+                    // These output the right side's schema (plus a mark column).
+                    JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => indices
+                        .iter()
+                        .map(|i| child_column(&join.right, *i))
+                        .collect::<Option<Vec<Column>>>()
+                        .is_some_and(|cs| self.covers_key(&join.right, &cs, nulls)),
+                    // A row of one side appears at most once if it matches at most one
+                    // row of the other side, i.e. the join is on the other side's key.
+                    // Rows agreeing on `cols` agree on its columns of that side, so
+                    // they are one row if those are unique there. Only the preserved
+                    // side of an outer join keeps its key, since the other side gains
+                    // NULL-padded rows.
+                    JoinType::Inner | JoinType::Left | JoinType::Right => {
+                        let mut ix = indices.clone();
+                        // An inner join's equi-keys are equal on every row it emits.
+                        if join.join_type == JoinType::Inner {
+                            for (a, b) in &join.on {
+                                let (Some(i), Some(j)) = (column_index(&join.left, a), column_index(&join.right, b))
+                                else {
+                                    continue;
+                                };
+                                let j = left_len + j;
+                                match (ix.contains(&i), ix.contains(&j)) {
+                                    (true, false) => ix.push(j),
+                                    (false, true) => ix.push(i),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        let side = |child: &LogicalPlan, on_side: &dyn Fn(usize) -> Option<usize>| {
+                            ix.iter().filter_map(|&i| on_side(i)).map(|i| child_column(child, i)).collect::<Option<Vec<Column>>>()
+                        };
+                        let left = side(&join.left, &|i| (i < left_len).then_some(i));
+                        let right = side(&join.right, &|i| i.checked_sub(left_len));
+                        let left_ok = join.join_type != JoinType::Right
+                            && left.as_ref().is_some_and(|cs| !cs.is_empty())
+                            && self.key_is_unique(join, &join.right, &rk)
+                            && left.is_some_and(|cs| self.covers_key(&join.left, &cs, nulls));
+                        let right_ok = join.join_type != JoinType::Left
+                            && right.as_ref().is_some_and(|cs| !cs.is_empty())
+                            && self.key_is_unique(join, &join.left, &lk)
+                            && right.is_some_and(|cs| self.covers_key(&join.right, &cs, nulls));
+                        left_ok || right_ok
+                    }
+                    JoinType::Full => false,
+                }
+            }
+            // Unions, scans of non-tables and everything else: no key to rely on.
+            _ => false,
+        }
+    }
+
+    /// Output columns of `plan` that `keys` (output positions) functionally
+    /// determine: rows agreeing on `keys`, NULLs equal, agree on them. The
+    /// dependencies come from declared keys, and are trusted as they are.
+    fn fd_closure(&self, plan: &LogicalPlan, keys: &[usize]) -> BTreeSet<usize> {
+        let mut out: BTreeSet<usize> = keys.iter().copied().collect();
+        let width = plan.schema().fields().len();
+        // The input's closure, for operators whose output columns start with
+        // their input's, unchanged.
+        let same = |input: &LogicalPlan| {
+            let n = input.schema().fields().len();
+            let keys: Vec<usize> = keys.iter().copied().filter(|&k| k < n).collect();
+            self.fd_closure(input, &keys)
+        };
+        match plan {
+            LogicalPlan::TableScan(_) => {
+                let cols: Vec<Column> =
+                    keys.iter().map(|&i| Column::from(plan.schema().qualified_field(i))).collect();
+                if self.covers_key(plan, &cols, Nulls::Equal) {
+                    out.extend(0..width);
+                }
+            }
+            LogicalPlan::Projection(p) => {
+                let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&p.input, &p.expr[k])).collect();
+                let closed = self.fd_closure(&p.input, &input);
+                out.extend((0..width).filter(|&j| determined(&p.expr[j], &p.input, &closed)));
+            }
+            // A column the filter pins to one value is the same on every
+            // row, and columns it holds equal agree.
+            LogicalPlan::Filter(f) => {
+                let mut keys = keys.to_vec();
+                for c in pinned(&f.predicate) {
+                    if let Ok(i) = f.input.schema().index_of_column(&c) {
+                        keys.push(i);
+                    }
+                }
+                out.extend(with_equalities(keys, &equalities(&f.predicate, &f.input), |k| self.fd_closure(&f.input, k)));
+            }
+            // The window's own columns are not determined.
+            LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Distinct(Distinct::All(_)) => out.extend(same(plan.inputs()[0])),
+            LogicalPlan::Join(join) => {
+                let nl = join.left.schema().fields().len();
+                // A padded side's columns are NULL on unmatched rows, so its
+                // dependencies don't hold on the output: only the preserved
+                // side's do.
+                let side = |child: &LogicalPlan, keys: &[usize], offset: usize| -> BTreeSet<usize> {
+                    let n = child.schema().fields().len();
+                    let keys: Vec<usize> =
+                        keys.iter().filter_map(|&k| k.checked_sub(offset)).filter(|&k| k < n).collect();
+                    self.fd_closure(child, &keys).into_iter().map(|i| i + offset).collect()
+                };
+                match join.join_type {
+                    // Each equi-key pair is equal on every row the join emits.
+                    JoinType::Inner => {
+                        let pairs: Vec<(usize, usize)> = join
+                            .on
+                            .iter()
+                            .filter_map(|(a, b)| Some((exact_index(&join.left, a)?, nl + exact_index(&join.right, b)?)))
+                            .collect();
+                        out.extend(with_equalities(keys.to_vec(), &pairs, |k| {
+                            let mut closed = side(&join.left, k, 0);
+                            closed.extend(side(&join.right, k, nl));
+                            closed
+                        }));
+                    }
+                    JoinType::Left | JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
+                        out.extend(side(&join.left, keys, 0))
+                    }
+                    JoinType::Right => out.extend(side(&join.right, keys, nl)),
+                    // These output the right side's schema (plus a mark column).
+                    JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
+                        out.extend(side(&join.right, keys, 0))
+                    }
+                    JoinType::Full => {}
+                }
+            }
+            LogicalPlan::Aggregate(agg) if !agg.group_expr.iter().any(|e| matches!(e, Expr::GroupingSet(_))) => {
+                let groups = agg.group_expr.len();
+                let input: Vec<usize> = keys
+                    .iter()
+                    .filter(|&&k| k < groups)
+                    .filter_map(|&k| column_index(&agg.input, &agg.group_expr[k]))
+                    .collect();
+                let closed = self.fd_closure(&agg.input, &input);
+                out.extend((0..groups).filter(|&j| determined(&agg.group_expr[j], &agg.input, &closed)));
+                // The keys pick out one group, aggregates and all.
+                if (0..groups).all(|j| out.contains(&j)) {
+                    out.extend(0..width);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// A smallest-by-greedy subset of `plan`'s first `n` output positions
+    /// that determines all of them ([`Self::fd_closure`]).
+    fn determining_keys(&self, plan: &LogicalPlan, n: usize) -> Vec<usize> {
+        let mut keys: Vec<usize> = (0..n).collect();
+        for k in 0..n {
+            let rest: Vec<usize> = keys.iter().copied().filter(|&j| j != k).collect();
+            let closed = self.fd_closure(plan, &rest);
+            if (0..n).all(|j| closed.contains(&j)) {
+                keys = rest;
             }
         }
-        // Unions, scans of non-tables and everything else: no key to rely on.
-        _ => false,
+        keys
     }
 }
 

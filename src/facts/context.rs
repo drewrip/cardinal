@@ -373,8 +373,10 @@ impl fmt::Display for Taint {
 pub enum Pending {
     /// A runtime filter on `table.column`, from a join on it. The join's
     /// output is the same whether or not it pruned, since it only removes
-    /// rows without a partner.
-    Join { column: Option<String>, text: String },
+    /// rows without a partner. `subset` while the rows are still among the
+    /// context's: every operator since the scan keeps fewer rows for fewer
+    /// input.
+    Join { column: Option<String>, text: String, subset: bool },
     /// An optional filter pushed into a scan, which may have let through rows
     /// that fail it: the rows are all of the context's, and maybe more, until
     /// a filter above checks the same predicate. `None` if it did not resolve.
@@ -384,16 +386,30 @@ pub enum Pending {
 impl Pending {
     fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Pending {
         match self {
-            Pending::Join { column, text } => Pending::Join {
+            Pending::Join { column, text, subset } => Pending::Join {
                 column: column.as_ref().map(|c| match c.rsplit_once('.') {
                     Some((r, n)) => format!("{}.{n}", f(r).unwrap_or_else(|| r.to_string())),
                     None => c.clone(),
                 }),
                 text: text.clone(),
+                subset: *subset,
             },
             Pending::Filter { term, text } => Pending::Filter { term: term.as_ref().map(|t| t.rename(f)), text: text.clone() },
         }
     }
+
+    /// This filter, once the rows may no longer be among the context's.
+    fn loosened(self) -> Pending {
+        match self {
+            Pending::Join { column, text, .. } => Pending::Join { column, text, subset: false },
+            p => p,
+        }
+    }
+}
+
+/// `pending`, once the rows may no longer be among the context's.
+fn loosened(pending: BTreeSet<Pending>) -> BTreeSet<Pending> {
+    pending.into_iter().map(Pending::loosened).collect()
 }
 
 /// What an operator's rows are.
@@ -423,6 +439,18 @@ impl State {
         match self {
             State::Clean(c) => Some(c),
             State::Pending(c, p) if p.iter().all(|p| matches!(p, Pending::Filter { term: Some(_), .. })) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A context these rows are among: `|context| >=` their count. Clean
+    /// rows are exactly the context's; pending ones are a subset when every
+    /// pending filter is a runtime filter, which only drops rows without a
+    /// partner, and everything above it kept a subset.
+    pub fn lower(&self) -> Option<&Context> {
+        match self {
+            State::Clean(c) => Some(c),
+            State::Pending(c, p) if p.iter().all(|p| matches!(p, Pending::Join { subset: true, .. })) => Some(c),
             _ => None,
         }
     }
@@ -800,7 +828,7 @@ fn state(
             };
             let mut pending: BTreeSet<Pending> = runtime_filters
                 .iter()
-                .map(|r| Pending::Join { column: r.column.clone(), text: r.text.clone() })
+                .map(|r| Pending::Join { column: r.column.clone(), text: r.text.clone(), subset: true })
                 .collect();
             for p in optional {
                 let term = p.expr.map(Term::new);
@@ -809,7 +837,13 @@ fn state(
             }
             State::with(Context::table(instance).filter(&preds), pending)
         }
-        Op::Project | Op::Sort | Op::Window => inputs[0].clone(),
+        Op::Project | Op::Sort => inputs[0].clone(),
+        // A window's values are computed over the rows it reads: over pruned
+        // rows, they are no values of the context's rows.
+        Op::Window => match inputs[0].clone() {
+            State::Pending(c, p) => State::Pending(c, loosened(p)),
+            s => s,
+        },
         Op::Reuse { suffix, checked } => {
             let of = node.children[0];
             let (read, whole) = (node, &plan.nodes[of]);
@@ -847,6 +881,8 @@ fn state(
             match c {
                 Context::Derived { op, args, mut inputs } if op == "LeftMark join" => {
                     let kind = if *negated { ExistsKind::NotIn } else { ExistsKind::Semi };
+                    // NOT IN keeps the rows that pruning would have dropped.
+                    let pending = if *negated { loosened(pending) } else { pending };
                     let other = inputs.pop().unwrap();
                     State::with(inputs[0].exists(kind, args.into_iter().collect(), other), pending)
                 }
@@ -884,6 +920,17 @@ fn state(
                 let pending = if !l_more && loose(&lp) { &lp } else { &rp };
                 return State::Tainted(Taint::Pruned(pending.iter().map(pending_text).collect::<Vec<_>>().join(", ")));
             }
+            // Fewer rows on a side give a subset of the rows out only where
+            // the join keeps fewer for fewer input: not on the padded side of
+            // an outer join, where pruning adds padded rows, nor the other
+            // side of an anti or mark join.
+            let (l_sub, r_sub) = match kind {
+                JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi => (true, true),
+                JoinType::Left | JoinType::LeftAnti | JoinType::LeftMark => (true, false),
+                JoinType::Right | JoinType::RightAnti | JoinType::RightMark => (false, true),
+                JoinType::Full => (false, false),
+            };
+            let (lp, rp) = (if l_sub { lp } else { loosened(lp) }, if r_sub { rp } else { loosened(rp) });
             // The join enforces the runtime filters on its keys, where the
             // rows it prunes are ones it would drop anyway.
             let mut pending: BTreeSet<Pending> = lp.union(&rp).cloned().collect();

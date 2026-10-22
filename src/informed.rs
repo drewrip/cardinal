@@ -794,15 +794,18 @@ impl<'a> Lookup<'a> {
     }
 
     /// Each operator's lower bounds on its rows that facts give of narrower
-    /// rows ([`fewer`]), by variable, with the fact each is from. Each is
-    /// asserted, and the solver keeps the largest.
+    /// rows ([`fewer`]), and that floors give of its own rows or narrower
+    /// ones, by variable, with the fact each is from. Each is asserted, and
+    /// the solver keeps the largest.
     fn floors(&self) -> Vec<(usize, String, u64, FactRef)> {
-        let counts: Vec<(&Context, u64, &Fact)> = self
-            .facts
-            .iter()
-            .filter(|f| !self.conflicted.contains(&f.kind))
-            .filter_map(|f| match &f.kind {
-                FactKind::Cardinality(c) => Some((c, f.value.as_int()?, f)),
+        // Each count, and whether it is a floor: one holds of its own rows.
+        let exact = self.facts.iter().map(|f| (f, false));
+        let floors = self.facts.floors().map(|f| (f, true));
+        let counts: Vec<(&Context, u64, &Fact, bool)> = exact
+            .chain(floors)
+            .filter(|(f, _)| !self.conflicted.contains(&f.kind))
+            .filter_map(|(f, floor)| match &f.kind {
+                FactKind::Cardinality(c) => Some((c, f.value.as_int()?, f, floor)),
                 _ => None,
             })
             .collect();
@@ -811,8 +814,8 @@ impl<'a> Lookup<'a> {
             let Ok(ctx) = &self.logical.contexts[i] else { continue };
             let ctx = self.canonical_ctx(ctx);
             let tables = ctx.tables();
-            for (c, n, fact) in &counts {
-                if **c != ctx && tables.is_subset(&c.tables()) && renamed(c, &ctx, fewer) {
+            for (c, n, fact, floor) in &counts {
+                if tables.is_subset(&c.tables()) && if **c == ctx { *floor } else { renamed(c, &ctx, fewer) } {
                     out.push((i, node.var.clone(), *n, FactRef::of(fact)));
                 }
             }

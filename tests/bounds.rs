@@ -212,10 +212,11 @@ async fn product_cap_is_configurable() {
         Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap()),
     )
     .unwrap();
-    // Each column is pinned to one value, so there is at most one group, but
+    // Each column takes two values, so there are at most 16 groups, but
     // proving it multiplies four distinct counts.
     let sql = "SELECT a, b, c, d, count(*) FROM wide
-               WHERE a = 1 AND b = 2 AND c = 3 AND d = 4 GROUP BY a, b, c, d";
+               WHERE a BETWEEN 1 AND 2 AND b BETWEEN 1 AND 2 AND c BETWEEN 1 AND 2 AND d BETWEEN 1 AND 2
+               GROUP BY a, b, c, d";
     assert_eq!(Options::default().max_product, 3);
     let b = bounds_in(&ctx, sql).await;
     assert_eq!(b.constant, None);
@@ -223,7 +224,12 @@ async fn product_cap_is_configurable() {
     let a = analyze_sql_with(&ctx, sql, Options { max_product: 4, ..Default::default() })
         .await
         .unwrap();
-    assert_eq!(a.bounds().unwrap().constant, Some(1));
+    assert_eq!(a.bounds().unwrap().constant, Some(16));
+    // Columns pinned to one value are the same on every row: no key is
+    // needed to tell the groups apart, so there is at most one.
+    let sql = "SELECT a, b, c, d, count(*) FROM wide
+               WHERE a = 1 AND b = 2 AND c = 3 AND d = 4 GROUP BY a, b, c, d";
+    assert_eq!(bounds_in(&ctx, sql).await.constant, Some(1));
 }
 
 #[tokio::test]

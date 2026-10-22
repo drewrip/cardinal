@@ -7,7 +7,8 @@ use cardinal::{Analysis, ForeignKey, Options, analyze_duckdb, analyze_sql_with};
 use datafusion::prelude::SessionContext;
 
 /// Data satisfying every declared key. `codes.code` is UNIQUE and holds
-/// several NULLs; `tags.tag` is UNIQUE and NOT NULL.
+/// several NULLs; `tags.tag` is UNIQUE and NOT NULL. A shipment and a
+/// purchase order have no supplier, and every supplier has shipments.
 async fn context() -> SessionContext {
     let ctx = SessionContext::new();
     for sql in [
@@ -22,6 +23,14 @@ async fn context() -> SessionContext {
         "INSERT INTO codes VALUES (1, 10), (2, 20), (3, NULL), (4, NULL)",
         "CREATE TABLE tags (id INT, tag INT NOT NULL UNIQUE)",
         "INSERT INTO tags VALUES (1, 1), (1, 2), (2, 3)",
+        "CREATE TABLE suppliers (supplier_id INT NOT NULL PRIMARY KEY, name VARCHAR, category VARCHAR, country VARCHAR)",
+        "INSERT INTO suppliers VALUES (1, 'acme', 'tools', 'us'), (2, 'bolt', 'tools', 'de'), (3, NULL, 'food', 'us')",
+        "CREATE TABLE shipments (shipment_id INT NOT NULL PRIMARY KEY, supplier_id INT, qty INT)",
+        "INSERT INTO shipments VALUES (1, 1, 5), (2, 1, 7), (3, 2, 1), (4, 3, 2), (5, 3, 9), (6, 9, 4), (7, NULL, 1)",
+        "CREATE TABLE purchase_orders (po_id INT NOT NULL PRIMARY KEY, supplier_id INT, qty INT)",
+        "INSERT INTO purchase_orders VALUES (1, 1, 5), (2, 1, 7), (3, 3, 1), (4, 8, 1)",
+        "CREATE TABLE loose (a INT, b INT, c INT, d INT)",
+        "INSERT INTO loose VALUES (1, 1, 1, 1), (1, 1, 1, 1), (1, 2, 1, 1)",
         "CREATE VIEW enriched AS SELECT s.id, s.amount, d.category, st.region FROM sales s
          JOIN dims d ON s.dim_id = d.id JOIN stores st ON s.store_id = st.store_id",
     ] {
@@ -100,6 +109,66 @@ async fn views_over_keyed_sources() {
     let keys = vec![ForeignKey::new("sales", &["store_id"], "stores", &["store_id"])];
     let a = analyze("SELECT s.id, st.region FROM sales s JOIN stores st ON s.store_id = st.store_id", keys).await;
     assert_eq!(a.bounds().unwrap().to_string(), "X = |sales|");
+}
+
+/// "Group by the id and the id's attributes": the shipments per supplier,
+/// with the supplier's name, category and country.
+const Q_GROUP: &str = "SELECT sh.supplier_id, upper(s.name) AS name, s.category, s.country, count(*) AS n
+    FROM shipments sh JOIN suppliers s ON sh.supplier_id = s.supplier_id
+    GROUP BY sh.supplier_id, upper(s.name), s.category, s.country";
+
+/// A declared key determines its table's other columns, and the dependency
+/// reaches through the join on it: the GROUP BY's four keys reduce to
+/// `supplier_id`, which takes at most `|suppliers|` values.
+#[tokio::test]
+async fn keys_determine_their_rows_attributes() {
+    let bounds = formula(Q_GROUP).await.1;
+    assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+}
+
+/// The GROUP BY's output is unique on `supplier_id` alone, the key its other
+/// keys depend on, so a LEFT JOIN on it keeps each left row once.
+#[tokio::test]
+async fn dependent_group_keys_keep_a_key() {
+    let sql = format!(
+        "WITH perf AS ({Q_GROUP}),
+         po AS (SELECT p.supplier_id, upper(s.name) AS name, count(*) AS n
+                FROM purchase_orders p JOIN suppliers s ON p.supplier_id = s.supplier_id
+                GROUP BY p.supplier_id, upper(s.name))
+         SELECT perf.supplier_id, perf.n, po.n AS po_n
+         FROM perf LEFT JOIN po ON perf.supplier_id = po.supplier_id"
+    );
+    let bounds = formula(&sql).await.1;
+    assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+}
+
+/// The padded side of a LEFT JOIN is NULL on unmatched rows, so its key
+/// determines nothing there: the shipment with no supplier is a group of its
+/// own, beyond the suppliers'.
+#[tokio::test]
+async fn padded_keys_determine_nothing() {
+    let sql = "SELECT s.supplier_id, s.name, s.category, s.country, count(*) AS n
+        FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
+        GROUP BY s.supplier_id, s.name, s.category, s.country";
+    let bounds = formula(sql).await.1;
+    assert!(!bounds.contains("X <= |suppliers|"), "{bounds}");
+}
+
+/// A volatile group key takes values no column determines.
+#[tokio::test]
+async fn volatile_keys_are_not_determined() {
+    let sql = "SELECT sh.supplier_id, s.name, s.category, random() < 0.5 AS coin, count(*) AS n
+        FROM shipments sh JOIN suppliers s ON sh.supplier_id = s.supplier_id
+        GROUP BY sh.supplier_id, s.name, s.category, random() < 0.5";
+    let bounds = formula(sql).await.1;
+    assert!(!bounds.contains("X <= |suppliers|"), "{bounds}");
+}
+
+/// With no declared key, four group keys are too many to multiply, and the
+/// GROUP BY is bounded by its input alone.
+#[tokio::test]
+async fn groups_without_keys_keep_their_bound() {
+    assert_eq!(formula("SELECT a, b, c, d, count(*) FROM loose GROUP BY a, b, c, d").await.1, "X <= |loose|");
 }
 
 /// DuckDB's `EXPLAIN (FORMAT JSON)` of
