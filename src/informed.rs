@@ -14,6 +14,7 @@
 //! operator's relation to its inputs (`X = s·l`) joins the constraints,
 //! where it combines with everything else they know.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::panic::Location;
@@ -257,7 +258,7 @@ pub(crate) fn kinds_in(analysis: &Analysis, logical: &Logical) -> Vec<(String, s
     let Some(report) = &analysis.selectivity else { return vec![] };
     let none = FactSet::default();
     let lookup = Lookup::new(&analysis.nodes, logical, &none);
-    report.required.iter().map(|s| (s.name.clone(), lookup.kind(s).map(|k| k.canonical()))).collect()
+    report.required.iter().map(|s| (s.name.clone(), lookup.kind(s).map(|k| lookup.canonical(k)))).collect()
 }
 
 /// `analysis` with what `facts` know put in place.
@@ -521,6 +522,10 @@ struct Lookup<'a> {
     /// Each node, by its variable; a raw scan's variable gives its scan.
     by_var: HashMap<&'a str, (usize, bool)>,
     conflicted: BTreeSet<&'a FactKind>,
+    /// Each fact kind looked up so far, canonically renamed: canonical forms
+    /// are costly with several instances of a table, and the same contexts
+    /// come up for many operators and selectivities.
+    canonical: RefCell<HashMap<FactKind, FactKind>>,
 }
 
 impl<'a> Lookup<'a> {
@@ -533,21 +538,48 @@ impl<'a> Lookup<'a> {
             }
         }
         let conflicted = facts.conflicts.iter().map(|c| &c.kind).collect();
-        Lookup { nodes, logical, facts, by_var, conflicted }
+        Lookup { nodes, logical, facts, by_var, conflicted, canonical: RefCell::default() }
+    }
+
+    /// `kind`, canonically renamed, once per kind.
+    fn canonical(&self, kind: FactKind) -> FactKind {
+        if let Some(c) = self.canonical.borrow().get(&kind) {
+            return c.clone();
+        }
+        let c = kind.canonical();
+        self.canonical.borrow_mut().insert(kind, c.clone());
+        c
+    }
+
+    /// `ctx`, canonically renamed, as [`Context::canonical`] does.
+    fn canonical_ctx(&self, ctx: &Context) -> Context {
+        match self.canonical(FactKind::Cardinality(ctx.clone())) {
+            FactKind::Cardinality(c) => c,
+            _ => unreachable!(),
+        }
     }
 
     /// Fact `kind`, unless two plans disagree on it.
     fn get(&self, kind: FactKind) -> Option<&'a Fact> {
-        let kind = kind.canonical();
-        if self.conflicted.contains(&kind) {
+        self.get_canonical(&self.canonical(kind))
+    }
+
+    /// [`Self::get`], of a `kind` already canonical.
+    fn get_canonical(&self, kind: &FactKind) -> Option<&'a Fact> {
+        if self.conflicted.contains(kind) {
             return None;
         }
-        self.facts.get(&kind)
+        self.facts.get(kind)
     }
 
     /// The value of fact `kind`, and its text, unless two plans disagree on it.
     fn fact(&self, kind: FactKind) -> Option<(Ratio, String)> {
-        self.get(kind).map(|f| (f.value, f.kind.to_string()))
+        self.fact_canonical(&self.canonical(kind))
+    }
+
+    /// [`Self::fact`], of a `kind` already canonical.
+    fn fact_canonical(&self, kind: &FactKind) -> Option<(Ratio, String)> {
+        self.get_canonical(kind).map(|f| (f.value, f.kind.to_string()))
     }
 
     /// The node whose variable is `var`.
@@ -603,10 +635,10 @@ impl<'a> Lookup<'a> {
         // `num / den`, where each is a size from a fact.
         let sizes = |num: &Context, den: &[&Context]| -> Option<(Ratio, Vec<String>)> {
             let mut value = self.card(num)?;
-            let mut from = vec![format!("|{}|", num.canonical())];
+            let mut from = vec![format!("|{}|", self.canonical_ctx(num))];
             for d in den {
                 value = value.over(self.card(d)?)?;
-                from.push(format!("|{}|", d.canonical()));
+                from.push(format!("|{}|", self.canonical_ctx(d)));
             }
             Some((value, from))
         };
@@ -619,8 +651,9 @@ impl<'a> Lookup<'a> {
                     return Ok((Ratio::int(1), vec!["implied by its input".into()]));
                 }
                 let kind = FactKind::Selectivity { pred: pred.clone(), over: over.clone() };
-                let text = kind.canonical().to_string();
-                self.fact(kind)
+                let kind = self.canonical(kind);
+                let text = kind.to_string();
+                self.fact_canonical(&kind)
                     .map(|(v, f)| (v, vec![f]))
                     .or_else(|| sizes(&over.filter(&pred), &[&over]))
                     .ok_or_else(|| none(&text))
@@ -633,8 +666,9 @@ impl<'a> Lookup<'a> {
                     return Ok((Ratio::int(1), vec!["implied by its inputs".into()]));
                 }
                 let kind = FactKind::Selectivity { pred: pred.clone(), over: over.clone() };
-                let text = kind.canonical().to_string();
-                self.fact(kind)
+                let kind = self.canonical(kind);
+                let text = kind.to_string();
+                self.fact_canonical(&kind)
                     .map(|(v, f)| (v, vec![f]))
                     .or_else(|| sizes(&over.filter(&pred), &[&l, &r]))
                     .ok_or_else(|| none(&text))
@@ -644,7 +678,8 @@ impl<'a> Lookup<'a> {
                 let on = args()?;
                 let (kept, other) = if *left { (&l, &r) } else { (&r, &l) };
                 let kind = FactKind::Match { on: on.clone(), kept: kept.clone(), other: other.clone() };
-                let text = kind.canonical().to_string();
+                let kind = self.canonical(kind);
+                let text = kind.to_string();
                 let derived = |semi: bool| {
                     let kind = match (left, semi) {
                         (true, true) => JoinType::LeftSemi,
@@ -654,7 +689,7 @@ impl<'a> Lookup<'a> {
                     };
                     Context::join(kind, on.clone(), l.clone(), r.clone())
                 };
-                self.fact(kind)
+                self.fact_canonical(&kind)
                     .map(|(v, f)| (v, vec![f]))
                     .or_else(|| sizes(&derived(true), &[kept]))
                     .or_else(|| {
@@ -666,7 +701,7 @@ impl<'a> Lookup<'a> {
             Kind::NotIn { .. } => {
                 let out = self.logical.contexts[i].clone().map_err(|t| t.to_string())?;
                 let l = input(0)?;
-                sizes(&out, &[&l]).ok_or_else(|| none(&format!("|{}|", out.canonical())))
+                sizes(&out, &[&l]).ok_or_else(|| none(&format!("|{}|", self.canonical_ctx(&out))))
             }
             Kind::Distinct(_) => {
                 let over = self.context(&s.over[0])?;
@@ -676,11 +711,13 @@ impl<'a> Lookup<'a> {
                     return Ok((Ratio::int(1), vec![f]));
                 }
                 let kind = FactKind::Distinct { keys, over: over.clone() };
-                let text = kind.canonical().to_string();
-                let (ndv, f) = self.fact(kind).ok_or_else(|| none(&text))?;
-                let n = self.card(&over).ok_or_else(|| none(&format!("|{}|", over.canonical())))?;
+                let kind = self.canonical(kind);
+                let text = kind.to_string();
+                let (ndv, f) = self.fact_canonical(&kind).ok_or_else(|| none(&text))?;
+                let over_text = format!("|{}|", self.canonical_ctx(&over));
+                let n = self.card(&over).ok_or_else(|| none(&over_text))?;
                 let value = ndv.over(n).ok_or("no rows")?;
-                Ok((value, vec![f, format!("|{}|", over.canonical())]))
+                Ok((value, vec![f, over_text]))
             }
             Kind::Limit => Err("a limit".into()),
         }
@@ -698,13 +735,13 @@ impl<'a> Lookup<'a> {
                 }
                 ctx => FactKind::Cardinality(ctx.clone()),
             };
-            if let Some(b) = self.facts.bound(&kind.canonical())
+            if let Some(b) = self.facts.bound(&self.canonical(kind))
                 && let Some(n) = b.value.as_int()
             {
                 out.push((i, node.var.clone(), n, FactRef::of(b)));
             }
             // Row counts, exact or bounds, of wider rows than the operator's.
-            let ctx = ctx.canonical();
+            let ctx = self.canonical_ctx(ctx);
             let tables = ctx.tables();
             for f in self.facts.iter().chain(self.facts.bounds()) {
                 let FactKind::Cardinality(c) = &f.kind else { continue };
@@ -740,12 +777,13 @@ impl<'a> Lookup<'a> {
                 if j >= schema.fields().len() || schema.field(j).data_type().is_floating() {
                     continue;
                 }
-                let kind = FactKind::Distinct { keys: [Term::new(e.clone())].into(), over: over.clone() };
-                if let Some(f) = self.get(kind.clone())
+                let keys = [Term::new(e.clone())].into();
+                let kind = self.canonical(FactKind::Distinct { keys, over: over.clone() });
+                if let Some(f) = self.get_canonical(&kind)
                     && let Some(n) = f.value.as_int()
                 {
                     out.push((i, var.clone(), n, true, FactRef::of(f)));
-                } else if let Some(b) = self.facts.bound(&kind.canonical())
+                } else if let Some(b) = self.facts.bound(&kind)
                     && let Some(n) = b.value.as_int()
                 {
                     out.push((i, var.clone(), n, false, FactRef::of(b)));
@@ -771,7 +809,7 @@ impl<'a> Lookup<'a> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
             let Ok(ctx) = &self.logical.contexts[i] else { continue };
-            let ctx = ctx.canonical();
+            let ctx = self.canonical_ctx(ctx);
             let tables = ctx.tables();
             for (c, n, fact) in &counts {
                 if **c != ctx && tables.is_subset(&c.tables()) && renamed(c, &ctx, fewer) {
