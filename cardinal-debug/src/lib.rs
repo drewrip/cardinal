@@ -2,15 +2,18 @@
 //!
 //! A [`Dump`] holds an analysis's verdict and bounds, its [`Trace`] (every
 //! constraint with the plan node and analyzer line it comes from) and a
-//! [`Proof`] of each bound naming the constraints it needs. [`ascii`] and
-//! [`html`] render one.
+//! [`Proof`] of each bound naming the constraints it needs, and, informed by
+//! facts, the same again with the facts' constraints among them
+//! ([`FactsDump`]). [`ascii`] and [`html`] render one.
 
 pub mod ascii;
 pub mod html;
 
 use std::collections::BTreeMap;
 
-use cardinal::{Analysis, ForeignKey, Options, Proof, Trace, Verdict};
+use cardinal::facts::FactSet;
+use cardinal::observed::ObservedPlan;
+use cardinal::{Analysis, FactMode, FactReport, ForeignKey, Options, Proof, Trace, Verdict};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +33,68 @@ pub struct Dump {
     pub bounds: Option<String>,
     pub trace: Trace,
     pub proofs: Vec<Proof>,
+    /// The analysis informed by facts, if any were given.
+    #[serde(default)]
+    pub facts: Option<FactsDump>,
+}
+
+/// An analysis informed by facts ([`cardinal::Informed`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactsDump {
+    /// `ratios` or `pinned`.
+    pub mode: String,
+    /// What the facts gave and left.
+    pub report: FactReport,
+    /// The bounds proven with the facts, if computed.
+    pub bounds: Option<String>,
+    /// The base constraints, then the facts'.
+    pub trace: Trace,
+    /// The claims of the bounds with facts, proven with the facts' constraints.
+    pub proofs: Vec<Proof>,
+    /// The same claims, proven without them, in the same order.
+    pub base_proofs: Vec<Proof>,
+    /// Whether the proofs were attempted (not skipped by `--no-explain`).
+    pub explained: bool,
+    /// Facts two plans disagree on, which are left out.
+    pub conflicts: Vec<String>,
+}
+
+/// Facts to inform an analysis with.
+pub struct FactInput {
+    pub facts: FactSet,
+    pub mode: FactMode,
+    /// Whether to prove the bounds with facts again, with minimal cores.
+    pub explain: bool,
+}
+
+/// A plan profile (`EXPLAIN ANALYZE`) to read facts from.
+pub struct Profile {
+    /// The name its facts' origins give, e.g. its file's stem.
+    pub name: String,
+    pub json: String,
+    /// PostgreSQL's `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)`, else DuckDB's
+    /// `EXPLAIN (ANALYZE, FORMAT JSON)`.
+    pub postgres: bool,
+}
+
+/// `facts` (or none) with the facts of each of `profiles` added, over the
+/// tables of `ctx`, and closed.
+pub async fn read_facts(ctx: &SessionContext, facts: Option<FactSet>, profiles: &[Profile]) -> Result<FactSet, String> {
+    let mut set = facts.unwrap_or_default();
+    if !profiles.is_empty() {
+        let catalog = cardinal::observed::Catalog::from_context(ctx).await.map_err(|e| e.to_string())?;
+        for p in profiles {
+            let plan: ObservedPlan = if p.postgres {
+                cardinal::observed::from_postgres(&catalog, &p.name, &p.json, None)
+            } else {
+                cardinal::observed::from_duckdb(&catalog, &p.name, &p.json, None)
+            }
+            .map_err(|e| format!("{}: {e}", p.name))?;
+            set.observe(&plan);
+        }
+    }
+    set.close();
+    Ok(set)
 }
 
 /// Where the query to analyze comes from.
@@ -70,9 +135,16 @@ pub fn foreign_key(s: &str) -> Result<ForeignKey, String> {
 }
 
 /// Analyzes `source` against `ctx` with `options` (traced), proves bounds
-/// unless `bounds` is false, and explains each.
-pub async fn dump(ctx: &SessionContext, source: &Source, options: Options, bounds: bool) -> Result<Dump, String> {
-    let options = Options { trace: true, ..options };
+/// unless `bounds` is false, and explains each; with `facts`, does the same
+/// again informed by them.
+pub async fn dump(
+    ctx: &SessionContext,
+    source: &Source,
+    options: Options,
+    bounds: bool,
+    facts: Option<&FactInput>,
+) -> Result<Dump, String> {
+    let options = Options { trace: true, selectivity: options.selectivity || facts.is_some(), ..options };
     let err = |e: cardinal::Error| e.to_string();
     let (query, analysis): (String, Analysis) = match source {
         Source::Sql(sql) => (sql.clone(), cardinal::analyze_sql_with(ctx, sql, options).await.map_err(err)?),
@@ -96,6 +168,10 @@ pub async fn dump(ctx: &SessionContext, source: &Source, options: Options, bound
         }
         Verdict::Unknown(reason) => (format!("Unknown: {reason}"), None),
     };
+    let facts = match facts {
+        Some(f) => Some(inform(&analysis, f, bounds)?),
+        None => None,
+    };
     Ok(Dump {
         query,
         plan: analysis.plan.clone(),
@@ -104,6 +180,38 @@ pub async fn dump(ctx: &SessionContext, source: &Source, options: Options, bound
         bounds: proven.map(|b| b.to_string()),
         trace: analysis.trace.expect("traced"),
         proofs,
+        facts,
+    })
+}
+
+fn inform(analysis: &Analysis, input: &FactInput, bounds: bool) -> Result<FactsDump, String> {
+    let err = |e: cardinal::Error| e.to_string();
+    let informed = analysis.with_facts(&input.facts, input.mode).map_err(err)?;
+    let proven = if bounds { Some(informed.bounds().map_err(err)?) } else { None };
+    let (proofs, base_proofs) = if input.explain {
+        (informed.explain(proven.as_ref()).map_err(err)?, informed.explain_without_facts(proven.as_ref()).map_err(err)?)
+    } else {
+        (vec![], vec![])
+    };
+    let origins = |os: &[cardinal::facts::Origin]| os.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", ");
+    let conflicts = input
+        .facts
+        .conflicts
+        .iter()
+        .map(|c| {
+            let (a, b) = &c.values;
+            format!("{} = {a} ({}) vs {b} ({})", c.kind, origins(&c.origins.0), origins(&c.origins.1))
+        })
+        .collect();
+    Ok(FactsDump {
+        mode: input.mode.to_string(),
+        report: informed.report(),
+        bounds: proven.map(|b| b.to_string()),
+        trace: informed.trace.clone().expect("traced"),
+        proofs,
+        base_proofs,
+        explained: input.explain,
+        conflicts,
     })
 }
 

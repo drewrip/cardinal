@@ -1,18 +1,22 @@
 //! A dump as one self-contained HTML page: the plan tree beside its
 //! constraints, linked both ways, with a selector that picks out the
-//! constraints each proof needs.
+//! constraints each proof needs, and with facts, which were used and which
+//! not.
 
 use serde_json::json;
 
 use crate::{Dump, column_names};
 
-/// The page for `dump`, opened on proof `proof` if given.
-pub fn render(dump: &Dump, proof: Option<&str>) -> String {
+/// The page for `dump`, opened on proof `proof` if given, and with its fact
+/// constraints hidden if `without_facts`.
+pub fn render(dump: &Dump, proof: Option<&str>, without_facts: bool) -> String {
+    let trace = dump.facts.as_ref().map_or(&dump.trace, |f| &f.trace);
     let data = json!({
         "dump": dump,
-        "names": column_names(&dump.trace),
-        "smt2": dump.trace.to_smt2(),
+        "names": column_names(trace),
+        "smt2": trace.to_smt2(),
         "proof": proof,
+        "withoutFacts": without_facts,
     });
     // Keep `</script>` in the data from closing the tag it sits in.
     let data = data.to_string().replace("</", "<\\/");
@@ -143,6 +147,16 @@ tr.x table td { background: none; border: 0; padding: 2px 0; }
 .var.hl { background: var(--hl); }
 [hidden] { display: none !important; }
 
+/* Facts */
+.fm { color: var(--accent); }
+tr.c.fact td.id { color: var(--accent); }
+tr.c.fact td.rule { font-style: italic; }
+table.proofs .grp { border-left: 1px solid var(--rule); padding-left: 10px; }
+table.facts { margin: 4px 0 12px; }
+table.facts th, table.facts td { padding: 3px 10px 3px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; overflow-wrap: anywhere; }
+table.facts thead th { border-bottom: 1px solid var(--rule); font-size: 12px; }
+h3 { font-size: 12px; font-weight: 600; margin: 10px 0 2px; }
+
 footer { padding: 14px 16px 24px; color: var(--muted); border-top: 1px solid var(--rule); }
 footer dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
 footer dt { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--ink); }
@@ -154,7 +168,9 @@ footer dd { margin: 0; }
   <h1>cardinal — Z3 constraint trace</h1>
   <table class="kv">
     <tr><th>Verdict</th><td><span id="verdict" class="status"></span> <span id="verdict-note" class="note"></span></td></tr>
-    <tr><th>Bounds</th><td><code id="bounds"></code></td></tr>
+    <tr><th id="bounds-label">Bounds</th><td><code id="bounds"></code></td></tr>
+    <tr id="fbounds-row" hidden><th id="fbounds-label">With facts</th><td><code id="fbounds"></code></td></tr>
+    <tr id="facts-row" hidden><th>Facts</th><td id="facts-stats"></td></tr>
     <tr><th>Size</th><td id="stats"></td></tr>
     <tr><th>Query</th><td><pre id="query"></pre></td></tr>
   </table>
@@ -167,14 +183,28 @@ footer dd { margin: 0; }
   <h2>Proofs</h2>
   <p class="help">Each claim is re-proven from the constraints. Select one to mark the smallest set of constraints that proves it: removing any one of them makes the claim unprovable.</p>
   <table class="proofs">
-    <thead><tr><th>Status</th><th>Name</th><th>Claim</th><th class="num">Needs</th><th>From nodes</th></tr></thead>
+    <thead id="proofs-head"></thead>
     <tbody id="proofs"></tbody>
   </table>
   <p id="explain" hidden></p>
 </section>
 
+<section id="facts" hidden>
+  <h2>Facts</h2>
+  <p class="help">What the facts gave: each fact constraint (◆) holds a variable to a value read off a plan that ran. Facts not used were rejected (they contradict the constraints), not decided in time, or not found.</p>
+  <h3>Used</h3>
+  <table class="facts"><thead><tr><th>Selectivity</th><th>Value</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
+  <h3>Not used</h3>
+  <table class="facts"><thead><tr><th>Why</th><th>What</th><th>Reason</th></tr></thead><tbody id="facts-unused"></tbody></table>
+  <div id="conflicts-box" hidden>
+    <h3>Conflicts (left out)</h3>
+    <table class="facts"><tbody id="conflicts"></tbody></table>
+  </div>
+</section>
+
 <div class="toolbar">
   <label><input type="checkbox" id="only"> Only constraints the selected proof needs</label>
+  <label id="hide-label" hidden><input type="checkbox" id="hide"> Hide fact constraints</label>
   <input type="search" id="search" placeholder="Filter: text, variable, rule…" aria-label="Filter constraints">
   <button id="copy">Copy SMT-LIB</button>
   <button id="save">Save .smt2</button>
@@ -205,6 +235,7 @@ footer dd { margin: 0; }
     <dt>op{n}_{Kind}</dt><dd>Rows output by plan node n.</dd>
     <dt>op{n}_{Kind}[col]</dt><dd>Distinct values of column col in node n's output (NULL counts as one).</dd>
     <dt>part{n}</dt><dd>Rows of a table shared by relations whose rows are disjoint.</dd>
+    <dt>◆</dt><dd>A constraint a fact gave, or a node with one.</dd>
     <dt>a·b, min, max, =&gt;, ∧, ∨, ¬</dt><dd>Product, minimum, maximum, implication, and, or, not.</dd>
   </dl>
 </footer>
@@ -213,7 +244,13 @@ footer dd { margin: 0; }
 <script>
 (() => {
   const D = JSON.parse(document.getElementById('data').textContent);
-  const dump = D.dump, t = dump.trace, names = D.names;
+  const dump = D.dump, F = dump.facts, t = F ? F.trace : dump.trace, names = D.names;
+  // The proofs to select: with facts if they were proven, else the base
+  // ones, whose constraints come first in the trace with facts too.
+  const proofs = F && F.explained ? F.proofs : dump.proofs;
+  const baseOf = {};
+  if (F && F.explained) F.proofs.forEach((p, i) => { if (F.base_proofs[i]) baseOf[p.name] = F.base_proofs[i]; });
+  const isFact = c => !!c.fact;
   const $ = id => document.getElementById(id);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const statusOf = p => typeof p.status === 'string' ? p.status : 'Unknown';
@@ -229,6 +266,17 @@ footer dd { margin: 0; }
   $('verdict').classList.add(dump.verdict === 'Reduces' ? 'good' : dump.verdict === 'MightGrow' ? 'bad' : 'warn');
   $('verdict-note').textContent = verdictNote[dump.verdict] ?? dump.verdict;
   $('bounds').textContent = dump.bounds ?? 'not computed';
+  if (F) {
+    $('bounds-label').textContent = 'Without facts';
+    $('fbounds-row').hidden = false;
+    $('fbounds-label').textContent = `With facts (${F.mode})`;
+    $('fbounds').textContent = F.bounds ?? 'not computed';
+    $('facts-row').hidden = false;
+    const k = t.constraints.filter(isFact).length;
+    $('facts-stats').textContent = `${k} fact constraints, ${F.report.matched.length} selectivities matched, ` +
+      `${F.report.rejected.length} rejected · X = ${F.report.output}`;
+    $('hide-label').hidden = false;
+  }
   const partitions = t.constraints.filter(c => c.node === null).length;
   $('stats').textContent = `${t.nodes.length} plan nodes, ${t.constraints.length} constraints` +
     (partitions ? ` (${partitions} over table partitions)` : '') + `, root variable ${t.root}`;
@@ -272,9 +320,17 @@ footer dd { margin: 0; }
     row.dataset.node = id;
     row.title = n.label;
     const op = opLabel(n, 'op');
-    op.append(el('div', 'v m', n.var));
+    let v = n.var;
+    if (F) {
+      const mine = [n.var, n.raw_var].filter(x => x);
+      for (const [list, o] of [[F.report.pinned, '='], [F.report.capped, '<=']])
+        for (const [x, k] of list) if (mine.includes(x)) v += `  ${x === n.var ? '' : (names[x] ?? x) + ' '}${o} ${k}`;
+    }
+    op.append(el('div', 'v m', v));
     const count = el('span', 'n m');
-    row.append(el('span', 'id m', `[${id}]`), op, count);
+    const idBox = el('span', 'id m', `[${id}]`);
+    if ((byNode[id] ?? []).some(isFact)) idBox.append(el('span', 'fm', ' ◆'));
+    row.append(idBox, op, count);
     treeNodes[id] = { row, count };
     li.append(row);
     if (n.inputs.length) {
@@ -327,18 +383,23 @@ footer dd { margin: 0; }
     heads[key] = gh;
     $('list').append(gh);
     for (const c of cs) {
-      const r = el('tr', 'c');
+      const r = el('tr', isFact(c) ? 'c fact' : 'c');
       r.dataset.c = c.id;
       const file = c.source.split('/').pop();
-      const src = el('td', 'src m', file);
+      const src = el('td', 'src m', isFact(c) ? 'fact' : file);
       src.title = c.source;
-      r.append(el('td', 'id m', 'c' + c.id), formula(c.infix), el('td', 'rule m', c.function), src);
+      r.append(el('td', 'id m', 'c' + c.id + (isFact(c) ? ' ◆' : '')), formula(c.infix), el('td', 'rule m', c.function), src);
       const x = el('tr', 'x');
       x.hidden = true;
       const xd = el('td');
       xd.colSpan = 4;
       const kv = el('table');
-      for (const [k, v] of [['SMT-LIB', c.smt], ['Made by', `${c.function} at ${c.source}`], ['Code', c.code]]) {
+      const details = [['SMT-LIB', c.smt], ['Made by', `${c.function} at ${c.source}`], ['Code', c.code]];
+      if (isFact(c)) {
+        details.push(['Asserts', `${names[c.vars[0]] ?? c.vars[0] ?? ''} ${c.fact.value}`]);
+        for (const f of c.fact.facts) details.push(['Fact', f.text + (f.origins.length ? `\nread off ${f.origins.join(', ')}` : '')]);
+      }
+      for (const [k, v] of details) {
         const tr = el('tr');
         const val = el('td');
         val.append(el('pre', null, v));
@@ -388,33 +449,86 @@ footer dd { margin: 0; }
     if (h && h.dataset.node !== undefined) treeNodes[+h.dataset.node].row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 
+  // Facts: used, not used, conflicts.
+  const factRows = [];
+  if (F) {
+    $('facts').hidden = false;
+    const row = (body, cells) => {
+      const r = el('tr');
+      for (const [text, cls] of cells) r.append(el('td', cls, text));
+      $(body).append(r);
+      factRows.push(r);
+    };
+    for (const m of F.report.matched) {
+      const read = m.facts.flatMap(f => f.origins);
+      row('facts-used', [[m.name, 'm'], [m.value, 'm'], [m.facts.map(f => f.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
+    }
+    const counts = [['pinned', F.report.pinned], ['capped', F.report.capped], ['ndv', F.report.pinned_ndv], ['floors', F.report.floors]];
+    for (const [k, list] of counts)
+      for (const [v, n] of list) row('facts-used', [[k, 'note'], [`${names[v] ?? v} ${k === 'capped' ? '<=' : k === 'floors' ? '>=' : '='} ${n}`, 'm'], ['row count from a fact (◆ in the constraints)', 'note'], ['', '']]);
+    for (const [s, why] of F.report.rejected) row('facts-unused', [['rejected', 'bad'], [s, 'm'], [why, '']]);
+    for (const s of F.report.unchecked) row('facts-unused', [['unchecked', 'warn'], [s, 'm'], ['not decided in time', '']]);
+    for (const [s, why] of F.report.unmatched) row('facts-unused', [['unmatched', 'note'], [s, 'm'], [why, '']]);
+    if (!$('facts-unused').children.length) row('facts-unused', [['—', 'note'], ['every fact found was used', 'note'], ['', '']]);
+    if (F.conflicts.length) {
+      $('conflicts-box').hidden = false;
+      for (const c of F.conflicts) row('conflicts', [[c, 'm']]);
+    }
+  }
+
   // Proofs.
   let current = null;
   const proofRows = {};
   const statusLabel = { Proven: ['proven', 'good'], Refuted: ['refuted', 'bad'], Unknown: ['unknown', 'warn'] };
   const all = el('tr');
-  all.append(el('td', 'note', '—'), el('td', null, 'none'), el('td', 'note', 'Show every constraint'), el('td', 'num note', ''), el('td', 'note', ''));
+  const compare = !!(F && F.explained);
+  {
+    const h = el('tr');
+    for (const [text, cls] of compare
+      ? [['Status', ''], ['Name', ''], ['Claim', ''], ['Without facts', 'grp'], ['Needs', 'num'], ['With facts', 'grp'], ['Needs', 'num'], ['Facts', 'num'], ['From nodes', '']]
+      : [['Status', ''], ['Name', ''], ['Claim', ''], ['Needs', 'num'], ['From nodes', '']]) h.append(el('th', cls, text));
+    $('proofs-head').append(h);
+  }
+  const needs = p => statusOf(p) === 'Proven' ? String(p.core.length) : '—';
+  const cell = (p, grp) => {
+    const [label, cls] = statusLabel[statusOf(p)];
+    return el('td', `status ${cls}${grp ? ' grp' : ''}`, label);
+  };
+  {
+    const blank = compare ? 6 : 2;
+    all.append(el('td', 'note', '—'), el('td', null, 'none'), el('td', 'note', 'Show every constraint'));
+    for (let i = 0; i < blank; i++) all.append(el('td', 'note', ''));
+  }
   all.addEventListener('click', () => select(null));
   $('proofs').append(all);
-  for (const p of dump.proofs) {
-    const [label, cls] = statusLabel[statusOf(p)];
+  for (const p of proofs) {
     const nodes = [...new Set(p.core.map(c => t.constraints[c].node).filter(n => n !== null))].sort((a, b) => a - b);
     const r = el('tr');
-    r.append(
-      el('td', 'status ' + cls, label),
-      el('td', 'm', p.name),
-      el('td', 'm', p.claim),
-      el('td', 'num m', statusOf(p) === 'Proven' ? String(p.core.length) : '—'),
-      el('td', 'm note', nodes.length ? nodes.map(n => `[${n}]`).join(' ') : '—'),
-    );
+    r.append(cell(p), el('td', 'm', p.name), el('td', 'm', p.claim));
+    if (compare) {
+      const b = baseOf[p.name];
+      const k = statusOf(p) === 'Proven' ? p.core.filter(c => isFact(t.constraints[c])).length : null;
+      r.append(
+        b ? cell(b, true) : el('td', 'note grp', '—'),
+        el('td', 'num m', b ? needs(b) : '—'),
+        cell(p, true),
+        el('td', 'num m', needs(p)),
+        el('td', 'num m', k === null ? '—' : String(k)),
+      );
+    } else {
+      r.append(el('td', 'num m', needs(p)));
+    }
+    r.append(el('td', 'm note', nodes.length ? nodes.map(n => `[${n}]`).join(' ') : '—'));
     if (statusOf(p) === 'Unknown') r.title = p.status.Unknown;
     r.addEventListener('click', () => select(p.name));
     proofRows[p.name] = r;
     $('proofs').append(r);
   }
 
+  // With fact constraints hidden, a proof's core is the one without them.
+  const hiding = () => !!F && $('hide').checked;
   function select(name) {
-    current = dump.proofs.find(p => p.name === name) ?? null;
+    current = (hiding() && compare ? baseOf[name] : null) ?? proofs.find(p => p.name === name) ?? null;
     all.classList.toggle('on', !current);
     for (const [k, r] of Object.entries(proofRows)) r.classList.toggle('on', k === name);
     const core = new Set(current ? current.core : []);
@@ -425,7 +539,7 @@ footer dd { margin: 0; }
       r.classList.toggle('out', !!current && !core.has(+id));
     }
     for (const [id, { row, count }] of Object.entries(treeNodes)) {
-      const total = (byNode[id] ?? []).length;
+      const total = (byNode[id] ?? []).filter(c => !(hiding() && isFact(c))).length;
       const k = perNode[id] ?? 0;
       row.classList.toggle('core', k > 0);
       row.classList.toggle('out', !!current && k === 0);
@@ -454,8 +568,9 @@ footer dd { margin: 0; }
     let shown = 0;
     for (const [id, { r, x }] of Object.entries(rows)) {
       const c = t.constraints[+id];
-      const text = [c.infix, c.smt, c.function, c.source, c.code, ...c.vars.map(v => names[v] ?? v)].join(' ').toLowerCase();
-      const hide = (q && !text.includes(q)) || (only && !core.has(+id));
+      const origins = c.fact ? c.fact.facts.flatMap(f => [f.text, ...f.origins]) : [];
+      const text = [c.infix, c.smt, c.function, c.source, c.code, ...origins, ...c.vars.map(v => names[v] ?? v)].join(' ').toLowerCase();
+      const hide = (q && !text.includes(q)) || (only && !core.has(+id)) || (hiding() && isFact(c));
       r.hidden = hide;
       if (hide) x.hidden = true;
       if (!hide) shown++;
@@ -468,9 +583,11 @@ footer dd { margin: 0; }
       count.append(el('span', 'sel', current.name), s === 'Proven' ? `: ${current.core.length} needed · ` : `: ${s.toLowerCase()} · `);
     }
     count.append(`${shown} of ${t.constraints.length} constraints shown`);
+    for (const r of factRows) r.hidden = !!q && !r.textContent.toLowerCase().includes(q);
   }
   $('search').addEventListener('input', filter);
   $('only').addEventListener('change', filter);
+  $('hide').addEventListener('change', () => select(current ? current.name : null));
 
   $('copy').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(D.smt2); $('copy').textContent = 'Copied'; }
@@ -485,6 +602,7 @@ footer dd { margin: 0; }
   });
 
   if (D.proof) $('only').checked = true;
+  if (D.withoutFacts) $('hide').checked = true;
   select(D.proof ?? null);
 })();
 </script>

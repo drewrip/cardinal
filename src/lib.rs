@@ -19,10 +19,10 @@ pub mod trace;
 mod validate;
 
 pub use bounds::{Bounds, Linear, TableBound};
-pub use informed::{FactMode, Informed, Matched};
+pub use informed::{FactMode, FactReport, Informed, Matched, MatchedReport};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 pub use simple::{Simple, SimpleKind, SimpleSelectivity};
-pub use trace::{Constraint, Proof, ProofStatus, Trace, TraceNode};
+pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -223,36 +223,8 @@ impl Analysis {
         let Some(trace) = &self.trace else {
             return Err(Error::Internal("explain needs Options::trace".into()));
         };
-        let x = Int::new_const(self.root.as_str());
-        let sum = if self.scans.is_empty() {
-            Int::from_i64(0)
-        } else {
-            let scans: Vec<Int> = self.scans.iter().map(|(s, _)| Int::new_const(s.as_str())).collect();
-            Int::add(&scans)
-        };
-        let mut claims = vec![("verdict".to_string(), "X <= Σ".to_string(), x.le(&sum).to_string())];
-        if let Some(b) = bounds {
-            if let Some(n) = b.constant {
-                claims.push(("constant".into(), format!("X <= {n}"), x.le(Int::from_u64(n)).to_string()));
-            }
-            // A bound with no term of its quantity is the constant bound again.
-            if let Some(s) = b.sum.as_ref().filter(|s| s.num > 0) {
-                let (lhs, rhs) = bounds::sides(&x, &sum, s);
-                claims.push(("sum".into(), format!("X <= {}", s.render("Σ")), lhs.le(rhs).to_string()));
-            }
-            for t in b.tables.iter().filter(|t| t.bound.num > 0) {
-                let Some((_, symbol)) = self.tables.iter().find(|(name, _)| *name == t.table) else {
-                    continue;
-                };
-                let (lhs, rhs) = bounds::sides(&x, &Int::new_const(symbol.as_str()), &t.bound);
-                let shown = t.bound.render(&format!("|{}|", t.table));
-                claims.push((format!("table:{}", t.table), format!("X <= {shown}"), lhs.le(&rhs).to_string()));
-                if t.exact {
-                    claims.push((format!("exact:{}", t.table), format!("X >= {shown}"), lhs.ge(&rhs).to_string()));
-                }
-            }
-        }
-        trace.explain(&claims)
+        let scans: Vec<String> = self.scans.iter().map(|(s, _)| s.clone()).collect();
+        trace.explain(&trace::claims(&self.root, &scans, &self.tables, bounds))
     }
 }
 

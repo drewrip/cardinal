@@ -16,17 +16,20 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::panic::Location;
 
 use datafusion::common::JoinType;
 use datafusion::logical_expr::Expr;
-use z3::ast::{Int, Real};
+use serde::{Deserialize, Serialize};
+use z3::ast::{Bool, Int, Real};
 
 use crate::analyzer::Node;
 use crate::bounds::{Bounds, Search};
 use crate::facts::contain::{fewer, renamed};
 use crate::facts::logical::Logical;
-use crate::facts::{Context, FactKind, FactSet, Ratio, Term};
+use crate::facts::{Context, Fact, FactKind, FactSet, Ratio, Term};
 use crate::selectivity::{Card, Interval, Kind, Selectivity, SelectivityReport};
+use crate::trace::{self, FactClaim, FactInfo, FactRef, Proof, Trace};
 use crate::{Analysis, Error, Result};
 
 /// What facts may stand for.
@@ -88,6 +91,12 @@ pub struct Informed {
     /// Selectivities whose relation to the constraints could not be checked
     /// in time, and so is not among them.
     pub unchecked: Vec<String>,
+    /// The analysis's [`Trace`] with a constraint for each claim the facts
+    /// added, if the analysis was traced.
+    pub trace: Option<Trace>,
+    /// Where each fact [`Informed::matched`] names was read, by its text;
+    /// filled only when traced.
+    origins: HashMap<String, Vec<String>>,
     /// The formula, for evaluating with the selectivities still unknown.
     report: SelectivityReport,
     /// The constraint set with the facts' relations added.
@@ -127,6 +136,53 @@ impl Informed {
         Ok((search.lower(), search.constant()))
     }
 
+    /// Proves the claims of [`Analysis::explain`] for `bounds` (these
+    /// bounds, say) from the constraints with the facts' among them, each
+    /// with a minimal set of constraints, facts' or the analyzer's, that
+    /// proves it. Needs [`crate::Options::trace`].
+    pub fn explain(&self, bounds: Option<&Bounds>) -> Result<Vec<Proof>> {
+        let trace = self.trace.as_ref().ok_or_else(|| Error::Internal("explain needs Options::trace".into()))?;
+        trace.explain(&trace::claims(&self.root, &self.scans, &self.tables, bounds))
+    }
+
+    /// [`Informed::explain`] without the facts' constraints: which of the
+    /// claims hold without them.
+    pub fn explain_without_facts(&self, bounds: Option<&Bounds>) -> Result<Vec<Proof>> {
+        let trace = self.trace.as_ref().ok_or_else(|| Error::Internal("explain needs Options::trace".into()))?;
+        trace.without_facts().explain(&trace::claims(&self.root, &self.scans, &self.tables, bounds))
+    }
+
+    /// What the facts gave and left, to show or store.
+    pub fn report(&self) -> FactReport {
+        FactReport {
+            mode: self.mode.to_string(),
+            output: self.output.to_string(),
+            matched: self
+                .matched
+                .iter()
+                .map(|m| MatchedReport {
+                    name: m.name.clone(),
+                    value: m.value.to_string(),
+                    facts: m
+                        .facts
+                        .iter()
+                        .map(|f| FactRef {
+                            text: f.clone(),
+                            origins: self.origins.get(f).cloned().unwrap_or_default(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            unmatched: self.unmatched.clone(),
+            rejected: self.rejected.clone(),
+            pinned: self.pinned.clone(),
+            capped: self.capped.clone(),
+            pinned_ndv: self.pinned_ndv.clone(),
+            floors: self.floors.clone(),
+            unchecked: self.unchecked.clone(),
+        }
+    }
+
     fn search(&self) -> Result<Search> {
         let (search, parsed) = Search::new(&self.constraints, &self.root);
         if parsed != self.assertions {
@@ -137,6 +193,38 @@ impl Informed {
         }
         Ok(search)
     }
+}
+
+impl fmt::Display for FactMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FactMode::Ratios => "ratios",
+            FactMode::Pinned => "pinned",
+        })
+    }
+}
+
+/// [`Informed`]'s account of its facts, as text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactReport {
+    pub mode: String,
+    pub output: String,
+    pub matched: Vec<MatchedReport>,
+    pub unmatched: Vec<(String, String)>,
+    pub rejected: Vec<(String, String)>,
+    pub pinned: Vec<(String, u64)>,
+    pub capped: Vec<(String, u64)>,
+    pub pinned_ndv: Vec<(String, u64)>,
+    pub floors: Vec<(String, u64)>,
+    pub unchecked: Vec<String>,
+}
+
+/// A [`Matched`] selectivity, with where its facts were read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchedReport {
+    pub name: String,
+    pub value: String,
+    pub facts: Vec<FactRef>,
 }
 
 impl fmt::Display for Informed {
@@ -203,7 +291,15 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         return Err(Error::Internal("constraints did not parse back".into()));
     }
     let symbols: HashMap<&str, &str> = analysis.tables.iter().map(|(t, s)| (t.as_str(), s.as_str())).collect();
-    let mut extra = vec![];
+    let traced = analysis.trace.is_some();
+    // Where the fact printed as `text` was read, looked up only when traced.
+    let origins = |text: &str| -> Vec<String> {
+        if !traced {
+            return vec![];
+        }
+        facts.find(text).map(|f| FactRef::of(f).origins).unwrap_or_default()
+    };
+    let mut extra: Vec<FactClaim> = vec![];
     let mut unchecked = vec![];
     for (var, local) in &report.local {
         let mut sels = vec![];
@@ -226,7 +322,15 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         let Some(rhs) = real(&relation, &symbols) else { continue };
         let claim = Int::new_const(var.as_str()).to_real().eq(&rhs);
         match search.assume(&claim) {
-            Some(true) => extra.push(claim),
+            Some(true) => {
+                let from = sels
+                    .iter()
+                    .filter_map(|s| matched.iter().find(|m| m.name == *s))
+                    .flat_map(|m| &m.facts)
+                    .map(|f| FactRef { text: f.clone(), origins: origins(f) })
+                    .collect();
+                extra.push(fact_claim(claim, lookup.node(var), "selectivity", from, format!("= {relation}")));
+            }
             Some(false) => {
                 for s in &sels {
                     if let Some(i) = matched.iter().position(|m| m.name == *s) {
@@ -245,58 +349,60 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
     let mut capped = vec![];
     let mut pinned_ndv = vec![];
     if mode == FactMode::Pinned {
-        for (var, n) in lookup.sizes() {
+        for (node, var, n, fact) in lookup.sizes() {
             let claim = Int::new_const(var.as_str()).eq(Int::from_u64(n));
             match search.assume(&claim) {
                 Some(true) => {
-                    extra.push(claim);
+                    extra.push(fact_claim(claim, Some(node), "pinned rows", vec![fact], format!("= {n}")));
                     pinned.push((var, n));
                 }
                 Some(false) => rejected.push((var, format!("{n} rows contradicts the constraints"))),
-                None => {}
+                None => unchecked.push(format!("{var} = {n}")),
             }
         }
         // Each column's distinct values: the constraints carry them up
         // through filters and joins to the GROUP BYs and DISTINCTs above.
-        for (var, n, exact) in lookup.ndvs() {
+        for (node, var, n, exact, fact) in lookup.ndvs() {
             let (v, k) = (Int::new_const(var.as_str()), Int::from_u64(n));
-            let claim = if exact { v.eq(k) } else { v.le(k) };
+            let (claim, source, op) = if exact { (v.eq(k), "pinned ndv", "=") } else { (v.le(k), "ndv cap", "<=") };
             match search.assume(&claim) {
                 Some(true) => {
-                    extra.push(claim);
+                    extra.push(fact_claim(claim, Some(node), source, vec![fact], format!("{op} {n}")));
                     pinned_ndv.push((var, n));
                 }
                 Some(false) => rejected.push((var, format!("{n} distinct values contradicts the constraints"))),
-                None => {}
+                None => unchecked.push(format!("{var} {op} {n}")),
             }
         }
-        for (var, n) in lookup.caps() {
+        for (node, var, n, fact) in lookup.caps() {
             if pinned.iter().any(|(p, _)| *p == var) {
                 continue;
             }
             let claim = Int::new_const(var.as_str()).le(Int::from_u64(n));
             match search.assume(&claim) {
                 Some(true) => {
-                    extra.push(claim);
+                    extra.push(fact_claim(claim, Some(node), "row cap", vec![fact], format!("<= {n}")));
                     capped.push((var, n));
                 }
                 Some(false) => rejected.push((var, format!("at most {n} rows contradicts the constraints"))),
-                None => {}
+                None => unchecked.push(format!("{var} <= {n}")),
             }
         }
     }
 
     // Every row count of narrower rows than an operator's: a lower bound.
     let mut floors = vec![];
-    for (var, n, fact) in lookup.floors() {
+    for (node, var, n, fact) in lookup.floors() {
         let claim = Int::new_const(var.as_str()).ge(Int::from_u64(n));
         match search.assume(&claim) {
             Some(true) => {
-                extra.push(claim);
+                extra.push(fact_claim(claim, Some(node), "floor", vec![fact], format!(">= {n}")));
                 floors.push((var, n));
             }
-            Some(false) => rejected.push((var, format!("at least {n} rows from {fact} contradicts the constraints"))),
-            None => {}
+            Some(false) => {
+                rejected.push((var, format!("at least {n} rows from {} contradicts the constraints", fact.text)))
+            }
+            None => unchecked.push(format!("{var} >= {n}")),
         }
     }
 
@@ -328,9 +434,19 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
     });
 
     let mut constraints = analysis.constraints.clone();
-    for claim in &extra {
-        constraints.push_str(&format!("(assert {claim})\n"));
+    for c in &extra {
+        constraints.push_str(&format!("(assert {})\n", c.claim));
     }
+    let assertions = analysis.assertions + extra.len();
+    let trace = analysis.trace.as_ref().map(|t| t.with_facts(&extra));
+    if let Some(t) = &trace {
+        debug_assert_eq!(t.constraints.len(), assertions, "every fact claim is traced");
+    }
+    let origins = if traced {
+        matched.iter().flat_map(|m| &m.facts).map(|f| (f.clone(), origins(f))).collect()
+    } else {
+        HashMap::new()
+    };
     Ok(Informed {
         mode,
         output,
@@ -342,13 +458,26 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         pinned_ndv,
         floors,
         unchecked,
+        trace,
+        origins,
         report: report.clone(),
         constraints,
-        assertions: analysis.assertions + extra.len(),
+        assertions,
         root: analysis.root.clone(),
         scans: analysis.scans.iter().map(|(s, _)| s.clone()).collect(),
         tables: analysis.tables.clone(),
     })
+}
+
+/// A claim from `facts` on `node`'s variable, made at the caller's line.
+#[track_caller]
+fn fact_claim(claim: Bool, node: Option<usize>, source: &str, facts: Vec<FactRef>, value: String) -> FactClaim {
+    FactClaim {
+        claim,
+        node,
+        info: FactInfo { source: source.to_string(), facts, value },
+        at: Location::caller(),
+    }
 }
 
 fn ratio_card(r: Ratio) -> Card {
@@ -407,13 +536,23 @@ impl<'a> Lookup<'a> {
         Lookup { nodes, logical, facts, by_var, conflicted }
     }
 
-    /// The value of fact `kind`, unless two plans disagree on it.
-    fn fact(&self, kind: FactKind) -> Option<(Ratio, String)> {
+    /// Fact `kind`, unless two plans disagree on it.
+    fn get(&self, kind: FactKind) -> Option<&'a Fact> {
         let kind = kind.canonical();
         if self.conflicted.contains(&kind) {
             return None;
         }
-        self.facts.get(&kind).map(|f| (f.value, f.kind.to_string()))
+        self.facts.get(&kind)
+    }
+
+    /// The value of fact `kind`, and its text, unless two plans disagree on it.
+    fn fact(&self, kind: FactKind) -> Option<(Ratio, String)> {
+        self.get(kind).map(|f| (f.value, f.kind.to_string()))
+    }
+
+    /// The node whose variable is `var`.
+    fn node(&self, var: &str) -> Option<usize> {
+        self.by_var.get(var).map(|&(i, _)| i)
     }
 
     fn card(&self, ctx: &Context) -> Option<Ratio> {
@@ -549,7 +688,7 @@ impl<'a> Lookup<'a> {
 
     /// Every operator's upper bound on its rows that a bound gives, or a
     /// row count of wider rows than its own ([`fewer`]), by variable.
-    fn caps(&self) -> Vec<(String, u64)> {
+    fn caps(&self) -> Vec<(usize, String, u64, FactRef)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
             let Ok(ctx) = &self.logical.contexts[i] else { continue };
@@ -559,8 +698,10 @@ impl<'a> Lookup<'a> {
                 }
                 ctx => FactKind::Cardinality(ctx.clone()),
             };
-            if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
-                out.push((node.var.clone(), n));
+            if let Some(b) = self.facts.bound(&kind.canonical())
+                && let Some(n) = b.value.as_int()
+            {
+                out.push((i, node.var.clone(), n, FactRef::of(b)));
             }
             // Row counts, exact or bounds, of wider rows than the operator's.
             let ctx = ctx.canonical();
@@ -573,7 +714,7 @@ impl<'a> Lookup<'a> {
                     && let Some(n) = f.value.as_int()
                     && renamed(&ctx, c, fewer)
                 {
-                    out.push((node.var.clone(), n));
+                    out.push((i, node.var.clone(), n, FactRef::of(f)));
                 }
             }
         }
@@ -587,7 +728,7 @@ impl<'a> Lookup<'a> {
     /// no operator above a scan needs its own. Float columns are left out:
     /// the constraints count their values by bits, the facts by SQL
     /// equality.
-    fn ndvs(&self) -> Vec<(String, u64, bool)> {
+    fn ndvs(&self) -> Vec<(usize, String, u64, bool, FactRef)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
             let Some(instance) = &self.logical.instances[i] else { continue };
@@ -600,10 +741,14 @@ impl<'a> Lookup<'a> {
                     continue;
                 }
                 let kind = FactKind::Distinct { keys: [Term::new(e.clone())].into(), over: over.clone() };
-                if let Some(n) = self.fact(kind.clone()).and_then(|(v, _)| v.as_int()) {
-                    out.push((var.clone(), n, true));
-                } else if let Some(n) = self.facts.bound(&kind.canonical()).and_then(|b| b.value.as_int()) {
-                    out.push((var.clone(), n, false));
+                if let Some(f) = self.get(kind.clone())
+                    && let Some(n) = f.value.as_int()
+                {
+                    out.push((i, var.clone(), n, true, FactRef::of(f)));
+                } else if let Some(b) = self.facts.bound(&kind.canonical())
+                    && let Some(n) = b.value.as_int()
+                {
+                    out.push((i, var.clone(), n, false, FactRef::of(b)));
                 }
             }
         }
@@ -613,13 +758,13 @@ impl<'a> Lookup<'a> {
     /// Each operator's lower bounds on its rows that facts give of narrower
     /// rows ([`fewer`]), by variable, with the fact each is from. Each is
     /// asserted, and the solver keeps the largest.
-    fn floors(&self) -> Vec<(String, u64, String)> {
-        let counts: Vec<(&Context, u64, String)> = self
+    fn floors(&self) -> Vec<(usize, String, u64, FactRef)> {
+        let counts: Vec<(&Context, u64, &Fact)> = self
             .facts
             .iter()
             .filter(|f| !self.conflicted.contains(&f.kind))
             .filter_map(|f| match &f.kind {
-                FactKind::Cardinality(c) => Some((c, f.value.as_int()?, f.kind.to_string())),
+                FactKind::Cardinality(c) => Some((c, f.value.as_int()?, f)),
                 _ => None,
             })
             .collect();
@@ -630,7 +775,7 @@ impl<'a> Lookup<'a> {
             let tables = ctx.tables();
             for (c, n, fact) in &counts {
                 if **c != ctx && tables.is_subset(&c.tables()) && renamed(c, &ctx, fewer) {
-                    out.push((node.var.clone(), *n, fact.clone()));
+                    out.push((i, node.var.clone(), *n, FactRef::of(fact)));
                 }
             }
         }
@@ -638,24 +783,27 @@ impl<'a> Lookup<'a> {
     }
 
     /// Every operator's row count that a fact gives, by variable.
-    fn sizes(&self) -> Vec<(String, u64)> {
+    fn sizes(&self) -> Vec<(usize, String, u64, FactRef)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
             if let (Some((raw, _, _)), Some(instance)) = (&node.raw_scan, &self.logical.instances[i])
-                && let Some(n) = self.card(&Context::table(instance)).and_then(|r| r.as_int())
+                && let Some(f) = self.get(FactKind::Cardinality(Context::table(instance)))
+                && let Some(n) = f.value.as_int()
             {
-                out.push((raw.clone(), n));
+                out.push((i, raw.clone(), n, FactRef::of(f)));
             }
             let Ok(ctx) = &self.logical.contexts[i] else { continue };
-            let n = match ctx {
+            let fact = match ctx {
                 // A grouping's rows are its keys' distinct values.
-                Context::Derived { op, args, inputs } if op == "group" => self
-                    .fact(FactKind::Distinct { keys: args.iter().cloned().collect(), over: inputs[0].clone() })
-                    .map(|(v, _)| v),
-                ctx => self.card(ctx),
+                Context::Derived { op, args, inputs } if op == "group" => {
+                    self.get(FactKind::Distinct { keys: args.iter().cloned().collect(), over: inputs[0].clone() })
+                }
+                ctx => self.get(FactKind::Cardinality(ctx.clone())),
             };
-            if let Some(n) = n.and_then(|r| r.as_int()) {
-                out.push((node.var.clone(), n));
+            if let Some(f) = fact
+                && let Some(n) = f.value.as_int()
+            {
+                out.push((i, node.var.clone(), n, FactRef::of(f)));
             }
         }
         out

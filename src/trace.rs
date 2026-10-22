@@ -8,12 +8,15 @@
 //! rules that give it.
 
 use std::collections::{HashMap, HashSet};
+use std::panic::Location;
 
 use serde::{Deserialize, Serialize};
-use z3::ast::Bool;
+use z3::ast::{Bool, Int};
 use z3::{Params, SatResult, Solver};
 
 use crate::analyzer::{Analyzer, Node};
+use crate::bounds::{self, Bounds};
+use crate::facts::Fact;
 use crate::{Error, Result};
 
 /// Every constraint of an analysis, with where each comes from.
@@ -69,6 +72,48 @@ pub struct Constraint {
     pub code: String,
     /// The variables the constraint mentions.
     pub vars: Vec<String>,
+    /// For a constraint a fact gave ([`crate::Informed::trace`]): which, and
+    /// what it says. `None` for the analyzer's own.
+    #[serde(default)]
+    pub fact: Option<FactInfo>,
+}
+
+/// What a fact constraint asserts, and the facts it is read from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactInfo {
+    /// What kind of claim it is: `selectivity`, `pinned rows`, `pinned ndv`,
+    /// `ndv cap`, `row cap` or `floor`.
+    pub source: String,
+    /// The facts it is read from.
+    pub facts: Vec<FactRef>,
+    /// The value it holds its variable to, e.g. `= 6001215` or `<= 50`.
+    pub value: String,
+}
+
+/// One fact, by its text, and where it was read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactRef {
+    /// The fact without its value, e.g. `|lineitem|`, or how a value was
+    /// found without one, e.g. `implied by its input`.
+    pub text: String,
+    /// Each of the fact's [`crate::facts::Origin`]s, as text.
+    pub origins: Vec<String>,
+}
+
+impl FactRef {
+    pub(crate) fn of(f: &Fact) -> FactRef {
+        FactRef { text: f.kind.to_string(), origins: f.origins.iter().map(|o| o.to_string()).collect() }
+    }
+}
+
+/// A claim a fact gave, as [`crate::informed`] asserts it.
+pub(crate) struct FactClaim {
+    pub claim: Bool,
+    /// The plan node whose variable it holds.
+    pub node: Option<usize>,
+    pub info: FactInfo,
+    /// The line that asserted it.
+    pub at: &'static Location<'static>,
 }
 
 /// The outcome of proving one claim from the constraints.
@@ -118,7 +163,7 @@ impl Trace {
             .filter(|l| l.starts_with("(declare-fun") || l.starts_with("(declare-const"))
             .map(|l| format!("{l}\n"))
             .collect();
-        let declared: HashSet<&str> = declarations.lines().filter_map(declared_name).collect();
+        let declared = declared(&declarations);
         let nodes = a.nodes.iter().enumerate().map(|(id, n)| node(id, n)).collect();
         let source: Vec<&str> = ANALYZER.lines().collect();
         let constraints = a
@@ -134,12 +179,7 @@ impl Trace {
                 } else {
                     (String::new(), String::new())
                 };
-                let mut vars: Vec<String> = vec![];
-                for t in atoms(&smt) {
-                    if declared.contains(t) && !vars.iter().any(|v| v == t) {
-                        vars.push(t.to_string());
-                    }
-                }
+                let vars = vars(&smt, &declared);
                 Constraint {
                     id,
                     infix: infix(&smt),
@@ -149,6 +189,7 @@ impl Trace {
                     function,
                     code,
                     vars,
+                    fact: None,
                 }
             })
             .collect();
@@ -160,6 +201,36 @@ impl Trace {
             tables: tables.to_vec(),
             declarations,
         }
+    }
+
+    /// This trace with a constraint for each of `claims` after its own, in
+    /// the order they were asserted.
+    pub(crate) fn with_facts(&self, claims: &[FactClaim]) -> Trace {
+        let declared = declared(&self.declarations);
+        let mut trace = self.clone();
+        for c in claims {
+            let smt = c.claim.to_string();
+            let facts: Vec<&str> = c.info.facts.iter().map(|f| f.text.as_str()).collect();
+            trace.constraints.push(Constraint {
+                id: trace.constraints.len(),
+                infix: infix(&smt),
+                vars: vars(&smt, &declared),
+                smt,
+                node: c.node,
+                source: format!("{}:{}", c.at.file(), c.at.line()),
+                function: format!("fact: {}", c.info.source),
+                code: format!("{} {}", facts.join(", "), c.info.value),
+                fact: Some(c.info.clone()),
+            });
+        }
+        trace
+    }
+
+    /// This trace with only the analyzer's constraints, none from facts.
+    pub fn without_facts(&self) -> Trace {
+        let mut trace = self.clone();
+        trace.constraints.retain(|c| c.fact.is_none());
+        trace
     }
 
     /// The constraints as an SMT-LIB script Z3 can load, each preceded by a
@@ -248,6 +319,63 @@ impl Trace {
         }
         Ok(parsed)
     }
+}
+
+/// The claims [`crate::Analysis::explain`] proves, as (key, display text,
+/// formula): the verdict's `X <= Σ` and each of `bounds`, for root variable
+/// `root`, scan variables `scans` and tables as (name, symbol) `tables`.
+pub(crate) fn claims(
+    root: &str,
+    scans: &[String],
+    tables: &[(String, String)],
+    bounds: Option<&Bounds>,
+) -> Vec<(String, String, String)> {
+    let x = Int::new_const(root);
+    let sum = if scans.is_empty() {
+        Int::from_i64(0)
+    } else {
+        let scans: Vec<Int> = scans.iter().map(|s| Int::new_const(s.as_str())).collect();
+        Int::add(&scans)
+    };
+    let mut claims = vec![("verdict".to_string(), "X <= Σ".to_string(), x.le(&sum).to_string())];
+    if let Some(b) = bounds {
+        if let Some(n) = b.constant {
+            claims.push(("constant".into(), format!("X <= {n}"), x.le(Int::from_u64(n)).to_string()));
+        }
+        // A bound with no term of its quantity is the constant bound again.
+        if let Some(s) = b.sum.as_ref().filter(|s| s.num > 0) {
+            let (lhs, rhs) = bounds::sides(&x, &sum, s);
+            claims.push(("sum".into(), format!("X <= {}", s.render("Σ")), lhs.le(rhs).to_string()));
+        }
+        for t in b.tables.iter().filter(|t| t.bound.num > 0) {
+            let Some((_, symbol)) = tables.iter().find(|(name, _)| *name == t.table) else {
+                continue;
+            };
+            let (lhs, rhs) = bounds::sides(&x, &Int::new_const(symbol.as_str()), &t.bound);
+            let shown = t.bound.render(&format!("|{}|", t.table));
+            claims.push((format!("table:{}", t.table), format!("X <= {shown}"), lhs.le(&rhs).to_string()));
+            if t.exact {
+                claims.push((format!("exact:{}", t.table), format!("X >= {shown}"), lhs.ge(&rhs).to_string()));
+            }
+        }
+    }
+    claims
+}
+
+/// The names `declarations` declares.
+fn declared(declarations: &str) -> HashSet<&str> {
+    declarations.lines().filter_map(declared_name).collect()
+}
+
+/// The declared variables `smt` mentions, in order, once each.
+fn vars(smt: &str, declared: &HashSet<&str>) -> Vec<String> {
+    let mut vars: Vec<String> = vec![];
+    for t in atoms(smt) {
+        if declared.contains(t) && !vars.iter().any(|v| v == t) {
+            vars.push(t.to_string());
+        }
+    }
+    vars
 }
 
 /// `core` with each tracker dropped that the proof does not need, so that
@@ -401,7 +529,7 @@ fn precedence(op: &str) -> Option<u8> {
         "and" => 3,
         "<=" | ">=" | "<" | ">" | "=" => 4,
         "+" | "-" => 5,
-        "*" => 6,
+        "*" | "/" => 6,
         _ => return None,
     })
 }
@@ -418,7 +546,11 @@ fn symbol_of(op: &str) -> &str {
 fn render(e: &Sexp, outer: u8) -> String {
     let Sexp::List(items) = e else {
         let Sexp::Atom(a) = e else { unreachable!() };
-        return a.clone();
+        // Z3 prints a real numeral `9` as `9.0`.
+        return match a.strip_suffix(".0") {
+            Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => n.to_string(),
+            _ => a.clone(),
+        };
     };
     let Some(Sexp::Atom(head)) = items.first() else {
         return items.iter().map(|x| render(x, 0)).collect::<Vec<_>>().join(" ");
@@ -437,6 +569,8 @@ fn render(e: &Sexp, outer: u8) -> String {
             render(&substitute(body, &env), outer)
         }
         ("not", [x]) => format!("¬{}", render(x, 7)),
+        // An integer as a real is the same number.
+        ("to_real", [x]) => render(x, outer),
         ("-", [x]) => format!("-{}", render(x, 7)),
         ("ite", [c, a, b]) => match c {
             Sexp::List(cmp)
@@ -461,6 +595,7 @@ fn render(e: &Sexp, outer: u8) -> String {
                 .collect();
             let sep = match op {
                 "*" => "·".to_string(),
+                "/" => "/".to_string(),
                 _ => format!(" {} ", symbol_of(op)),
             };
             let s = parts.join(&sep);
@@ -506,6 +641,15 @@ mod tests {
         assert_eq!(infix("(let ((a!1 (+ x y))) (<= a!1 (* 2 a!1)))"), "x + y <= 2·(x + y)");
         assert_eq!(infix("(and (<= a b) (or p q))"), "a <= b ∧ (p ∨ q)");
         assert_eq!(infix("(<= a"), "(<= a");
+    }
+
+    #[test]
+    fn infix_renders_reals() {
+        assert_eq!(infix("(= (to_real op3) (* (/ 9.0 100.0) (to_real op1)))"), "op3 = 9/100·op1");
+        assert_eq!(infix("(= (to_real o) (/ 1 2))"), "o = 1/2");
+        assert_eq!(infix("(/ (+ a b) c)"), "(a + b)/c");
+        assert_eq!(infix("(* a (/ b c))"), "a·(b/c)");
+        assert_eq!(infix("(>= x 2.5)"), "x >= 2.5");
     }
 
     #[test]
