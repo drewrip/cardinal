@@ -25,6 +25,9 @@ use crate::{Error, Result, Validation};
 /// Evaluates `nodes` bottom-up and returns the actual value of every variable
 /// of every node that could be evaluated, as (variable, value), children before
 /// parents: each node's row count, then each output column's distinct count.
+/// Also the least and greatest non-NULL value of each column with min and
+/// max variables (none for a column without a value), by variable, each
+/// with how many counts come before it.
 ///
 /// Each node runs over scans of its children's materialized output rather than
 /// over its original subtree, so a parent sees exactly the rows its children's
@@ -36,9 +39,10 @@ pub(crate) async fn evaluate(
     nodes: &[Node],
     ctx: &SessionContext,
     auxiliary: bool,
-) -> (Vec<(String, u64)>, HashMap<String, u64>) {
+) -> (Vec<(String, u64)>, Vec<(usize, String, i64)>, HashMap<String, u64>) {
     let state = ctx.state();
     let mut counts = vec![];
+    let mut ends = vec![];
     let mut aux = HashMap::new();
     // For each node, a scan over its materialized output, if it was evaluated.
     let mut outputs: Vec<Option<LogicalPlan>> = Vec::with_capacity(nodes.len());
@@ -59,6 +63,7 @@ pub(crate) async fn evaluate(
                 ndv_vars,
                 &measure(&batches, ndv_vars.len()),
             );
+            ranges(&mut ends, counts.len(), &batches, &node.raw_min_vars, &node.raw_max_vars);
         }
         // A subquery's result is its plan's result; the wrapper has no physical
         // form of its own.
@@ -123,10 +128,11 @@ pub(crate) async fn evaluate(
         };
         let values = measure(&batches, node.ndv_vars.len());
         record(&mut counts, &node.var, &node.ndv_vars, &values);
+        ranges(&mut ends, counts.len(), &batches, &node.min_vars, &node.max_vars);
         measured.push(Some(values));
         outputs.push(materialize(id, &node.plan, batches));
     }
-    (counts, aux)
+    (counts, ends, aux)
 }
 
 /// Row count, then each column's distinct count (NULL counted as one value);
@@ -164,12 +170,40 @@ fn record(counts: &mut Vec<(String, u64)>, var: &str, ndv_vars: &[String], value
     }
 }
 
+/// The least and greatest non-NULL value of each column with min and max
+/// variables, as integers (dates as days). A column without a value, or
+/// with one that does not fit, leaves them free.
+fn ranges(ends: &mut Vec<(usize, String, i64)>, at: usize, batches: &[RecordBatch], mins: &[Option<String>], maxs: &[Option<String>]) {
+    use datafusion::arrow::array::{Array, Int64Array};
+    use datafusion::arrow::compute::{CastOptions, cast_with_options, max, min};
+    use datafusion::arrow::datatypes::DataType;
+    let strict = CastOptions { safe: false, ..Default::default() };
+    'columns: for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
+        let (Some(lo), Some(hi)) = (lo, hi) else { continue };
+        let mut seen: Option<(i64, i64)> = None;
+        for b in batches {
+            let Ok(column) = cast_with_options(b.column(j), &DataType::Int64, &strict) else { continue 'columns };
+            let Some(column) = column.as_any().downcast_ref::<Int64Array>() else { continue 'columns };
+            if let (Some(a), Some(z)) = (min(column), max(column)) {
+                seen = Some(seen.map_or((a, z), |(x, y)| (x.min(a), y.max(z))));
+            }
+        }
+        if let Some((a, z)) = seen {
+            ends.push((at, lo.clone(), a));
+            ends.push((at, hi.clone(), z));
+        }
+    }
+}
+
 /// Pins each count, in order, onto the constraints and reports the first one
-/// that makes them unsatisfiable.
+/// that makes them unsatisfiable. The least and greatest values `ends` go
+/// in among them, each after the counts before it: they are no operator's
+/// rows.
 pub(crate) fn check(
     constraints: &str,
     assertions: usize,
     counts: &[(String, u64)],
+    ends: &[(usize, String, i64)],
 ) -> Result<Validation> {
     let solver = new_solver();
     solver.from_string(constraints);
@@ -181,9 +215,20 @@ pub(crate) fn check(
     }
     let mut rows = HashMap::new();
     let mut undecided = false;
-    for (var, n) in counts {
-        rows.insert(var.clone(), *n);
-        solver.assert(Int::new_const(var.as_str()).eq(Int::from_u64(*n)));
+    let mut pins: Vec<(&String, Int, bool)> = vec![];
+    let mut ends = ends.iter().peekable();
+    for (i, (var, n)) in counts.iter().enumerate() {
+        while let Some((_, v, e)) = ends.next_if(|(at, _, _)| *at <= i) {
+            pins.push((v, Int::from_i64(*e), false));
+        }
+        pins.push((var, Int::from_u64(*n), true));
+    }
+    pins.extend(ends.map(|(_, v, e)| (v, Int::from_i64(*e), false)));
+    for (var, n, count) in pins {
+        if count {
+            rows.insert(var.clone(), n.as_u64().unwrap_or_default());
+        }
+        solver.assert(Int::new_const(var.as_str()).eq(&n));
         match solver.check() {
             SatResult::Sat => {}
             SatResult::Unknown => undecided = true,

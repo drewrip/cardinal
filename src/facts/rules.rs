@@ -10,8 +10,8 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::common::JoinType;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, State, Value, Values, join_keys, states_hidden, stopped};
-use super::{Fact, FactKind, Origin, Ratio};
+use super::context::{Context, Pending, State, Value, Values, join_keys, states_hidden, stopped};
+use super::{Fact, FactKind, Origin, Ratio, Term};
 use crate::observed::{ObservedPlan, Op, column_key};
 
 pub trait FactRule: Sync {
@@ -78,6 +78,10 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Observed {
         floors.extend(lower_bound(&obs, node).map(|(kind, value)| fact(kind, value, node, "lower bound")));
         for (kind, value, floor) in build_distinct(&obs, &parents, node) {
             let f = fact(kind, value, node, "build keys");
+            if floor { floors.push(f) } else { bounds.push(f) }
+        }
+        for (kind, value, floor) in join_domain(&obs, node) {
+            let f = fact(kind, value, node, "join domain");
             if floor { floors.push(f) } else { bounds.push(f) }
         }
     }
@@ -190,6 +194,103 @@ fn build_distinct(obs: &Observation, parents: &[Vec<usize>], node: usize) -> Vec
         }
     }
     out
+}
+
+/// What the runtime filters a join enforces say of its rows, as bounds
+/// (`false`) and floors (`true`). Each filter admits every key of the join
+/// that built it, and that join is at or below this one, the highest on its
+/// column: every value of the column here is one of those keys, so it
+/// satisfies the filter, whether or not the scan applied it. So its least
+/// value is at least a range's or list's least, its greatest at most their
+/// greatest, and it takes at most as many values as a list holds. Only
+/// non-negative integers are read, and only on an inner or semi join, of
+/// the side a semi join keeps: elsewhere the column may be NULL, or gone.
+fn join_domain(obs: &Observation, node: usize) -> Vec<(FactKind, Ratio, bool)> {
+    let n = &obs.plan.nodes[node];
+    let Op::Join { kind, .. } = &n.op else { return vec![] };
+    let sides = match kind {
+        JoinType::Inner => &n.children[..],
+        JoinType::LeftSemi => &n.children[..1],
+        JoinType::RightSemi => &n.children[1..],
+        _ => return vec![],
+    };
+    let Some(ctx) = obs.states[node].clean() else { return vec![] };
+    // Each column's filters, as the least and greatest values and the
+    // fewest listed values they admit.
+    let mut columns: std::collections::BTreeMap<&String, (Option<i64>, Option<i64>, Option<u64>)> = Default::default();
+    for &c in sides {
+        let State::Pending(_, pending) = &obs.states[c] else { continue };
+        for p in pending {
+            let Pending::Join { column: Some(column), expr: Some(expr), .. } = p else { continue };
+            let (lo, hi, listed) = columns.entry(column).or_default();
+            let (from, to, values) = admits(&expr.expr);
+            let tighter = |a: &mut Option<i64>, b: Option<i64>, f: fn(i64, i64) -> i64| *a = a.map_or(b, |a| Some(b.map_or(a, |b| f(a, b))));
+            tighter(lo, from, i64::max);
+            tighter(hi, to, i64::min);
+            if let Some(v) = values {
+                *listed = Some(listed.map_or(v, |l| l.min(v)));
+            }
+        }
+    }
+    let mut out = vec![];
+    for (column, (lo, hi, listed)) in columns {
+        let Some((instance, name)) = column.rsplit_once('.') else { continue };
+        let key = Term::new(crate::observed::qualified(instance, name));
+        if let Some(lo) = lo.and_then(|v| u64::try_from(v).ok()) {
+            out.push((FactKind::Min { key: key.clone(), over: ctx.clone() }, Ratio::int(lo), true));
+        }
+        if let Some(hi) = hi.and_then(|v| u64::try_from(v).ok()) {
+            out.push((FactKind::Max { key: key.clone(), over: ctx.clone() }, Ratio::int(hi), false));
+        }
+        if let Some(n) = listed {
+            out.push((FactKind::Distinct { keys: [key].into(), over: ctx.clone() }, Ratio::int(n), false));
+        }
+    }
+    out
+}
+
+/// The values runtime filter `e` admits: the least and greatest, if they
+/// are integers, and how many, if it lists them (`x = k` or an IN list,
+/// which reads as `x = a OR x = b`).
+fn admits(e: &Expr) -> (Option<i64>, Option<i64>, Option<u64>) {
+    fn equal(e: &Expr) -> Option<&Expr> {
+        match e {
+            Expr::BinaryExpr(BinaryExpr { op: Operator::Eq, right, .. }) => Some(right.as_ref()),
+            _ => None,
+        }
+    }
+    let mut listed = vec![];
+    let mut todo = vec![e];
+    while let Some(e) = todo.pop() {
+        match e {
+            Expr::BinaryExpr(BinaryExpr { left, op: Operator::Or, right }) => todo.extend([left.as_ref(), right.as_ref()]),
+            e => match equal(e) {
+                Some(v @ Expr::Literal(..)) => listed.push(v),
+                _ => {
+                    listed.clear();
+                    break;
+                }
+            },
+        }
+    }
+    if !listed.is_empty() {
+        let ints: Option<Vec<i64>> = listed.iter().map(|v| integer(v)).collect();
+        let (lo, hi) = ints.map_or((None, None), |v| (v.iter().min().copied(), v.iter().max().copied()));
+        return (lo, hi, Some(listed.len() as u64));
+    }
+    match e {
+        Expr::BinaryExpr(BinaryExpr { op, right, .. }) => {
+            let k = integer(right);
+            match op {
+                Operator::GtEq => (k, None, None),
+                Operator::Gt => (k.and_then(|k| k.checked_add(1)), None, None),
+                Operator::LtEq => (None, k, None),
+                Operator::Lt => (None, k.and_then(|k| k.checked_sub(1)), None),
+                _ => (None, None, None),
+            }
+        }
+        _ => (None, None, None),
+    }
 }
 
 /// The value of an integer literal.

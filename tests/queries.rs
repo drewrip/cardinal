@@ -2,6 +2,8 @@
 //! `O_root <= Σ scans`. Tables may be empty. `MightGrow` queries also check the
 //! structure of the counterexample.
 
+mod common;
+
 use std::sync::Arc;
 
 use cardinal::{Analysis, Counterexample, Verdict, analyze_sql};
@@ -556,7 +558,7 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 }
 
 fn operators(a: &Analysis) -> usize {
-    a.smtlib.matches("(declare-fun op").count()
+    common::operator_vars(&a.smtlib)
 }
 
 #[tokio::test]

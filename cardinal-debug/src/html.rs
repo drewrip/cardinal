@@ -463,7 +463,7 @@ footer dd { margin: 0; }
       const read = m.facts.flatMap(f => f.origins);
       row('facts-used', [[m.name, 'm'], [m.value, 'm'], [m.facts.map(f => f.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
     }
-    const counts = [['pinned', F.report.pinned], ['capped', F.report.capped], ['ndv', F.report.pinned_ndv], ['floors', F.report.floors]];
+    const counts = [['pinned', F.report.pinned], ['capped', F.report.capped], ['ndv', F.report.pinned_ndv], ['ranges', F.report.ranges || []], ['floors', F.report.floors]];
     for (const [k, list] of counts)
       for (const [v, n] of list) row('facts-used', [[k, 'note'], [`${names[v] ?? v} ${k === 'capped' ? '<=' : k === 'floors' ? '>=' : '='} ${n}`, 'm'], ['row count from a fact (◆ in the constraints)', 'note'], ['', '']]);
     for (const [s, why] of F.report.rejected) row('facts-unused', [['rejected', 'bad'], [s, 'm'], [why, '']]);

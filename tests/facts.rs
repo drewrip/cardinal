@@ -313,8 +313,58 @@ async fn runtime_filters_give_upper_bounds() {
     assert_eq!(bound(&single, ndv), 2);
 
     let bloom = joined("optional: c_nationkey>=8 AND optional: c_nationkey<=21 AND optional: c_nationkey IN BF(n_nationkey)");
-    assert!(!bloom.bounds().any(|b| b.kind.to_string().contains("customer")), "{bloom}");
+    assert!(!bloom.bounds().any(|b| b.kind.to_string().starts_with("|customer")), "{bloom}");
     assert_eq!(floor(&bloom, "|customer|"), Some(300));
+}
+
+/// A runtime filter admits every key of the join that built it, so on the
+/// join that enforces it, every value of its column satisfies it: a range
+/// bounds the least and greatest, and an IN list the distinct values too.
+/// Not where the column may be NULL (the probe side of a LEFT join keeps
+/// rows without a partner), nor gone (a semi join keeping the other side),
+/// nor from a bloom filter, which lists nothing.
+#[tokio::test]
+async fn enforced_runtime_filters_bound_their_column() {
+    let catalog = catalog().await;
+    let scan = |table: &str, cols: Value, rows, dynamic: Option<&str>| {
+        let mut info = json!({"Table": format!("tpch.main.{table}"), "Projections": cols});
+        if let Some(d) = dynamic {
+            info["Dynamic Filters"] = json!(d);
+        }
+        node("TABLE_SCAN", rows, info, vec![])
+    };
+    let joined = |kind: &str, dynamic: &str| {
+        let probe = scan("customer", json!(["c_custkey", "c_nationkey"]), 300, Some(dynamic));
+        let join = node(
+            "HASH_JOIN",
+            290,
+            json!({"Join Type": kind, "Conditions": "c_nationkey = n_nationkey"}),
+            vec![probe, scan("nation", json!(["n_nationkey"]), 5, None)],
+        );
+        derive_facts(&[from_duckdb(&catalog, "enforced", &join.to_string(), None).unwrap()])
+    };
+    let over = "customer × nation where customer.c_nationkey = nation.n_nationkey";
+    let min = format!("min(customer.c_nationkey | {over})");
+    let max = format!("max(customer.c_nationkey | {over})");
+    let ndv = format!("ndv(customer.c_nationkey | {over})");
+
+    let q05 = joined("INNER", "optional: c_nationkey IN (8, 9, 12, 18, 21) AND optional: c_nationkey>=8 AND optional: c_nationkey<=21");
+    assert_eq!(floor(&q05, &min), Some(8), "{q05}");
+    assert_eq!(bound(&q05, &max), 21);
+    assert_eq!(bound(&q05, &ndv), 5);
+
+    let range = joined("INNER", "optional: c_nationkey>=7 AND optional: c_nationkey<=1489");
+    assert_eq!(floor(&range, &min), Some(7), "{range}");
+    assert_eq!(bound(&range, &max), 1489);
+    assert!(range.bounds().all(|b| b.kind.to_string() != ndv), "{range}");
+
+    let none = |facts: &FactSet| !facts.bounds().chain(facts.floors()).any(|f| f.kind.to_string().starts_with("min(") || f.kind.to_string().starts_with("max("));
+    let bloom = joined("INNER", "optional: c_nationkey IN BF(n_nationkey)");
+    assert!(none(&bloom), "{bloom}");
+    let left = joined("LEFT", "optional: c_nationkey>=7 AND optional: c_nationkey<=21");
+    assert!(none(&left), "{left}");
+    let other_side = joined("RIGHT_SEMI", "optional: c_nationkey>=7 AND optional: c_nationkey<=21");
+    assert!(none(&other_side), "{other_side}");
 }
 
 /// A required filter pushed into a scan gives a fact on its table. An
@@ -528,6 +578,9 @@ async fn round_trip() {
         }
         assert!(read.unobserved().eq(set.unobserved()), "{}", p.name);
     }
+    let all = derive_facts(&all);
+    let texts: Vec<String> = all.bounds().chain(all.floors()).map(|f| f.kind.to_string()).collect();
+    assert!(texts.iter().any(|t| t.starts_with("min(")) && texts.iter().any(|t| t.starts_with("max(")), "no least or greatest value");
 }
 
 #[test]

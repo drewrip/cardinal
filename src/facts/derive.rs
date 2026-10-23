@@ -216,6 +216,12 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
                 FactKind::Unique { keys, over } => {
                     reduced(over).into_iter().map(|over| FactKind::Unique { keys: keys.clone(), over }).collect()
                 }
+                FactKind::Min { key, over } => {
+                    reduced(over).into_iter().map(|over| FactKind::Min { key: key.clone(), over }).collect()
+                }
+                FactKind::Max { key, over } => {
+                    reduced(over).into_iter().map(|over| FactKind::Max { key: key.clone(), over }).collect()
+                }
                 FactKind::Match { on, kept, other } => {
                     let kept_side = reduced(kept)
                         .into_iter()

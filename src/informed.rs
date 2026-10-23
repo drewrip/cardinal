@@ -85,6 +85,9 @@ pub struct Informed {
     /// the distinct count a fact gives over the table. The constraints
     /// carry them to the operators above. Pinned only.
     pub pinned_ndv: Vec<(String, u64)>,
+    /// Min variables held at or above, and max variables at or below, the
+    /// least and greatest values facts give of their columns. Pinned only.
+    pub ranges: Vec<(String, u64)>,
     /// Operator variables held at or above a row count the facts give of
     /// narrower rows: the same rows with more filters, say. These hold in
     /// either mode, as the tables grow too.
@@ -179,6 +182,7 @@ impl Informed {
             pinned: self.pinned.clone(),
             capped: self.capped.clone(),
             pinned_ndv: self.pinned_ndv.clone(),
+            ranges: self.ranges.clone(),
             floors: self.floors.clone(),
             unchecked: self.unchecked.clone(),
         }
@@ -216,6 +220,8 @@ pub struct FactReport {
     pub pinned: Vec<(String, u64)>,
     pub capped: Vec<(String, u64)>,
     pub pinned_ndv: Vec<(String, u64)>,
+    #[serde(default)]
+    pub ranges: Vec<(String, u64)>,
     pub floors: Vec<(String, u64)>,
     pub unchecked: Vec<String>,
 }
@@ -349,6 +355,7 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
     let mut pinned = vec![];
     let mut capped = vec![];
     let mut pinned_ndv = vec![];
+    let mut ranges = vec![];
     if mode == FactMode::Pinned {
         for (node, var, n, fact) in lookup.sizes() {
             let claim = Int::new_const(var.as_str()).eq(Int::from_u64(n));
@@ -372,6 +379,20 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
                     pinned_ndv.push((var, n));
                 }
                 Some(false) => rejected.push((var, format!("{n} distinct values contradicts the constraints"))),
+                None => unchecked.push(format!("{var} {op} {n}")),
+            }
+        }
+        // Each column's least and greatest values, which bound its distinct
+        // values and what it joins with.
+        for (node, var, n, floor, fact) in lookup.ranges() {
+            let (v, k) = (Int::new_const(var.as_str()), Int::from_u64(n));
+            let (claim, source, op) = if floor { (v.ge(k), "range floor", ">=") } else { (v.le(k), "range cap", "<=") };
+            match search.assume(&claim) {
+                Some(true) => {
+                    extra.push(fact_claim(claim, Some(node), source, vec![fact], format!("{op} {n}")));
+                    ranges.push((var, n));
+                }
+                Some(false) => rejected.push((var, format!("{op} {n} contradicts the constraints"))),
                 None => unchecked.push(format!("{var} {op} {n}")),
             }
         }
@@ -457,6 +478,7 @@ pub(crate) fn inform(analysis: &Analysis, facts: &FactSet, mode: FactMode) -> Re
         pinned,
         capped,
         pinned_ndv,
+        ranges,
         floors,
         unchecked,
         trace,
@@ -762,11 +784,37 @@ impl<'a> Lookup<'a> {
     /// table, by the scan's NDV variable (the raw scan's, under pushed
     /// filters), and whether it is exact (else an upper bound). The
     /// constraints carry each up through filters, joins and GROUP BYs, so
-    /// no operator above a scan needs its own. Float columns are left out:
-    /// the constraints count their values by bits, the facts by SQL
+    /// no operator above a scan needs its own, unless a bound gives one of
+    /// its rows: those are read at every operator. Float columns are left
+    /// out: the constraints count their values by bits, the facts by SQL
     /// equality.
     fn ndvs(&self) -> Vec<(usize, String, u64, bool, FactRef)> {
         let mut out = vec![];
+        let bounded = tables_of(self.facts.bounds().filter_map(|f| match &f.kind {
+            FactKind::Distinct { keys, over } if keys.len() == 1 => Some(over),
+            _ => None,
+        }));
+        for (i, node) in self.nodes.iter().enumerate() {
+            let Ok(ctx) = &self.logical.contexts[i] else { continue };
+            // A base table's are read below.
+            if !bounded.contains(&bases(ctx)) || (self.logical.instances[i].is_some() && node.raw_scan.is_none()) {
+                continue;
+            }
+            let schema = node.plan.schema();
+            for (j, var) in node.ndv_vars.iter().enumerate() {
+                let Some(Some(e @ Expr::Column(_))) = self.logical.lineage[i].get(j) else { continue };
+                if j >= schema.fields().len() || schema.field(j).data_type().is_floating() {
+                    continue;
+                }
+                let kind = self.canonical(FactKind::Distinct { keys: [Term::new(e.clone())].into(), over: ctx.clone() });
+                if let Some(b) = self.facts.bound(&kind)
+                    && !self.conflicted.contains(&kind)
+                    && let Some(n) = b.value.as_int()
+                {
+                    out.push((i, var.clone(), n, false, FactRef::of(b)));
+                }
+            }
+        }
         for (i, node) in self.nodes.iter().enumerate() {
             let Some(instance) = &self.logical.instances[i] else { continue };
             let vars = node.raw_scan.as_ref().map_or(&node.ndv_vars, |(_, raw, _)| raw);
@@ -787,6 +835,52 @@ impl<'a> Lookup<'a> {
                     && let Some(n) = b.value.as_int()
                 {
                     out.push((i, var.clone(), n, false, FactRef::of(b)));
+                }
+            }
+        }
+        out
+    }
+
+    /// Each column's least value that a floor gives over its operator's
+    /// rows, and its greatest that a bound gives, by its min or max variable
+    /// (the raw scan's for a base table under pushed filters), and whether
+    /// it is a floor.
+    fn ranges(&self) -> Vec<(usize, String, u64, bool, FactRef)> {
+        let ranged = tables_of(self.facts.floors().chain(self.facts.bounds()).filter_map(|f| match &f.kind {
+            FactKind::Min { over, .. } | FactKind::Max { over, .. } => Some(over),
+            _ => None,
+        }));
+        let mut out = vec![];
+        for (i, node) in self.nodes.iter().enumerate() {
+            let mut rows = vec![];
+            if let (Some(_), Some(instance)) = (&node.raw_scan, &self.logical.instances[i]) {
+                rows.push((Context::table(instance), &node.raw_min_vars, &node.raw_max_vars));
+            }
+            if let Ok(ctx) = &self.logical.contexts[i] {
+                rows.push((ctx.clone(), &node.min_vars, &node.max_vars));
+            }
+            for (ctx, mins, maxs) in rows {
+                if !ranged.contains(&bases(&ctx)) {
+                    continue;
+                }
+                for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
+                    let Some(Some(e @ Expr::Column(_))) = self.logical.lineage[i].get(j) else { continue };
+                    let key = Term::new(e.clone());
+                    let ends = [
+                        (lo, FactKind::Min { key: key.clone(), over: ctx.clone() }, true),
+                        (hi, FactKind::Max { key, over: ctx.clone() }, false),
+                    ];
+                    for (var, kind, floor) in ends {
+                        let Some(var) = var else { continue };
+                        let kind = self.canonical(kind);
+                        let found = if floor { self.facts.floor(&kind) } else { self.facts.bound(&kind) };
+                        if let Some(f) = found
+                            && !self.conflicted.contains(&kind)
+                            && let Some(n) = f.value.as_int()
+                        {
+                            out.push((i, var.clone(), n, floor, FactRef::of(f)));
+                        }
+                    }
                 }
             }
         }
@@ -849,6 +943,19 @@ impl<'a> Lookup<'a> {
         }
         out
     }
+}
+
+/// The tables `ctx` draws on, by base table, each as often as it does: a
+/// context can only be named canonically as one with the same.
+fn bases(ctx: &Context) -> Vec<String> {
+    let mut out: Vec<String> = ctx.tables().iter().map(|t| crate::observed::base_table(t).unwrap_or(t).to_string()).collect();
+    out.sort();
+    out
+}
+
+/// [`bases`] of each of `contexts`.
+fn tables_of<'c>(contexts: impl Iterator<Item = &'c Context>) -> BTreeSet<Vec<String>> {
+    contexts.map(bases).collect()
 }
 
 /// `terms` without those the rows of `over` already satisfy.

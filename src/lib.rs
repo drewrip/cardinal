@@ -155,8 +155,8 @@ impl Analysis {
     /// break a constraint derived from it.
     pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
         let auxiliary = self.selectivity.is_some();
-        let (counts, aux) = validate::evaluate(&self.nodes, ctx, auxiliary).await;
-        let mut v = validate::check(&self.constraints, self.assertions, &counts)?;
+        let (counts, ends, aux) = validate::evaluate(&self.nodes, ctx, auxiliary).await;
+        let mut v = validate::check(&self.constraints, self.assertions, &counts, &ends)?;
         v.selectivity = self
             .selectivity
             .as_ref()
@@ -452,7 +452,7 @@ fn analyze_with(
     resolve: &dyn Fn(&TableScan) -> ScanKind,
     options: Options,
 ) -> Analysis {
-    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace);
+    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
     let root = a.visit(plan).card;
     a.assert_partitions();
     let root_name = a.name_of(&root);

@@ -170,6 +170,16 @@ impl Dom {
         }
     }
 
+    /// The least and greatest non-NULL value, where the values are known
+    /// integers: `None` at an end that is open or unknown.
+    pub(crate) fn int_range(&self) -> (Option<i128>, Option<i128>) {
+        match &self.vals {
+            Vals::Range(lo, hi) => (*lo, *hi),
+            Vals::Set(_) => self.int_bounds().map_or((None, None), |(lo, hi)| (Some(lo), Some(hi))),
+            Vals::Any | Vals::Count(_) => (None, None),
+        }
+    }
+
     /// The integers from `lo` up.
     pub(crate) fn at_least(lo: i128) -> Dom {
         Dom::range(Some(lo), None)

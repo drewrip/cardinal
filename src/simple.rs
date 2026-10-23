@@ -177,6 +177,7 @@ fn classify(kind: &FactKind, chain: bool) -> std::result::Result<Simple, String>
         },
         FactKind::Cardinality(_) => Err("a NOT IN".into()),
         FactKind::Unique { .. } => Err("a key".into()),
+        FactKind::Min { .. } | FactKind::Max { .. } => Err("a least or greatest value".into()),
     }
 }
 

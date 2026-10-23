@@ -164,6 +164,17 @@ async fn volatile_keys_are_not_determined() {
     assert!(!bounds.contains("X <= |suppliers|"), "{bounds}");
 }
 
+/// Group keys that one input column determines take no more combinations
+/// than it has values: `supplier_id`, a key, determines all three.
+#[tokio::test]
+async fn one_column_determining_the_keys_bounds_the_groups() {
+    let sql = "SELECT s.name, s.category, s.country, count(*) AS n
+        FROM shipments sh JOIN suppliers s ON sh.supplier_id = s.supplier_id
+        GROUP BY s.name, s.category, s.country";
+    let bounds = formula(sql).await.1;
+    assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+}
+
 /// With no declared key, four group keys are too many to multiply, and the
 /// GROUP BY is bounded by its input alone.
 #[tokio::test]

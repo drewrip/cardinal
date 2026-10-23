@@ -162,7 +162,7 @@ fn facts_sections(w: &mut String, f: &FactsDump) {
             .collect();
         let _ = writeln!(w, "  {:<6} = {:<12} from {}", m.name, m.value, from.join(", "));
     }
-    let counts = [("pinned", r.pinned.len()), ("capped", r.capped.len()), ("ndv", r.pinned_ndv.len()), ("floors", r.floors.len())];
+    let counts = [("pinned", r.pinned.len()), ("capped", r.capped.len()), ("ndv", r.pinned_ndv.len()), ("ranges", r.ranges.len()), ("floors", r.floors.len())];
     let counts: Vec<String> = counts.iter().filter(|(_, n)| *n > 0).map(|(k, n)| format!("{n} {k}")).collect();
     if !counts.is_empty() {
         let _ = writeln!(w, "  row counts: {} (marked ◆ in the tree)", counts.join(", "));

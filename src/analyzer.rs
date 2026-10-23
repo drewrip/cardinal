@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::panic::Location;
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, Constraint, JoinType, NullEquality};
 use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::logical_plan::{
@@ -52,6 +52,11 @@ pub(crate) struct TableVar {
 pub(crate) struct Rel {
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
+    /// Per output column, the ends of an interval holding each of its
+    /// non-NULL values (empty, `max < min`, if there is none): for
+    /// integer-like columns that a range, a join or a grouping reads.
+    pub(crate) min: Vec<Option<Int>>,
+    pub(crate) max: Vec<Option<Int>>,
     /// What every row's values satisfy, whatever the data.
     pub(crate) facts: Facts,
     /// Facts that also hold for any subset of the rows.
@@ -132,6 +137,11 @@ pub(crate) struct Analyzer<'a> {
     next_frame: usize,
     /// The node each finished frame became.
     pub(crate) frame_node: HashMap<usize, usize>,
+    /// The names of the columns that get min and max variables
+    /// ([`ranged_columns`]).
+    ranged: BTreeSet<String>,
+    /// The last base scan's raw min and max variables, for its node to take.
+    raw_ranges: (Vec<Option<String>>, Vec<Option<String>>),
 }
 
 /// One assertion: the frame of the node it was made for (none for
@@ -158,6 +168,13 @@ pub(crate) struct Node {
     /// For an equi-join: whether each left row matches at most one right row
     /// (a unique right key, or a foreign key from the left), and the mirror.
     pub(crate) at_most_once: (bool, bool),
+    /// The min and max variable of each output column that has them
+    /// ([`Rel::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
+    pub(crate) min_vars: Vec<Option<String>>,
+    pub(crate) max_vars: Vec<Option<String>>,
+    /// The raw scan's, for a base scan with pushed-down filters.
+    pub(crate) raw_min_vars: Vec<Option<String>>,
+    pub(crate) raw_max_vars: Vec<Option<String>>,
 }
 
 /// True if `scan`'s provider may return rows that fail its pushed filters:
@@ -266,7 +283,22 @@ impl<'a> Analyzer<'a> {
             owners: Vec::new(),
             next_frame: 0,
             frame_node: HashMap::new(),
+            ranged: BTreeSet::new(),
+            raw_ranges: Default::default(),
         }
+    }
+
+    /// Gives min and max variables to the columns of `plan` that need them.
+    pub(crate) fn with_ranges(mut self, plan: &LogicalPlan) -> Self {
+        self.ranged = ranged_columns(plan);
+        self
+    }
+
+    /// A variable for an end of a column's values: any integer.
+    fn range_var(&mut self, name: String) -> Int {
+        let v = Int::new_const(name.as_str());
+        self.vars.push((name, v.clone()));
+        v
     }
 
     #[track_caller]
@@ -304,9 +336,18 @@ impl<'a> Analyzer<'a> {
                 v
             })
             .collect();
+        let schema = plan.schema();
+        let (mut min, mut max) = (vec![], vec![]);
+        for (j, t) in fields.iter().enumerate() {
+            let ranged = integer_like(t) && self.ranged.contains(schema.field(j).name());
+            min.push(ranged.then(|| self.range_var(format!("{base}_c{j}_min"))));
+            max.push(ranged.then(|| self.range_var(format!("{base}_c{j}_max"))));
+        }
         let rel = Rel {
             card,
             ndv,
+            min,
+            max,
             facts: Facts::default(),
             rows: Rows::default(),
             origin: None,
@@ -389,6 +430,7 @@ impl<'a> Analyzer<'a> {
         self.owners.push(frame);
         let (out, raw_scan) = self.visit_node(plan);
         let at_most_once = std::mem::take(&mut self.at_most_once);
+        let (raw_min_vars, raw_max_vars) = std::mem::take(&mut self.raw_ranges);
         self.apply_domains(plan, &out);
         if let Some(o) = &out.origin
             && o.informative()
@@ -406,6 +448,10 @@ impl<'a> Analyzer<'a> {
             inputs,
             raw_scan,
             at_most_once,
+            min_vars: range_names(&out.min),
+            max_vars: range_names(&out.max),
+            raw_min_vars,
+            raw_max_vars,
         });
         self.owners.pop();
         self.frame_node.insert(frame, self.nodes.len() - 1);
@@ -428,6 +474,7 @@ impl<'a> Analyzer<'a> {
                 _ => {}
             }
         }
+        self.range_domains(plan, rel);
         // A unique set of columns has a distinct combination on every row.
         // Columns with few possible values count as constants, which keeps
         // the product linear where possible.
@@ -465,6 +512,79 @@ impl<'a> Analyzer<'a> {
                 self.assert(rel.card.le(nulls));
             } else if d.never_null() {
                 self.assert(rel.card.le(values));
+            }
+        }
+    }
+
+    /// Each column's interval holds the values its domain allows, and isn't
+    /// empty where the column has a value; it holds at most its width of
+    /// distinct values, and NULL.
+    fn range_domains(&self, plan: &LogicalPlan, rel: &Rel) {
+        let schema = plan.schema();
+        for (j, (lo, hi)) in rel.min.iter().zip(&rel.max).enumerate() {
+            let (Some(lo), Some(hi)) = (lo, hi) else { continue };
+            let col = Expr::Column(Column::from(schema.qualified_field(j)));
+            let d = rel.facts.dom(&col, schema);
+            let (from, to) = d.int_range();
+            if let Some(from) = from.and_then(|v| i64::try_from(v).ok()) {
+                self.assert(lo.ge(Int::from_i64(from)));
+            }
+            if let Some(to) = to.and_then(|v| i64::try_from(v).ok()) {
+                self.assert(hi.le(Int::from_i64(to)));
+            }
+            if d.never_null() {
+                self.assert(rel.card.ge(int(1)).implies(lo.le(hi)));
+            }
+            let width = hi.ge(lo).ite(&(hi - lo + int(1)), &int(0));
+            self.assert(rel.ndv[j].le(width + int(!d.never_null() as u64)));
+        }
+    }
+
+    /// Every non-NULL value of `o`'s column `j` is one of `l`'s column `i`.
+    fn within(&self, o: &Rel, j: usize, l: &Rel, i: usize) {
+        if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
+            self.assert(a.ge(b));
+        }
+        if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
+            self.assert(a.le(b));
+        }
+    }
+
+    /// [`Self::within`], for each of `l`'s columns at the same position.
+    fn within_all(&self, o: &Rel, l: &Rel) {
+        for j in 0..o.min.len().min(l.min.len()) {
+            self.within(o, j, l, j);
+        }
+    }
+
+    /// The ranges `predicate` holds between two columns on every row of
+    /// `o`, the output of `plan` keeping only rows that satisfy it: equal
+    /// columns take the same values, and `a < b` puts `b`'s least above
+    /// `a`'s least and `a`'s greatest below `b`'s.
+    fn range_pairs(&self, predicate: &Expr, plan: &LogicalPlan, o: &Rel) {
+        let index = |e: &Expr| column_index(plan, e).filter(|&i| o.min[i].is_some());
+        for conj in split_conjunction(predicate) {
+            let Expr::BinaryExpr(BinaryExpr { left, op, right }) = conj else { continue };
+            let (Some(a), Some(b)) = (index(left), index(right)) else { continue };
+            let lo_hi = |i: usize| (o.min[i].as_ref().unwrap(), o.max[i].as_ref().unwrap());
+            // Each `x` is below a `y` (by one, `strict`ly).
+            let below = |x: usize, y: usize, strict: bool| {
+                let ((x_lo, x_hi), (y_lo, y_hi)) = (lo_hi(x), lo_hi(y));
+                let gap = int(strict as u64);
+                self.assert(y_lo.ge(x_lo + &gap));
+                self.assert(x_hi.le(y_hi - &gap));
+            };
+            match op {
+                Operator::Eq => {
+                    let ((a_lo, a_hi), (b_lo, b_hi)) = (lo_hi(a), lo_hi(b));
+                    self.assert(a_lo.eq(b_lo));
+                    self.assert(a_hi.eq(b_hi));
+                }
+                Operator::Lt => below(a, b, true),
+                Operator::LtEq => below(a, b, false),
+                Operator::Gt => below(b, a, true),
+                Operator::GtEq => below(b, a, false),
+                _ => {}
             }
         }
     }
@@ -510,6 +630,10 @@ impl<'a> Analyzer<'a> {
                 self.assert(o.card.eq(&l.card));
                 for (j, e) in p.expr.iter().enumerate() {
                     self.expr_ndv(&o.ndv[j], e, &p.input, &l);
+                    // A column, or an integer cast of it, that keeps its value.
+                    if let Some(i) = column_index(&p.input, e) {
+                        self.within(&o, j, &l, i);
+                    }
                 }
                 o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
                 o.rows = l.rows.rename(&|c| passed_column(plan, &p.expr, c));
@@ -537,6 +661,8 @@ impl<'a> Analyzer<'a> {
                 self.assert(o.card.le(&l.card));
                 self.subset_ndv(&o, &l);
                 self.filter_ndv(&f.predicate, &f.input, &o, &l);
+                self.within_all(&o, &l);
+                self.range_pairs(&f.predicate, plan, &o);
                 o.facts = l.facts.clone();
                 o.rows = l.rows.clone();
                 o.facts.assume(&f.predicate, plan.schema());
@@ -553,6 +679,7 @@ impl<'a> Analyzer<'a> {
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
                 // DISTINCT keeps every value that occurs.
                 self.kept_values(plan, &o, &l);
+                self.within_all(&o, &l);
                 let all: Vec<&Int> = l.ndv.iter().collect();
                 if let Some(p) = product(&all, self.max_product) {
                     self.assert(o.card.le(p));
@@ -594,6 +721,7 @@ impl<'a> Analyzer<'a> {
             LogicalPlan::Sort(s) => {
                 let l = self.visit(&s.input);
                 let mut o = self.fresh("Sort", plan);
+                self.within_all(&o, &l);
                 o.facts = l.facts.clone();
                 o.rows = l.rows.clone();
                 o.origin = l.origin.clone();
@@ -613,6 +741,7 @@ impl<'a> Analyzer<'a> {
             LogicalPlan::Limit(lim) => {
                 let l = self.visit(&lim.input);
                 let mut o = self.fresh("Limit", plan);
+                self.within_all(&o, &l);
                 o.facts = l.facts.clone();
                 o.rows = l.rows.clone();
                 o.origin = l.origin.clone();
@@ -667,6 +796,18 @@ impl<'a> Analyzer<'a> {
                     self.assert(v.le(Int::add(&parts)));
                     for part in parts {
                         self.assert(v.ge(part));
+                    }
+                }
+                // Each value is one of some input's.
+                for j in 0..o.min.len() {
+                    let ends = |ends: fn(&Rel) -> &Vec<Option<Int>>| -> Option<Vec<Int>> {
+                        inputs.iter().map(|r| ends(r).get(j).cloned().flatten()).collect()
+                    };
+                    if let (Some(lo), Some(los)) = (&o.min[j], ends(|r| &r.min)) {
+                        self.assert(lo.ge(los.iter().skip(1).fold(los[0].clone(), |a, b| min(&a, b))));
+                    }
+                    if let (Some(hi), Some(his)) = (&o.max[j], ends(|r| &r.max)) {
+                        self.assert(hi.le(his.iter().skip(1).fold(his[0].clone(), |a, b| max(&a, b))));
                     }
                 }
                 o
@@ -730,6 +871,8 @@ impl<'a> Analyzer<'a> {
                     raw.filters.clear();
                     raw.fetch = None;
                     raw_scan = Some((name, self.names_of(&s), LogicalPlan::TableScan(raw)));
+                    self.raw_ranges = (range_names(&s.min), range_names(&s.max));
+                    self.range_domains(plan, &s);
                 }
                 s
             }
@@ -744,11 +887,13 @@ impl<'a> Analyzer<'a> {
             let mut f = self.fresh("ScanFilter", plan);
             self.assert(f.card.le(&out.card));
             self.subset_ndv(&f, &out);
+            self.within_all(&f, &out);
             f.facts = out.facts.clone();
             // Filters applied inexactly may let through rows that fail them.
             if !inexact_filters(scan) {
                 for filter in &scan.filters {
                     f.facts.assume(filter, plan.schema());
+                    self.range_pairs(filter, plan, &f);
                 }
             }
             f.origin = out.origin.clone().map(|x| x.narrow(&f.facts, plan.schema()));
@@ -829,6 +974,7 @@ impl<'a> Analyzer<'a> {
         let mut o = self.fresh(kind, plan);
         self.assert(o.card.eq(&l.card));
         self.equal_ndv(&o, &l);
+        self.within_all(&o, &l);
         o.facts = l.facts.by_position(input.schema(), plan.schema());
         let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;
@@ -915,11 +1061,13 @@ impl<'a> Analyzer<'a> {
         if agg.group_expr.is_empty() {
             let mut o = self.fresh("ScalarAggregate", plan);
             self.assert(o.card.eq(int(1)));
+            self.aggregate_ranges(agg, &o, &l);
             o.facts = aggregate_facts(plan, agg, &l.facts);
             return o;
         }
         let mut o = self.fresh("GroupBy", plan);
         o.facts = aggregate_facts(plan, agg, &l.facts);
+        self.aggregate_ranges(agg, &o, &l);
         // Groups split the input's rows, so their counts sum to at most its
         // row count.
         for (i, e) in agg.aggr_expr.iter().enumerate() {
@@ -955,6 +1103,7 @@ impl<'a> Analyzer<'a> {
                 self.assert(o.card.le(p));
             }
         }
+        self.determining_column(agg, &o);
         // Grouping by a unique key leaves every row its own group.
         let cols: Option<Vec<Column>> = agg
             .group_expr
@@ -965,6 +1114,58 @@ impl<'a> Analyzer<'a> {
             self.assert(o.card.eq(&l.card));
         }
         o
+    }
+
+    /// A column that determines every key, as a key of `nation` does its
+    /// name, has at least as many values as there are groups. It may be one
+    /// of the input's, or of the rows the projections and filters below it
+    /// read: those keep fewer rows, each computed from one of them. The
+    /// first of at most 64 columns tried bounds the groups.
+    fn determining_column(&self, agg: &Aggregate, o: &Rel) {
+        let (mut node, mut keys) = (self.nodes.len() - 1, agg.group_expr.clone());
+        let mut tries = 64;
+        loop {
+            let plan = &self.nodes[node].plan;
+            for c in 0..plan.schema().fields().len() {
+                if tries == 0 {
+                    return;
+                }
+                tries -= 1;
+                let closed = self.fd_closure(plan, &[c]);
+                if keys.iter().all(|e| determined(e, plan, &closed)) {
+                    self.assert(o.card.le(Int::new_const(self.nodes[node].ndv_vars[c].as_str())));
+                    return;
+                }
+            }
+            // The keys over the operator's input.
+            keys = match plan {
+                LogicalPlan::Projection(p) => {
+                    let unprojected: Option<Vec<Expr>> = keys.iter().map(|e| unproject(e, plan, &p.expr)).collect();
+                    match unprojected {
+                        Some(k) => k,
+                        None => return,
+                    }
+                }
+                LogicalPlan::Filter(_) => keys,
+                _ => return,
+            };
+            node = self.nodes[node].inputs[0];
+        }
+    }
+
+    /// A grouping key's values, and a MIN's or MAX's, are its input's.
+    fn aggregate_ranges(&self, agg: &Aggregate, o: &Rel, l: &Rel) {
+        let groups = agg.group_expr.len();
+        for (j, e) in agg.group_expr.iter().chain(&agg.aggr_expr).enumerate() {
+            let arg = match strip_alias(e) {
+                e if j < groups => e,
+                Expr::AggregateFunction(f) if matches!(f.func.name(), "min" | "max") && f.params.args.len() == 1 => &f.params.args[0],
+                _ => continue,
+            };
+            if let Some(i) = column_index(&agg.input, arg) {
+                self.within(o, j, l, i);
+            }
+        }
     }
 
     fn join(&mut self, plan: &LogicalPlan, join: &Join) -> Rel {
@@ -1054,6 +1255,7 @@ impl<'a> Analyzer<'a> {
         self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
         self.at_most_once = (ru || fl, lu || fr);
         self.join_ndv(join, &o, &l, &r);
+        self.join_ranges(plan, join, &o, &l, &r);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
         o.rows = match join.join_type {
@@ -1269,6 +1471,46 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// A join's output values are its inputs', and matched equi-keys take
+    /// values both sides have: on an inner join, the two keys' values are
+    /// the same. Disjoint ranges leave no row with a value, so none at all.
+    fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+        let nl = l.min.len();
+        let (left, right) = match join.join_type {
+            JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => (Some(0), Some(nl)),
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => (Some(0), None),
+            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => (None, Some(0)),
+        };
+        for (side, at) in [(l, left), (r, right)] {
+            if let Some(at) = at {
+                for i in 0..side.min.len() {
+                    self.within(o, at + i, side, i);
+                }
+            }
+        }
+        if !matches!(join.join_type, JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi) {
+            return;
+        }
+        for (a, b) in &join.on {
+            let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { continue };
+            match join.join_type {
+                JoinType::Inner => {
+                    self.within(o, ia, r, ib);
+                    self.within(o, nl + ib, l, ia);
+                    if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib]) {
+                        self.assert(a_lo.eq(b_lo));
+                        self.assert(a_hi.eq(b_hi));
+                    }
+                }
+                JoinType::LeftSemi => self.within(o, ia, r, ib),
+                _ => self.within(o, ib, l, ia),
+            }
+        }
+        if let (JoinType::Inner, Some(f)) = (join.join_type, &join.filter) {
+            self.range_pairs(f, plan, o);
+        }
+    }
+
     /// NDVs of a join's output columns: values come from the inputs, plus NULL
     /// on a padded side, and equi-key columns only keep values both sides share.
     fn join_ndv(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
@@ -1339,6 +1581,67 @@ impl<'a> Analyzer<'a> {
             }
         }
     }
+}
+
+/// `e`, over the output of projection `plan` computing `exprs`, as an
+/// expression over its input. `None` if it reads what it can't rewrite.
+fn unproject(e: &Expr, plan: &LogicalPlan, exprs: &[Expr]) -> Option<Expr> {
+    let mut ok = true;
+    let out = e
+        .clone()
+        .transform_up(|x| match &x {
+            Expr::Column(c) => match plan.schema().index_of_column(c) {
+                Ok(j) => Ok(Transformed::yes(strip_alias(&exprs[j]).clone())),
+                Err(_) => {
+                    ok = false;
+                    Ok(Transformed::no(x))
+                }
+            },
+            _ => Ok(Transformed::no(x)),
+        })
+        .ok()?
+        .data;
+    ok.then_some(out)
+}
+
+/// Integers, and dates as days: the columns with min and max variables.
+fn integer_like(t: &DataType) -> bool {
+    t.is_integer() || *t == DataType::Date32
+}
+
+/// The names of `vars`, by column.
+fn range_names(vars: &[Option<Int>]) -> Vec<Option<String>> {
+    vars.iter().map(|v| v.as_ref().map(|v| v.to_string())).collect()
+}
+
+/// The names of the columns that a comparison, equi-join key or grouping
+/// key of `plan` reads. Only these get min and max variables, which add
+/// constraints at every operator: the others' would carry nothing.
+fn ranged_columns(plan: &LogicalPlan) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let _ = plan.apply_with_subqueries(|p| {
+        let mut read = |e: &Expr| out.extend(e.column_refs().into_iter().map(|c| c.name.clone()));
+        match p {
+            LogicalPlan::Join(j) => j.on.iter().for_each(|(a, b)| {
+                read(a);
+                read(b);
+            }),
+            LogicalPlan::Aggregate(a) => a.group_expr.iter().for_each(&mut read),
+            _ => {}
+        }
+        for e in p.expressions() {
+            let _ = e.apply(|x| {
+                match x {
+                    Expr::BinaryExpr(BinaryExpr { op, .. }) if op.swap().is_some() => read(x),
+                    Expr::Between(_) | Expr::InList(_) => read(x),
+                    _ => {}
+                }
+                Ok(TreeNodeRecursion::Continue)
+            });
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    out
 }
 
 /// Output column `j` of `plan`, as an expression.

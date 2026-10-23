@@ -472,3 +472,46 @@ async fn full_join_keeps_rows_with_null_keys() {
         assert_eq!(v.violation, None, "{name}");
     }
 }
+
+/// Tables `t (a, c)` and `u (b)` of integers, for range tests.
+async fn ranges() -> SessionContext {
+    let ctx = SessionContext::new();
+    for sql in [
+        "CREATE TABLE t (a INT, b INT, c INT)",
+        "INSERT INTO t VALUES (1, 2, 3), (2, 3, 4), (1, 3, 5), (4, 9, 1)",
+        "CREATE TABLE u (b INT)",
+        "INSERT INTO u VALUES (11), (12), (2)",
+    ] {
+        ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    }
+    ctx
+}
+
+/// `sql`'s bounds over [`ranges`], checked against its data.
+async fn ranged(sql: &str) -> Bounds {
+    let ctx = ranges().await;
+    let a = analyze_sql(&ctx, sql).await.unwrap();
+    assert_eq!(a.validate(&ctx).await.unwrap().violation, None, "{sql}");
+    let b = a.bounds().unwrap();
+    println!("{sql}\n  {b}");
+    b
+}
+
+/// Equi-join keys take the same values on both sides, so sides whose
+/// ranges cannot meet join to nothing: whether a literal bounds a key, or a
+/// column it is less than.
+#[tokio::test]
+async fn disjoint_key_ranges_join_to_nothing() {
+    let b = ranged("SELECT * FROM t JOIN u ON t.a = u.b WHERE t.a < 5 AND u.b > 10").await;
+    assert_eq!(b.constant, Some(0));
+    let b = ranged("SELECT * FROM t JOIN u ON t.a = u.b WHERE t.a < t.c AND t.c <= 5 AND u.b > 10").await;
+    assert_eq!(b.constant, Some(0));
+}
+
+/// `a < b` puts `a` below `b`'s greatest value: with `1 <= a` and `b <= 3`,
+/// `a` is 1 or 2.
+#[tokio::test]
+async fn a_column_below_another_takes_fewer_values() {
+    let b = ranged("SELECT DISTINCT a FROM t WHERE 1 <= a AND b <= 3 AND a < b").await;
+    assert_eq!(b.constant, Some(2));
+}

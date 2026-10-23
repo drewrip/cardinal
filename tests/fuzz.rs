@@ -398,7 +398,7 @@ async fn check_mode(
                 a.plan
             ));
         }
-        let declared = a.smtlib.matches("(declare-fun op").count();
+        let declared = common::operator_vars(&a.smtlib);
         stats.operators = stats.operators.max(declared);
         stats.executions += 1;
         if let Some(op) = &v.violation {

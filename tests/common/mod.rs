@@ -753,7 +753,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                 failures.push(format!("{}: verdict changed on {dname}", case.name));
             }
             let v = a.validate(ctx).await.unwrap();
-            let declared = a.smtlib.matches("(declare-fun op").count();
+            let declared = operator_vars(&a.smtlib);
             nodes = format!("{}/{declared}", v.rows.len());
             // Every operator must be checked against real data; only a recursive
             // CTE's recursive branch (which reads its work table) cannot run alone.
@@ -833,6 +833,21 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The variables `smtlib` declares for operators' rows and distinct counts,
+/// which validation pins: not the ends of their columns' values
+/// (`op…_c{j}_min`), free where a column has none.
+pub fn operator_vars(smtlib: &str) -> usize {
+    let range = |name: &str| {
+        let Some(rest) = name.strip_suffix("_min").or_else(|| name.strip_suffix("_max")) else { return false };
+        rest.rsplit_once("_c").is_some_and(|(_, j)| !j.is_empty() && j.bytes().all(|b| b.is_ascii_digit()))
+    };
+    smtlib
+        .lines()
+        .filter_map(|l| l.strip_prefix("(declare-fun ")?.split(' ').next())
+        .filter(|name| name.starts_with("op") && !range(name))
+        .count()
 }
 
 /// Default options, plus the selectivity formula.

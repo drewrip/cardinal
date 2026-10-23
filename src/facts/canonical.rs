@@ -89,6 +89,10 @@ impl FactKind {
                 terms(keys, &mut read, &mut values);
                 vec![over]
             }
+            FactKind::Min { key, over } | FactKind::Max { key, over } => {
+                terms(&[key.clone()].into(), &mut read, &mut values);
+                vec![over]
+            }
         };
         for c in &contexts {
             rewrite::reads(c, &mut read, &mut values);
@@ -103,6 +107,8 @@ impl FactKind {
             FactKind::Match { on, kept, other } => FactKind::Match { on: on.clone(), kept: f(kept), other: f(other) },
             FactKind::Distinct { keys, over } => FactKind::Distinct { keys: keys.clone(), over: f(over) },
             FactKind::Unique { keys, over } => FactKind::Unique { keys: keys.clone(), over: f(over) },
+            FactKind::Min { key, over } => FactKind::Min { key: key.clone(), over: f(over) },
+            FactKind::Max { key, over } => FactKind::Max { key: key.clone(), over: f(over) },
         })
     }
 
@@ -143,6 +149,14 @@ impl FactKind {
                 let over = over.rename(&f);
                 FactKind::Unique { keys: rewrite::keys(&over, &terms(keys)), over }
             }
+            FactKind::Min { key, over } | FactKind::Max { key, over } => {
+                let over = over.rename(&f);
+                let key = rewrite::keys(&over, &[key.rename(&f)].into()).into_iter().next().unwrap_or_else(|| key.rename(&f));
+                match self {
+                    FactKind::Min { .. } => FactKind::Min { key, over },
+                    _ => FactKind::Max { key, over },
+                }
+            }
         }
     }
 
@@ -168,6 +182,10 @@ impl FactKind {
             FactKind::Distinct { keys, over } | FactKind::Unique { keys, over } => {
                 context_instances(over, &mut out);
                 terms(&mut keys.iter(), &mut out);
+            }
+            FactKind::Min { key, over } | FactKind::Max { key, over } => {
+                context_instances(over, &mut out);
+                terms(&mut std::iter::once(key), &mut out);
             }
         }
         out

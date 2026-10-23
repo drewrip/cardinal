@@ -110,6 +110,10 @@ fn wanted(kind: &FactKind, facts: &FactSet) -> BTreeSet<String> {
             terms.extend(keys);
             context(over, &mut terms);
         }
+        FactKind::Min { key, over } | FactKind::Max { key, over } => {
+            terms.push(key);
+            context(over, &mut terms);
+        }
     }
     let mut out = BTreeSet::new();
     let mut todo: Vec<String> = terms.iter().flat_map(|t| values_read(&t.expr)).collect();
@@ -165,6 +169,15 @@ impl Render<'_> {
             FactKind::Cardinality(c) => Counts { value: count(c)?, of: None },
             FactKind::Distinct { keys, over } => Counts { value: distinct(keys, over)?, of: None },
             FactKind::Unique { keys, over } => Counts { value: distinct(keys, over)?, of: Some(count(over)?) },
+            // With no value, the least is above every floor and the greatest
+            // below every bound: the values are non-negative integers.
+            FactKind::Min { key, over } => Counts {
+                value: format!("SELECT coalesce(min({}), {}) FROM {}", r.expr(key)?, i64::MAX, r.from(over)?),
+                of: None,
+            },
+            FactKind::Max { key, over } => {
+                Counts { value: format!("SELECT coalesce(max({}), 0) FROM {}", r.expr(key)?, r.from(over)?), of: None }
+            }
             FactKind::Selectivity { pred, over } => Counts {
                 value: format!("SELECT count(*) FROM {} WHERE {}", r.from(over)?, r.conjunction(pred)?),
                 of: Some(count(over)?),

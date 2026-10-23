@@ -153,6 +153,11 @@ pub enum FactKind {
     Distinct { keys: BTreeSet<Term>, over: Context },
     /// `keys` take a different value in each of `over`'s rows. Its value is 1.
     Unique { keys: BTreeSet<Term>, over: Context },
+    /// `min(key | over)`: the least non-NULL value of `key` in `over`'s
+    /// rows, an integer (a date as days). Known only by its bounds so far.
+    Min { key: Term, over: Context },
+    /// `max(key | over)`: the greatest.
+    Max { key: Term, over: Context },
 }
 
 impl FactKind {
@@ -161,7 +166,9 @@ impl FactKind {
     /// value: a share of no rows, or keys that are not unique.
     pub fn counted(&self, value: u64, of: Option<u64>) -> Option<Fact> {
         let value = match (self, of) {
-            (FactKind::Cardinality(_) | FactKind::Distinct { .. }, _) => Ratio::int(value),
+            (FactKind::Cardinality(_) | FactKind::Distinct { .. } | FactKind::Min { .. } | FactKind::Max { .. }, _) => {
+                Ratio::int(value)
+            }
             (FactKind::Unique { .. }, Some(of)) if value == of => Ratio::int(1),
             (FactKind::Selectivity { .. } | FactKind::Match { .. }, Some(of)) => Ratio::new(value, of)?,
             _ => return None,
@@ -178,6 +185,8 @@ impl fmt::Display for FactKind {
             FactKind::Match { on, kept, other } => write!(f, "m({} | {kept} ⋉ {other})", join(on, " and ")),
             FactKind::Distinct { keys, over } => write!(f, "ndv({} | {over})", join(keys, ", ")),
             FactKind::Unique { keys, over } => write!(f, "unique({} | {over})", join(keys, ", ")),
+            FactKind::Min { key, over } => write!(f, "min({key} | {over})"),
+            FactKind::Max { key, over } => write!(f, "max({key} | {over})"),
         }
     }
 }
@@ -236,12 +245,14 @@ pub struct Conflict {
 pub struct FactSet {
     #[serde(serialize_with = "serialize::values", deserialize_with = "facts")]
     facts: BTreeMap<FactKind, Fact>,
-    /// The least upper bound seen on each size or distinct count: the rows
-    /// of an operator that may have let through more than its context's.
+    /// The least upper bound seen on each size, distinct count or greatest
+    /// value: the rows of an operator that may have let through more than
+    /// its context's, or the values a runtime filter let through.
     #[serde(serialize_with = "serialize::values", deserialize_with = "bounds")]
     bounds: BTreeMap<FactKind, Fact>,
-    /// The greatest lower bound seen on each size: the rows of an operator
-    /// that may have kept fewer than its context's.
+    /// The greatest lower bound seen on each size, distinct count or least
+    /// value: the rows of an operator that may have kept fewer than its
+    /// context's, or the values a runtime filter let through.
     #[serde(serialize_with = "serialize::values", deserialize_with = "floors")]
     floors: BTreeMap<FactKind, Fact>,
     /// What each aggregate value the facts read is, by name.
