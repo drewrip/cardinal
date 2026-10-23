@@ -6,11 +6,13 @@
 //! operator whose rows an engine did not count still has the rows its state
 //! says: its facts are named, without a value, for a query to count.
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::JoinType;
+use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, State, Value, Values, states_hidden, stopped};
+use super::context::{Context, State, Value, Values, join_keys, states_hidden, stopped};
 use super::{Fact, FactKind, Origin, Ratio};
-use crate::observed::{ObservedPlan, Op};
+use crate::observed::{ObservedPlan, Op, column_key};
 
 pub trait FactRule: Sync {
     fn name(&self) -> &'static str;
@@ -55,6 +57,12 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Observed {
         value,
         origins: vec![Origin::Observed { query: plan.name.clone(), node, rule: rule.into() }],
     };
+    let mut parents = vec![vec![]; plan.nodes.len()];
+    for (i, n) in plan.nodes.iter().enumerate() {
+        for &c in &n.children {
+            parents[c].push(i);
+        }
+    }
     for node in 0..plan.nodes.len() {
         for rule in RULES {
             let mut out = vec![];
@@ -68,6 +76,10 @@ pub(crate) fn observe(plan: &ObservedPlan) -> Observed {
         }
         bounds.extend(upper_bound(&obs, node).map(|(kind, value)| fact(kind, value, node, "upper bound")));
         floors.extend(lower_bound(&obs, node).map(|(kind, value)| fact(kind, value, node, "lower bound")));
+        for (kind, value, floor) in build_distinct(&obs, &parents, node) {
+            let f = fact(kind, value, node, "build keys");
+            if floor { floors.push(f) } else { bounds.push(f) }
+        }
     }
     Observed { facts, bounds, floors, unobserved, values: obs.values.definitions() }
 }
@@ -87,13 +99,13 @@ fn upper_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
     let out = rows(obs, node)?;
     if let State::Pending(..) = obs.states[node] {
         let ctx = obs.states[node].upper()?;
-        return Some((FactKind::Cardinality(ctx.clone()), Ratio::int(out)));
+        return Some((FactKind::Cardinality(ctx), Ratio::int(out)));
     }
     let Op::Aggregate { keys, .. } = &n.op else { return None };
     let input = &obs.states[n.children[0]];
     let (State::Pending(..), Some(over)) = (input, input.upper()) else { return None };
     let keys = obs.values.keys(node, keys).filter(|k| !k.is_empty())?;
-    Some((FactKind::Distinct { keys, over: over.clone() }, Ratio::int(out)))
+    Some((FactKind::Distinct { keys, over }, Ratio::int(out)))
 }
 
 /// `|ctx| >= rows` for an operator whose rows may be fewer than its
@@ -104,6 +116,92 @@ fn lower_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
     let State::Pending(..) = obs.states[node] else { return None };
     let ctx = obs.states[node].lower()?;
     Some((FactKind::Cardinality(ctx.clone()), Ratio::int(out)))
+}
+
+/// The distinct keys of a join's build side, read off the runtime filters
+/// it pushed into scan `node` on its probe side, as bounds (`false`) and
+/// floors (`true`). The filters are built from every non-NULL build key: an
+/// IN list holds each of them, `=k` the only one, and a range spans them.
+/// So `ndv(y | build)` is at least an IN list's length, and at most one more
+/// (NULL), or two more than an integer range's width. Only where one join
+/// can have built them: the only join on the column above the scan, which
+/// has it on its probe side, equal to a column of its build side.
+fn build_distinct(obs: &Observation, parents: &[Vec<usize>], node: usize) -> Vec<(FactKind, Ratio, bool)> {
+    let Op::Scan { runtime_filters, .. } = &obs.plan.nodes[node].op else { return vec![] };
+    let mut out = vec![];
+    let columns: std::collections::BTreeSet<&String> = runtime_filters.iter().filter_map(|r| r.column.as_ref()).collect();
+    for column in columns {
+        // The joins on the column above the scan, and whether the scan is on
+        // each one's probe side. Above an operator read twice, any could be.
+        let (mut at, mut joins) = (node, vec![]);
+        let whole = loop {
+            match &parents[at][..] {
+                [] => break true,
+                [p] => {
+                    if let Op::Join { on, .. } = &obs.plan.nodes[*p].op
+                        && join_keys(on).contains(column)
+                    {
+                        joins.push((*p, obs.plan.nodes[*p].children[0] == at));
+                    }
+                    at = *p;
+                }
+                _ => break false,
+            }
+        };
+        let (true, [(j, true)]) = (whole, &joins[..]) else { continue };
+        let Op::Join { kind: JoinType::Inner | JoinType::LeftSemi | JoinType::Right, on } = &obs.plan.nodes[*j].op else { continue };
+        let Some(build) = obs.states[obs.plan.nodes[*j].children[1]].clean() else { continue };
+        // The build side's column equal to this one, in the only condition
+        // on it: another (`x < z`) pushes a filter of its own.
+        let reads = |p: &crate::observed::Pred| p.expr.as_ref().is_some_and(|e| e.column_refs().iter().any(|c| column_key(c) == *column));
+        if on.iter().filter(|p| reads(p)).count() != 1 {
+            continue;
+        }
+        let key = on.iter().find_map(|p| match &p.expr {
+            Some(Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right })) => match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(a), b @ Expr::Column(_)) if column_key(a) == *column => Some(b.clone()),
+                (a @ Expr::Column(_), Expr::Column(b)) if column_key(b) == *column => Some(a.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let Some(keys) = key.and_then(|k| obs.values.keys(*j, &[Some(k)])) else { continue };
+        let (mut listed, mut lo, mut hi) = (None, None, None);
+        for r in runtime_filters.iter().filter(|r| r.column.as_ref() == Some(column)) {
+            match &r.expr {
+                Some(Expr::InList(l)) if !l.negated && l.list.iter().all(|v| matches!(v, Expr::Literal(..))) => listed = Some(l.list.len() as u64),
+                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::Eq, right, .. })) if matches!(right.as_ref(), Expr::Literal(..)) => listed = Some(1),
+                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::GtEq, right, .. })) => lo = integer(right),
+                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::LtEq, right, .. })) => hi = integer(right),
+                _ => {}
+            }
+        }
+        let kind = FactKind::Distinct { keys, over: build.clone() };
+        if let Some(n) = listed {
+            if n > 1 {
+                out.push((kind.clone(), Ratio::int(n), true));
+            }
+            out.push((kind, Ratio::int(n + 1), false));
+        } else if let (Some(a), Some(b)) = (lo, hi)
+            && a <= b
+            && let Ok(width) = u64::try_from(b as i128 - a as i128 + 2)
+        {
+            out.push((kind, Ratio::int(width), false));
+        }
+    }
+    out
+}
+
+/// The value of an integer literal.
+fn integer(e: &Expr) -> Option<i64> {
+    let Expr::Literal(v, _) = e else { return None };
+    if !v.data_type().is_integer() {
+        return None;
+    }
+    match v.cast_to(&DataType::Int64).ok()? {
+        datafusion::common::ScalarValue::Int64(n) => n,
+        _ => None,
+    }
 }
 
 /// An input's clean context, and its rows, if they were counted.

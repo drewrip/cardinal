@@ -400,13 +400,17 @@ impl Builder<'_> {
                 self.pred(&t.replace("optional: ", ""), &all, false, optional)
             })
             .collect();
+        // A bloom filter (`x IN BF(y)`) does not read as an expression.
         let runtime_filters = strings(info, "Dynamic Filters")
             .iter()
-            .flat_map(|t| t.split(" AND ").map(|t| t.trim().trim_start_matches("optional: ").to_string()).collect::<Vec<_>>())
-            .map(|text| {
+            .flat_map(|t| t.split(" AND ").map(|t| t.trim().to_string()).collect::<Vec<_>>())
+            .map(|t| {
+                let optional = t.starts_with("optional: ");
+                let text = t.trim_start_matches("optional: ").to_string();
                 let name: String = text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                 let column = matches!(base(&name), Lineage::Exact(_)).then(|| format!("{instance}.{name}"));
-                RuntimeFilter { column, text }
+                let expr = self.read(&text, &all, false);
+                RuntimeFilter { column, text, optional, expr }
             })
             .collect();
         (Op::Scan { table, instance, filters, runtime_filters }, columns, true)

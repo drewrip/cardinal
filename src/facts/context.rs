@@ -375,8 +375,11 @@ pub enum Pending {
     /// output is the same whether or not it pruned, since it only removes
     /// rows without a partner. `subset` while the rows are still among the
     /// context's: every operator since the scan keeps fewer rows for fewer
-    /// input.
-    Join { column: Option<String>, text: String, subset: bool },
+    /// input. `expr` is its predicate, if it read as one (a bloom filter's
+    /// does not). `superset` while the rows still hold every row of the
+    /// context satisfying it: it drops no row with a partner, and every
+    /// operator since the scan keeps more rows for more input.
+    Join { column: Option<String>, text: String, subset: bool, expr: Option<Term>, superset: bool },
     /// An optional filter pushed into a scan, which may have let through rows
     /// that fail it: the rows are all of the context's, and maybe more, until
     /// a filter above checks the same predicate. `None` if it did not resolve.
@@ -386,22 +389,34 @@ pub enum Pending {
 impl Pending {
     fn rename(&self, f: &dyn Fn(&str) -> Option<String>) -> Pending {
         match self {
-            Pending::Join { column, text, subset } => Pending::Join {
+            Pending::Join { column, text, subset, expr, superset } => Pending::Join {
                 column: column.as_ref().map(|c| match c.rsplit_once('.') {
                     Some((r, n)) => format!("{}.{n}", f(r).unwrap_or_else(|| r.to_string())),
                     None => c.clone(),
                 }),
                 text: text.clone(),
                 subset: *subset,
+                expr: expr.as_ref().map(|t| t.rename(f)),
+                superset: *superset,
             },
             Pending::Filter { term, text } => Pending::Filter { term: term.as_ref().map(|t| t.rename(f)), text: text.clone() },
         }
     }
 
-    /// This filter, once the rows may no longer be among the context's.
+    /// This filter, once the rows may no longer be among the context's,
+    /// nor hold all of those satisfying it.
     fn loosened(self) -> Pending {
         match self {
-            Pending::Join { column, text, .. } => Pending::Join { column, text, subset: false },
+            Pending::Join { column, text, expr, .. } => Pending::Join { column, text, subset: false, expr, superset: false },
+            p => p,
+        }
+    }
+
+    /// This filter, once the rows may no longer hold every row of the
+    /// context satisfying it.
+    fn narrowed(self) -> Pending {
+        match self {
+            Pending::Join { column, text, subset, expr, .. } => Pending::Join { column, text, subset, expr, superset: false },
             p => p,
         }
     }
@@ -410,6 +425,12 @@ impl Pending {
 /// `pending`, once the rows may no longer be among the context's.
 fn loosened(pending: BTreeSet<Pending>) -> BTreeSet<Pending> {
     pending.into_iter().map(Pending::loosened).collect()
+}
+
+/// `pending`, once the rows may no longer hold all of the context's that
+/// satisfy its runtime filters.
+fn narrowed(pending: BTreeSet<Pending>) -> BTreeSet<Pending> {
+    pending.into_iter().map(Pending::narrowed).collect()
 }
 
 /// What an operator's rows are.
@@ -433,12 +454,27 @@ impl State {
 
     /// A context whose rows are among these: the rows are its, and maybe
     /// more, so `|context| <=` their count. Clean rows are exactly the
-    /// context's; pending ones are a superset when every pending filter is a
-    /// pushed filter that resolved, since none removed a row of the context.
-    pub fn upper(&self) -> Option<&Context> {
+    /// context's. Pending ones hold all of the context's when every pending
+    /// filter is a pushed filter that resolved, since none removed a row of
+    /// it. A runtime filter may have removed some, but none that satisfy
+    /// it: the rows hold those of the context satisfying every runtime
+    /// filter's predicate, while each is `superset`.
+    pub fn upper(&self) -> Option<Context> {
         match self {
-            State::Clean(c) => Some(c),
-            State::Pending(c, p) if p.iter().all(|p| matches!(p, Pending::Filter { term: Some(_), .. })) => Some(c),
+            State::Clean(c) => Some(c.clone()),
+            State::Pending(c, p) => {
+                let mut runtime = BTreeSet::new();
+                for p in p {
+                    match p {
+                        Pending::Filter { term: Some(_), .. } => {}
+                        Pending::Join { expr: Some(t), superset: true, .. } => {
+                            runtime.insert(t.clone());
+                        }
+                        _ => return None,
+                    }
+                }
+                Some(c.filter(&runtime))
+            }
             _ => None,
         }
     }
@@ -826,9 +862,17 @@ fn state(
                 Ok(p) => p,
                 Err(t) => return State::Tainted(t),
             };
+            // DuckDB 1.5.0 pushes a bloom filter before it is filled, so it
+            // may drop rows with a partner: beside one, no runtime filter
+            // keeps every row satisfying it.
+            let superset = runtime_filters.iter().all(|r| r.expr.is_some());
             let mut pending: BTreeSet<Pending> = runtime_filters
                 .iter()
-                .map(|r| Pending::Join { column: r.column.clone(), text: r.text.clone(), subset: true })
+                .map(|r| {
+                    let expr = r.expr.as_ref().and_then(|e| values.settle(i, e)).map(Term::new);
+                    let superset = superset && expr.is_some();
+                    Pending::Join { column: r.column.clone(), text: r.text.clone(), subset: true, expr, superset }
+                })
                 .collect();
             for p in optional {
                 let term = p.expr.map(Term::new);
@@ -931,6 +975,7 @@ fn state(
                 JoinType::Full => (false, false),
             };
             let (lp, rp) = (if l_sub { lp } else { loosened(lp) }, if r_sub { rp } else { loosened(rp) });
+            let (lp, rp) = (if l_more { lp } else { narrowed(lp) }, if r_more { rp } else { narrowed(rp) });
             // The join enforces the runtime filters on its keys, where the
             // rows it prunes are ones it would drop anyway.
             let mut pending: BTreeSet<Pending> = lp.union(&rp).cloned().collect();
@@ -985,7 +1030,7 @@ fn state(
     }
 }
 
-fn join_keys(on: &[Pred]) -> BTreeSet<String> {
+pub(super) fn join_keys(on: &[Pred]) -> BTreeSet<String> {
     on.iter()
         .filter_map(|p| p.expr.as_ref())
         .flat_map(|e| e.column_refs().into_iter().map(column_key).collect::<Vec<_>>())

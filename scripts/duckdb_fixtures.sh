@@ -49,4 +49,6 @@ duckdb "$db" -json < "$out/expected.sql" > "$out/expected.json"
 
 # Every fact the tests derive that counts rows of base tables, counted.
 (cd "$root" && cargo test -q --test facts dump_fact_queries > /dev/null)
-duckdb "$db" -json < "$out/fact_checks.sql" > "$out/fact_checks.json"
+# DuckDB 1.5.0's common_subplan optimizer gives two counts over the same rows
+# one value (see tests/live/mod.rs).
+{ echo "SET disabled_optimizers = 'common_subplan';"; cat "$out/fact_checks.sql"; } | duckdb "$db" -json > "$out/fact_checks.json"

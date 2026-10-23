@@ -116,7 +116,7 @@ pub fn values(db: &PathBuf, queries: &[String]) -> Vec<Result<u64, String>> {
     for chunk in queries.chunks(150) {
         let base = out.len();
         let union: Vec<String> = chunk.iter().enumerate().map(|(i, q)| format!("SELECT {} AS id, ({q}) AS v", base + i)).collect();
-        match run(db, &format!("{};\n", union.join("\nUNION ALL ")), &["-readonly", "-json"]) {
+        match run(db, &format!("{SEPARATE}{};\n", union.join("\nUNION ALL ")), &["-readonly", "-json"]) {
             Ok(json) => {
                 let rows: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_else(|e| panic!("{e}: {json}"));
                 let mut got: HashMap<u64, Option<u64>> = HashMap::new();
@@ -142,6 +142,12 @@ pub fn values(db: &PathBuf, queries: &[String]) -> Vec<Result<u64, String>> {
     }
     out
 }
+
+/// Counts in one statement are computed apart. DuckDB 1.5.0's
+/// `common_subplan` optimizer gives two subqueries over the same rows, of
+/// different columns, one value: `ndv(l_suppkey | …)` reads as
+/// `ndv(l_orderkey | …)` beside it.
+pub const SEPARATE: &str = "SET disabled_optimizers = 'common_subplan';\n";
 
 /// PostgreSQL, through `psql`, which connects as its environment says
 /// (`PGHOST`, `PGPORT`, `PGUSER`, ...).

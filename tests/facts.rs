@@ -271,6 +271,52 @@ async fn pruned_rows_give_floors() {
     assert!(!facts.floors().any(|f| f.kind.to_string().contains("Left join")), "{facts}");
 }
 
+/// A runtime filter drops no row with a partner, so a scan it pruned holds
+/// every row of its table satisfying it: the rows bound that many. A bloom
+/// filter beside it gives no bound: DuckDB 1.5.0 pushes it before it is
+/// filled. Its join's build side has at least as many distinct keys as an
+/// IN list has values, and at most one more (NULL).
+#[tokio::test]
+async fn runtime_filters_give_upper_bounds() {
+    let catalog = catalog().await;
+    let scan = |table: &str, cols: Value, rows, dynamic: Option<&str>| {
+        let mut info = json!({"Table": format!("tpch.main.{table}"), "Projections": cols});
+        if let Some(d) = dynamic {
+            info["Dynamic Filters"] = json!(d);
+        }
+        node("TABLE_SCAN", rows, info, vec![])
+    };
+    let joined = |dynamic: &str| {
+        let probe = scan("customer", json!(["c_custkey", "c_nationkey"]), 300, Some(dynamic));
+        let join = node(
+            "HASH_JOIN",
+            290,
+            json!({"Join Type": "INNER", "Conditions": "c_nationkey = n_nationkey"}),
+            vec![probe, scan("nation", json!(["n_nationkey"]), 5, None)],
+        );
+        derive_facts(&[from_duckdb(&catalog, "dynamic", &join.to_string(), None).unwrap()])
+    };
+
+    let range = joined("optional: c_nationkey>=8 AND optional: c_nationkey<=21");
+    assert_eq!(bound(&range, "|customer where customer.c_nationkey <= 21 and customer.c_nationkey >= 8|"), 300);
+    assert_eq!(floor(&range, "|customer|"), Some(300));
+    assert_eq!(bound(&range, "ndv(nation.n_nationkey | nation)"), 15);
+
+    let listed = joined("optional: c_nationkey IN (8, 9, 12, 18, 21) AND optional: c_nationkey>=8 AND optional: c_nationkey<=21");
+    let ndv = "ndv(nation.n_nationkey | nation)";
+    assert_eq!(bound(&listed, ndv), 6, "{listed}");
+    assert_eq!(floor(&listed, ndv), Some(5), "{listed}");
+    assert!(listed.bounds().any(|b| b.kind.to_string().contains("customer.c_nationkey = 12") && b.value == Ratio::int(300)), "{listed}");
+
+    let single = joined("c_nationkey=7");
+    assert_eq!(bound(&single, "|customer where customer.c_nationkey = 7|"), 300);
+    assert_eq!(bound(&single, ndv), 2);
+
+    let bloom = joined("optional: c_nationkey>=8 AND optional: c_nationkey<=21 AND optional: c_nationkey IN BF(n_nationkey)");
+    assert!(!bloom.bounds().any(|b| b.kind.to_string().contains("customer")), "{bloom}");
+    assert_eq!(floor(&bloom, "|customer|"), Some(300));
+}
+
 /// A required filter pushed into a scan gives a fact on its table. An
 /// optional one gives only a bound, until a filter above checks it: then
 /// the filter's rows give the fact on the table it was pushed into.

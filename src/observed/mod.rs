@@ -136,6 +136,10 @@ pub struct RuntimeFilter {
     /// The `table.column` it filters, if known.
     pub column: Option<String>,
     pub text: String,
+    /// The engine may or may not have applied it: it only prunes.
+    pub optional: bool,
+    /// The predicate, if it could be read: not a bloom filter's.
+    pub expr: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
