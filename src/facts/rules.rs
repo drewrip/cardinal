@@ -129,7 +129,10 @@ fn lower_bound(obs: &Observation, node: usize) -> Option<(FactKind, Ratio)> {
 /// So `ndv(y | build)` is at least an IN list's length, and at most one more
 /// (NULL), or two more than an integer range's width. Only where one join
 /// can have built them: the only join on the column above the scan, which
-/// has it on its probe side, equal to a column of its build side.
+/// has it on its probe side, equal to a column of its build side. DuckDB
+/// also pushes through a UNION, and a join whose condition didn't resolve
+/// may be on the column too, so neither may be above the scan; and one
+/// join pushes one filter of each form.
 fn build_distinct(obs: &Observation, parents: &[Vec<usize>], node: usize) -> Vec<(FactKind, Ratio, bool)> {
     let Op::Scan { runtime_filters, .. } = &obs.plan.nodes[node].op else { return vec![] };
     let mut out = vec![];
@@ -142,10 +145,13 @@ fn build_distinct(obs: &Observation, parents: &[Vec<usize>], node: usize) -> Vec
             match &parents[at][..] {
                 [] => break true,
                 [p] => {
-                    if let Op::Join { on, .. } = &obs.plan.nodes[*p].op
-                        && join_keys(on).contains(column)
-                    {
-                        joins.push((*p, obs.plan.nodes[*p].children[0] == at));
+                    match &obs.plan.nodes[*p].op {
+                        Op::Union => break false,
+                        Op::Join { on, .. } if on.iter().any(|p| p.expr.is_none()) => break false,
+                        Op::Join { on, .. } if join_keys(on).contains(column) => {
+                            joins.push((*p, obs.plan.nodes[*p].children[0] == at));
+                        }
+                        _ => {}
                     }
                     at = *p;
                 }
@@ -171,14 +177,27 @@ fn build_distinct(obs: &Observation, parents: &[Vec<usize>], node: usize) -> Vec
         });
         let Some(keys) = key.and_then(|k| obs.values.keys(*j, &[Some(k)])) else { continue };
         let (mut listed, mut lo, mut hi) = (None, None, None);
+        let mut twice = false;
+        fn set<T>(slot: &mut Option<T>, v: T, twice: &mut bool) {
+            *twice |= slot.is_some();
+            *slot = Some(v);
+        }
         for r in runtime_filters.iter().filter(|r| r.column.as_ref() == Some(column)) {
             match &r.expr {
-                Some(Expr::InList(l)) if !l.negated && l.list.iter().all(|v| matches!(v, Expr::Literal(..))) => listed = Some(l.list.len() as u64),
-                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::Eq, right, .. })) if matches!(right.as_ref(), Expr::Literal(..)) => listed = Some(1),
-                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::GtEq, right, .. })) => lo = integer(right),
-                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::LtEq, right, .. })) => hi = integer(right),
+                Some(Expr::InList(l)) if !l.negated && l.list.iter().all(|v| matches!(v, Expr::Literal(..))) => {
+                    set(&mut listed, l.list.len() as u64, &mut twice)
+                }
+                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::Eq, right, .. })) if matches!(right.as_ref(), Expr::Literal(..)) => {
+                    set(&mut listed, 1, &mut twice)
+                }
+                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::GtEq, right, .. })) => set(&mut lo, integer(right), &mut twice),
+                Some(Expr::BinaryExpr(BinaryExpr { op: Operator::LtEq, right, .. })) => set(&mut hi, integer(right), &mut twice),
                 _ => {}
             }
+        }
+        let (lo, hi) = (lo.flatten(), hi.flatten());
+        if twice {
+            continue;
         }
         let kind = FactKind::Distinct { keys, over: build.clone() };
         if let Some(n) = listed {
@@ -207,7 +226,7 @@ fn build_distinct(obs: &Observation, parents: &[Vec<usize>], node: usize) -> Vec
 /// the side a semi join keeps: elsewhere the column may be NULL, or gone.
 fn join_domain(obs: &Observation, node: usize) -> Vec<(FactKind, Ratio, bool)> {
     let n = &obs.plan.nodes[node];
-    let Op::Join { kind, .. } = &n.op else { return vec![] };
+    let Op::Join { kind, on } = &n.op else { return vec![] };
     let sides = match kind {
         JoinType::Inner => &n.children[..],
         JoinType::LeftSemi => &n.children[..1],
@@ -242,7 +261,16 @@ fn join_domain(obs: &Observation, node: usize) -> Vec<(FactKind, Ratio, bool)> {
         if let Some(hi) = hi.and_then(|v| u64::try_from(v).ok()) {
             out.push((FactKind::Max { key: key.clone(), over: ctx.clone() }, Ratio::int(hi), false));
         }
-        if let Some(n) = listed {
+        // NULL is one more value, unless this join's equality on the column
+        // drops it: another condition on it (`OR`, IS NOT DISTINCT FROM) may
+        // not.
+        let equal = on.iter().any(|p| match &p.expr {
+            Some(Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right })) => {
+                [left, right].iter().any(|e| matches!(e.as_ref(), Expr::Column(c) if column_key(c) == *column))
+            }
+            _ => false,
+        });
+        if let (Some(n), true) = (listed, equal) {
             out.push((FactKind::Distinct { keys: [key].into(), over: ctx.clone() }, Ratio::int(n), false));
         }
     }

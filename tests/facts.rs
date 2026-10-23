@@ -308,6 +308,10 @@ async fn runtime_filters_give_upper_bounds() {
     assert_eq!(floor(&listed, ndv), Some(5), "{listed}");
     assert!(listed.bounds().any(|b| b.kind.to_string().contains("customer.c_nationkey = 12") && b.value == Ratio::int(300)), "{listed}");
 
+    // Two ranges: two joins built them, whichever this one is.
+    let two = joined("optional: c_nationkey>=8 AND optional: c_nationkey<=21 AND optional: c_nationkey>=1 AND optional: c_nationkey<=30");
+    assert!(two.bounds().all(|b| b.kind.to_string() != ndv), "{two}");
+
     let single = joined("c_nationkey=7");
     assert_eq!(bound(&single, "|customer where customer.c_nationkey = 7|"), 300);
     assert_eq!(bound(&single, ndv), 2);
