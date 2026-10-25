@@ -64,6 +64,17 @@ pub(crate) fn fewer(a: &Context, b: &Context) -> bool {
         }
 }
 
+/// True if GROUP BY `a` has no more groups than GROUP BY `b`: the same keys
+/// over rows among `b`'s input's ([`subset`]). Fewer rows can only drop
+/// groups, so `b`'s distinct count bounds `a`'s.
+pub(crate) fn groups_among(a: &Context, b: &Context) -> bool {
+    let (Context::Derived { op: oa, args: ka, inputs: ia }, Context::Derived { op: ob, args: kb, inputs: ib }) = (a, b)
+    else {
+        return false;
+    };
+    oa == "group" && ob == "group" && ka == kb && ia.len() == 1 && ib.len() == 1 && subset(&ia[0], &ib[0])
+}
+
 /// [`subset`]'s test of a condition `f` of the narrower rows against `e`,
 /// one of the wider rows'.
 fn stricter(f: &Exists, e: &Exists) -> bool {

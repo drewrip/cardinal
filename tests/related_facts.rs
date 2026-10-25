@@ -240,3 +240,19 @@ async fn wider_rows_bound_narrower_above() {
     }
     assert_eq!(informed(SEVEN, &facts, FactMode::Pinned).await.1.1, Some(count(JOIN).await));
 }
+
+#[tokio::test]
+async fn a_groups_distinct_count_over_wider_rows_bounds_it() {
+    // dee's p10 meter_daily: the plan showed the groups of the join without
+    // a filter the engine proved redundant, which the query still has.
+    let keys = terms([col("products.category"), col("sales.store")]);
+    let wide = "SELECT DISTINCT p.category, s.store FROM sales s JOIN products p ON s.product_id = p.id";
+    let mut facts = sizes(&["sales", "products"]).await;
+    let kind = FactKind::Distinct { keys, over: joined() };
+    facts.insert(Fact { kind: kind.canonical(), value: Ratio::int(count(wide).await), origins: vec![Origin::Counted] });
+    let sql = "SELECT p.category, s.store, count(*) FROM sales s JOIN products p ON s.product_id = p.id
+               WHERE p.id > 1 GROUP BY p.category, s.store";
+    let (i, range) = informed(sql, &facts, FactMode::Pinned).await;
+    assert_eq!(range.1, Some(count(wide).await), "{i}");
+    assert!(count(wide).await < count(JOIN).await);
+}

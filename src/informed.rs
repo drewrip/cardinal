@@ -26,7 +26,7 @@ use z3::ast::{Bool, Int, Real};
 
 use crate::analyzer::Node;
 use crate::bounds::{Bounds, Search};
-use crate::facts::contain::{fewer, renamed};
+use crate::facts::contain::{fewer, groups_among, renamed};
 use crate::facts::logical::Logical;
 use crate::facts::{Context, Fact, FactKind, FactSet, Ratio, Term};
 use crate::selectivity::{Card, Interval, Kind, Selectivity, SelectivityReport};
@@ -746,7 +746,9 @@ impl<'a> Lookup<'a> {
     }
 
     /// Every operator's upper bound on its rows that a bound gives, or a
-    /// row count of wider rows than its own ([`fewer`]), by variable.
+    /// row count of wider rows than its own ([`fewer`]), or for a GROUP BY a
+    /// distinct count of its keys over wider rows than its input's
+    /// ([`groups_among`]), by variable.
     fn caps(&self) -> Vec<(usize, String, u64, FactRef)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
@@ -772,6 +774,24 @@ impl<'a> Lookup<'a> {
                     && c.tables().is_subset(&tables)
                     && let Some(n) = f.value.as_int()
                     && renamed(&ctx, c, fewer)
+                {
+                    out.push((i, node.var.clone(), n, FactRef::of(f)));
+                }
+            }
+            // Distinct counts, exact or bounds, of the keys over wider rows
+            // than the GROUP BY's input: a subset of the rows has no more
+            // groups.
+            if !matches!(&ctx, Context::Derived { op, .. } if op == "group") {
+                continue;
+            }
+            for f in self.facts.iter().chain(self.facts.bounds()) {
+                let FactKind::Distinct { keys, over } = &f.kind else { continue };
+                let wider = Context::Derived { op: "group".into(), args: keys.iter().cloned().collect(), inputs: vec![over.clone()] };
+                if wider != ctx
+                    && !self.conflicted.contains(&f.kind)
+                    && over.tables().is_subset(&tables)
+                    && let Some(n) = f.value.as_int()
+                    && renamed(&ctx, &wider, groups_among)
                 {
                     out.push((i, node.var.clone(), n, FactRef::of(f)));
                 }
