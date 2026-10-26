@@ -15,6 +15,8 @@
 
 mod axioms;
 mod expr;
+#[cfg(test)]
+mod pattern_check;
 mod preds;
 mod program;
 mod solve;
