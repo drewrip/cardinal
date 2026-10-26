@@ -172,6 +172,10 @@ pub(crate) struct Terms {
     pub exprs: std::collections::BTreeMap<Col, E>,
     /// Each aggregate column's definition.
     pub aggs: std::collections::BTreeMap<Col, super::translate::Agg>,
+    /// While a program is written: relations go by name (`|R!n|`), each
+    /// defined once ([`Terms::definitions`]), and the names written.
+    pub short: std::cell::Cell<bool>,
+    pub named: std::cell::RefCell<BTreeSet<RelId>>,
 }
 
 impl Terms {
@@ -388,7 +392,30 @@ impl Terms {
         out
     }
 
+    /// The definitions of the relations named since `short` was set, and
+    /// of what they are made of, each after its parts'.
+    pub(crate) fn definitions(&self) -> String {
+        let named: Vec<RelId> = self.named.borrow().iter().copied().collect();
+        let mut out = String::new();
+        for r in self.reachable(named) {
+            write!(out, "(define-fun |R!{}| () Rel ", r.0).unwrap();
+            self.write_def(r, &mut out);
+            out.push_str(")\n");
+        }
+        out
+    }
+
     fn write_rel(&self, r: RelId, out: &mut String) {
+        if self.short.get() {
+            self.named.borrow_mut().insert(r);
+            write!(out, "|R!{}|", r.0).unwrap();
+            return;
+        }
+        self.write_def(r, out);
+    }
+
+    /// `r`'s constructor over its parts.
+    fn write_def(&self, r: RelId, out: &mut String) {
         let rec = |x: &RelId, out: &mut String| self.write_rel(*x, out);
         match self.get(r) {
             Rel::Scan(t) => write!(out, "(scan |t:{}|)", sanitize(t)).unwrap(),

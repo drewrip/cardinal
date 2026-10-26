@@ -223,6 +223,16 @@ async fn compare_tpcds() {
         enc.observe(p);
     }
     println!("{} plans observed, {} targets", plans.len(), cases.len());
+    // `DESCRIBE=q41/t1`: a profile and the facts read off it.
+    if let Ok(name) = std::env::var("DESCRIBE") {
+        for p in plans.iter().filter(|p| p.name == name) {
+            println!("{p}");
+        }
+        for l in enc.describe(&name) {
+            println!("{l}");
+        }
+        return;
+    }
 
     let options = || Options { selectivity: true, ..Default::default() };
     let (mut looser, mut tighter, mut same, mut unsound, mut errors, mut wider) = (0, 0, 0, vec![], vec![], vec![]);

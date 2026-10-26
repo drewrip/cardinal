@@ -175,8 +175,8 @@ impl Builder<'_> {
         rest.sort();
         rest.dedup();
         let mut order: Vec<usize> = (0..leaves.len()).collect();
-        let texts: Vec<String> = leaves.iter().map(|l| self.terms.rel_smt(*l)).collect();
-        order.sort_by(|a, b| texts[*a].cmp(&texts[*b]));
+        // Terms are shared: one input has one id, whichever plan made it.
+        order.sort_by_key(|k| leaves[*k]);
         let classes_of = |k: usize| -> BTreeSet<Col> { cols[k].iter().filter(|c| class.contains_key(*c)).map(|c| find(&class, c)).collect() };
         let mut done: Vec<usize> = vec![order[0]];
         let mut joined: BTreeSet<Col> = classes_of(order[0]);

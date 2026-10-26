@@ -244,6 +244,8 @@ pub(crate) fn build(
     }
 
     let mut e = Emit { terms, out: String::new(), axioms: 0, colsets: BTreeSet::new(), decls: BTreeSet::new() };
+    e.terms.short.set(true);
+    e.terms.named.borrow_mut().clear();
 
     // ---------- axioms ----------
     let mut axs: Vec<Axiom> = axioms::shared();
@@ -609,11 +611,12 @@ pub(crate) fn build(
     let mut book = String::new();
     let sets: Vec<(ColsId, BTreeSet<Col>)> = universe.iter().map(|c| (*c, e.terms.cols[c.0 as usize].clone())).collect();
     let index: HashMap<BTreeSet<Col>, ColsId> = sets.iter().map(|(c, s)| (s.clone(), *c)).collect();
+    let syms: HashMap<ColsId, String> = sets.iter().map(|(c, _)| (*c, e.terms.cols_sym(*c))).collect();
     for (x, xs) in &sets {
-        let xn = e.terms.cols_sym(*x);
+        let xn = &syms[x];
         let small = !tables_u.contains(x);
         for (y, ys) in &sets {
-            let yn = e.terms.cols_sym(*y);
+            let yn = &syms[y];
             if small && xs.is_subset(ys) {
                 writeln!(book, "(assert (csub {xn} {yn}))").unwrap();
             }
@@ -623,7 +626,7 @@ pub(crate) fn build(
             if x < y {
                 let u: BTreeSet<Col> = xs.union(ys).cloned().collect();
                 if let Some(z) = index.get(&u) {
-                    let zn = e.terms.cols_sym(*z);
+                    let zn = &syms[z];
                     writeln!(book, "(assert (= (cup {xn} {yn}) {zn})) (assert (= (cup {yn} {xn}) {zn}))").unwrap();
                 }
             } else if x == y {
@@ -635,7 +638,7 @@ pub(crate) fn build(
                     && d != *xs
                     && let Some(z) = index.get(&d)
                 {
-                    writeln!(book, "(assert (= (cdiff {xn} {yn}) {}))", e.terms.cols_sym(*z)).unwrap();
+                    writeln!(book, "(assert (= (cdiff {xn} {yn}) {}))", syms[z]).unwrap();
                 }
             }
         }
@@ -656,7 +659,7 @@ pub(crate) fn build(
         let mut within = vec![];
         for (x, xs) in &sets {
             if !tables_u.contains(x) && !xs.is_empty() && xs.is_subset(&cs) {
-                within.push(e.terms.cols_sym(*x));
+                within.push(syms[x].clone());
             }
         }
         if !within.is_empty() {
@@ -752,6 +755,13 @@ pub(crate) fn build(
     let root_term = e.terms.rel_smt(root);
     // The probe's subterms enter the e-graph once, here (§6.5).
     writeln!(text, "(assert (>= (card {root_term}) 0))").unwrap();
+    // Each relation's definition, before the axioms: macros, which name
+    // the terms the text refers to.
+    let defs = e.terms.definitions();
+    e.terms.short.set(false);
+    e.terms.named.borrow_mut().clear();
+    let at = text.find("(assert ").unwrap_or(text.len());
+    text.insert_str(at, &defs);
     rels.sort();
     let stats = Stats {
         relations: rels.len(),
