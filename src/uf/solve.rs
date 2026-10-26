@@ -104,7 +104,12 @@ impl<'a> Checker<'a> {
             s.set_params(&p);
             s.from_string(self.text);
             // Z3 drops what follows a declaration it rejects.
-            assert_eq!(s.get_assertions().len(), self.assertions, "the program did not parse whole");
+            let parsed = s.get_assertions().len();
+            if parsed != self.assertions {
+                let path = std::env::temp_dir().join(format!("uf_unparsed_{}.smt2", std::process::id()));
+                let _ = std::fs::write(&path, self.text);
+                panic!("the program did not parse whole: {parsed} of {} assertions; it is in {}", self.assertions, path.display());
+            }
             self.solver = Some(s);
         }
         self.solver.as_ref().unwrap()

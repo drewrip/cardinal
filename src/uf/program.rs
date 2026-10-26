@@ -790,6 +790,17 @@ pub(crate) fn build(
     writeln!(text, "(assert (>= (card {root_term}) 0))").unwrap();
     // Each relation's definition, before the axioms: macros, which name
     // the terms the text refers to.
+    // Only the relations the text names: building also named some it then
+    // left out, whose sets need not be declared.
+    {
+        let mut used = BTreeSet::new();
+        for part in text.split("|R!").skip(1) {
+            if let Some(n) = part.split('|').next().and_then(|n| n.parse::<u32>().ok()) {
+                used.insert(RelId(n));
+            }
+        }
+        *e.terms.named.borrow_mut() = used;
+    }
     let defs = e.terms.definitions();
     e.terms.short.set(false);
     e.terms.named.borrow_mut().clear();
