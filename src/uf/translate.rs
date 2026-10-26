@@ -972,6 +972,7 @@ impl Executed<'_> {
                 b.join_on(kind, null_aware, q, l.rel, r.rel)?
             }
         };
+        let rel = self.decorrelated(b, i, rel).unwrap_or(rel);
         let cols = match kind {
             JoinType::LeftSemi | JoinType::LeftAnti => l.cols.clone(),
             JoinType::RightSemi | JoinType::RightAnti => r.cols.clone(),
@@ -982,6 +983,65 @@ impl Executed<'_> {
             scalars.extend(r.scalars.clone());
         }
         Some(Out { rel, cols, scalars })
+    }
+
+    /// Semi or anti join `rel` (node `i`) of `A` with `L ⋈ δ`, `δ` the
+    /// distinct keys of `A` itself (a delim join: DuckDB's plan for a
+    /// correlated `EXISTS`), as the join of `A` with `L` on the keys `L`
+    /// joins `δ` on. A NULL key of `A` matches nothing either way: `L ⋈ δ`
+    /// has no NULL keys.
+    fn decorrelated(&self, b: &mut Builder, i: usize, rel: RelId) -> Option<RelId> {
+        let Rel::Join(k @ (JoinKind::Semi | JoinKind::Anti), f, a, s) = *b.terms.get(rel) else { return None };
+        let Rel::Join(JoinKind::Inner, g, p, q) = *b.terms.get(s) else { return None };
+        let (fam, gam) = (b.terms.families[f.0 as usize].clone(), b.terms.families[g.0 as usize].clone());
+        if fam.residual.is_some() || gam.residual.is_some() || gam.null_eq {
+            return None;
+        }
+        // `δ`'s columns and `L`'s, pairwise.
+        let (d, l, gpairs): (RelId, RelId, Vec<(Col, Col)>) = match (b.terms.get(p), b.terms.get(q)) {
+            (_, Rel::Group(..)) => (q, p, gam.pairs.iter().map(|(x, y)| (y.clone(), x.clone())).collect()),
+            (Rel::Group(..), _) => (p, q, gam.pairs.clone()),
+            _ => return None,
+        };
+        let Rel::Group(keys, _) = *b.terms.get(d) else { return None };
+        let to_l: BTreeMap<Col, Col> = gpairs.into_iter().collect();
+        let correlated: BTreeSet<Col> = fam.pairs.iter().map(|(_, y)| y.clone()).collect();
+        if b.terms.cols[keys.0 as usize] != correlated || to_l.keys().cloned().collect::<BTreeSet<_>>() != correlated {
+            return None;
+        }
+        // `δ` groups `A` itself: in the plan, its aggregate reads what the
+        // join's preserved side reads.
+        let source = |mut n: usize| {
+            while matches!(self.plan.nodes[n].op, Op::Project | Op::Reuse { .. }) {
+                n = self.plan.nodes[n].children[0];
+            }
+            n
+        };
+        let node = &self.plan.nodes[i];
+        let preserved = match &node.op {
+            Op::Join { kind: JoinType::RightSemi | JoinType::RightAnti, .. } => node.children[1],
+            _ => node.children[0],
+        };
+        let other = node.children.iter().copied().find(|c| *c != preserved)?;
+        let a_source = source(preserved);
+        let mut stack = vec![other];
+        let mut found = false;
+        while let Some(n) = stack.pop() {
+            let nd = &self.plan.nodes[n];
+            if matches!(nd.op, Op::Aggregate { .. }) && nd.children.len() == 1 && source(nd.children[0]) == a_source {
+                found = true;
+                break;
+            }
+            stack.extend(nd.children.iter().copied());
+        }
+        if !found {
+            return None;
+        }
+        let ty = |c: &Col| b.terms.types.get(c).copied().unwrap_or(Ty::Int);
+        let pairs: Vec<(E, E)> =
+            fam.pairs.iter().map(|(x, y)| (E::Col(x.clone(), ty(x)), E::Col(to_l[y].clone(), ty(&to_l[y])))).collect();
+        let kind = if k == JoinKind::Semi { JoinType::LeftSemi } else { JoinType::LeftAnti };
+        b.join(kind, false, &pairs, None, false, a, l)
     }
 
     /// Scan `i`'s term `x` after its runtime filters: lossless ones from

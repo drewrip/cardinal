@@ -254,6 +254,10 @@ impl Terms {
         id
     }
 
+    pub(crate) fn find_family(&self, f: &Family) -> Option<FamId> {
+        self.fam_ids.get(f).copied()
+    }
+
     pub(crate) fn mirror(&self, f: FamId) -> FamId {
         self.fam_ids[&self.families[f.0 as usize].mirrored()]
     }

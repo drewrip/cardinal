@@ -275,6 +275,30 @@ pub(crate) fn build(
             axs.push(axioms::assoc(&fam_text[f], &fam_text[g]));
         }
     }
+    // A semi or anti join of an alias, on the alias's columns, is the
+    // alias of the join of what it aliases.
+    for f in &fams {
+        let fam = e.terms.families[f.0 as usize].clone();
+        let Some(i) = fam.pairs.first().and_then(|(a, _)| alias_of(a)) else { continue };
+        if fam.residual.is_some() || fam.pairs.iter().any(|(a, _)| alias_of(a) != Some(i)) {
+            continue;
+        }
+        let mut pairs: Vec<(Col, Col)> = fam.pairs.iter().map(|(a, b)| (unalias_col(a, i).unwrap(), b.clone())).collect();
+        pairs.sort();
+        let Some(g) = e.terms.find_family(&super::terms::Family { pairs, ..fam }) else { continue };
+        if !fams.contains(&g) {
+            continue;
+        }
+        let (ft, gt) = (&fam_text[f], &fam_text[&g]);
+        for (kind, fun, gun) in [("semi", &ft.s, &gt.s), ("anti", &ft.a, &gt.a)] {
+            axs.push(ax(
+                format!("alias_{kind}{}{}", ft.tag, gt.tag),
+                "(x Rel) (y Rel)",
+                &format!("(= ({fun} (alias {i} x) y) (alias {i} ({gun} x y)))"),
+                &[&format!("({fun} (alias {i} x) y)")],
+            ));
+        }
+    }
     for f in &rt_fams {
         let fam = &fam_text[f];
         let t = e.terms.rt_fn(*f);
