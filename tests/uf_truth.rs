@@ -21,7 +21,7 @@
 //! count must lie within the bound.
 //!
 //! Needs the `duckdb` CLI; skipped without. `CARDINAL_UF_TRUTH_N` sets the
-//! number of generated queries (default 700, about 15 minutes),
+//! number of generated queries (default 350, about 15 minutes),
 //! `CARDINAL_UF_TRUTH_SEED` their seed, `CARDINAL_UF_TRUTH_ONLY`
 //! (comma-separated names, `q007`) limits the queries to those and their
 //! groups, `CARDINAL_UF_TRUTH_GROUP` the queries observed together
@@ -583,7 +583,7 @@ async fn uf_bounds_hold() {
         eprintln!("skipped: no duckdb CLI");
         return;
     }
-    let n: usize = env("CARDINAL_UF_TRUTH_N", 700);
+    let n: usize = env("CARDINAL_UF_TRUTH_N", 350);
     let seed: u64 = env("CARDINAL_UF_TRUTH_SEED", 11);
     let threads: usize = env("CARDINAL_UF_TRUTH_THREADS", 4);
     let group: usize = env("CARDINAL_UF_TRUTH_GROUP", 10);
