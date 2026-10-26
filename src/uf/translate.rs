@@ -209,6 +209,44 @@ impl Builder<'_> {
         self.filter_preds(rel, &rest)
     }
 
+    /// Semi or anti join `x` of inner equi-joins, on columns of one of
+    /// their inputs, as the inner joins of that input's semi or anti join:
+    /// which rows it keeps depends on that input's columns alone.
+    pub(crate) fn semi_down(&mut self, x: RelId) -> RelId {
+        let Rel::Join(k @ (JoinKind::Semi | JoinKind::Anti), f, l, r) = *self.terms.get(x) else { return x };
+        if !self.cluster(l) {
+            return x;
+        }
+        let fam = self.terms.families[f.0 as usize].clone();
+        let mut needs = fam.left();
+        if let Some(q) = fam.residual {
+            let Some(rs) = self.terms.reads(q) else { return x };
+            let rc = self.terms.cols_of(r).cloned().unwrap_or_default();
+            needs.extend(rs.into_iter().filter(|c| !rc.contains(c)));
+        }
+        let (mut leaves, mut pairs, mut filters) = (vec![], vec![], vec![]);
+        self.flatten(l, &mut leaves, &mut pairs, &mut filters);
+        let Some(&leaf) = leaves.iter().find(|y| self.terms.cols_of(**y).is_some_and(|cs| needs.is_subset(cs))) else { return x };
+        let new = self.terms.rel(Rel::Join(k, f, leaf, r));
+        let l = self.replace_leaf(l, leaf, new);
+        self.canonical(l)
+    }
+
+    fn replace_leaf(&mut self, x: RelId, old: RelId, new: RelId) -> RelId {
+        if x == old {
+            return new;
+        }
+        if !self.cluster(x) {
+            return x;
+        }
+        let r = match *self.terms.get(x) {
+            Rel::Filter(p, y) => Rel::Filter(p, self.replace_leaf(y, old, new)),
+            Rel::Join(k, f, a, b) => Rel::Join(k, f, self.replace_leaf(a, old, new), self.replace_leaf(b, old, new)),
+            _ => return x,
+        };
+        self.terms.rel(r)
+    }
+
     /// Whether `x` is an inner equi-join, under filters.
     fn cluster(&self, mut x: RelId) -> bool {
         loop {
@@ -1115,6 +1153,7 @@ impl Executed<'_> {
             }
         };
         let rel = self.decorrelated(b, i, rel).unwrap_or(rel);
+        let rel = b.semi_down(rel);
         let cols = match kind {
             JoinType::LeftSemi | JoinType::LeftAnti => l.cols.clone(),
             JoinType::RightSemi | JoinType::RightAnti => r.cols.clone(),
@@ -1690,6 +1729,7 @@ impl Logical {
                     // NULL keys match each other.
                 }
                 let rel = b.join(j.join_type, j.null_aware, &pairs, residual, null_eq, l.rel, r.rel)?;
+                let rel = b.semi_down(rel);
                 let cols = match j.join_type {
                     JoinType::LeftSemi | JoinType::LeftAnti => l.cols.clone(),
                     JoinType::RightSemi | JoinType::RightAnti => r.cols.clone(),
