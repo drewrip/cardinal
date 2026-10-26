@@ -48,7 +48,7 @@ impl Ty {
         matches!(self, Ty::Int | Ty::Real)
     }
 
-    fn smt(self) -> &'static str {
+    pub(crate) fn smt(self) -> &'static str {
         match self {
             Ty::Int => "Int",
             Ty::Real => "Real",
@@ -703,7 +703,9 @@ pub(crate) struct Truth {
 
 impl Smt {
     pub(crate) fn var(&mut self, c: &str, ty: Ty) -> Val {
-        let v = format!("|v!{c}|");
+        // The sort in the name: one column read with two types is two
+        // variables, not one declared twice.
+        let v = format!("|v!{c}!{}|", ty.smt());
         let n = format!("|n!{c}|");
         if ty == Ty::Other {
             self.decls.insert("Val".into(), "(declare-sort Val 0)".into());

@@ -198,10 +198,21 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
     // Each literal's expression, SMT and columns.
     let mut smt = Smt::default();
     let mut lits: Vec<(PredId, E, String, String, BTreeSet<Col>)> = vec![];
+    let mut keys: Vec<(String, String)> = vec![];
     for &p in literals {
         let Some(e) = expr_of(terms, p) else { continue };
         let Some(t) = smt.truth(&e) else { continue };
         lits.push((p, e.clone(), t.t, t.f, e.reads()));
+        // The cache's keys: the texts, under the columns' types (two
+        // readings of one predicate may type a column differently).
+        let mut types = BTreeMap::new();
+        e.visit(&mut |x| {
+            if let E::Col(c, ty) = x {
+                types.insert(c.clone(), *ty);
+            }
+        });
+        let sig: String = types.iter().map(|(c, ty)| format!("{c}:{ty:?};")).collect();
+        keys.push((format!("{sig}{}", lits.last().unwrap().2), format!("{sig}{}", lits.last().unwrap().3)));
     }
     let decls = smt.declarations();
     let mut cache = CACHE.lock().unwrap();
@@ -218,12 +229,13 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
         r
     };
     let mut constant: HashMap<PredId, bool> = HashMap::new();
-    for (p, _, t, f, _) in &lits {
-        let key = (t.clone(), "#never".to_string());
+    for (i, (p, _, t, f, _)) in lits.iter().enumerate() {
+        let (kt, kf) = &keys[i];
+        let key = (kt.clone(), "#never".to_string());
         let never = *cache.implies.entry(key).or_insert_with(|| check(&s, t) == SatResult::Unsat);
-        let key = (t.clone(), "#always".to_string());
+        let key = (kt.clone(), "#always".to_string());
         let always = *cache.implies.entry(key).or_insert_with(|| check(&s, &format!("(not {t})")) == SatResult::Unsat);
-        let key = (f.clone(), "#always".to_string());
+        let key = (kf.clone(), "#always".to_string());
         let false_always = never && *cache.implies.entry(key).or_insert_with(|| check(&s, &format!("(not {f})")) == SatResult::Unsat);
         if never && false_always {
             out.never.push(*p);
@@ -247,7 +259,7 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
             if constant.contains_key(&lits[i].0) || constant.contains_key(&lits[j].0) {
                 continue;
             }
-            let key = (lits[i].2.clone(), lits[j].2.clone());
+            let key = (keys[i].0.clone(), keys[j].0.clone());
             let holds = *cache
                 .implies
                 .entry(key)
@@ -265,7 +277,7 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
     for &(i, j) in &implied {
         if i < j && implied.contains(&(j, i)) {
             let (fi, fj) = (&lits[i].3, &lits[j].3);
-            let key = (format!("#f{fi}"), fj.clone());
+            let key = (format!("#f{}", keys[i].1), keys[j].1.clone());
             let same = *cache.implies.entry(key).or_insert_with(|| {
                 check(&s, &format!("(and {fi} (not {fj}))")) == SatResult::Unsat
                     && check(&s, &format!("(and {fj} (not {fi}))")) == SatResult::Unsat
@@ -292,24 +304,31 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
         }
     }
 
-    // Each literal's width, NULL-rejected columns and hull, on a solver of
-    // their own: after the checks above, the shared one answered some of
-    // these wrongly (satisfiable).
-    let fs = solver();
-    fs.from_string(decls.clone());
-    for (p, e, t, _, reads) in &lits {
+    // Each literal's width, NULL-rejected columns and hull, each on a
+    // solver of its own: a model's value that does not parse back (in
+    // `width`) costs a solver its declarations, and every later check on
+    // it would answer satisfiable.
+    for (i, (p, e, t, _, reads)) in lits.iter().enumerate() {
         if constant.contains_key(p) {
             continue;
         }
-        let key = t.clone();
-        let facts = cache.facts.entry(key).or_insert_with(|| facts(&fs, &decls, e, t, reads)).clone();
+        let key = keys[i].0.clone();
+        let facts = cache
+            .facts
+            .entry(key)
+            .or_insert_with(|| {
+                let fs = solver();
+                fs.from_string(decls.clone());
+                facts(&fs, &decls, e, t, reads)
+            })
+            .clone();
         if let Some(f) = facts {
             out.facts.insert(*p, f);
         }
     }
     // Literals TRUE or FALSE wherever their columns are non-NULL.
-    for (p, e, t, f, reads) in &lits {
-        let key = (format!("#total{t}"), f.clone());
+    for (i, (p, e, t, f, reads)) in lits.iter().enumerate() {
+        let key = (format!("#total{}", keys[i].0), keys[i].1.clone());
         let total = *cache.implies.entry(key).or_insert_with(|| {
             let mut smt = Smt::default();
             let mut known = vec!["true".to_string()];
@@ -395,7 +414,7 @@ fn width(s: &Solver, t: &str, reads: &BTreeSet<Col>, types: &BTreeMap<Col, Ty>) 
         let model = s.get_model()?;
         let mut differ = vec![];
         for c in reads {
-            let name = format!("|v!{c}|");
+            let name = format!("|v!{c}!{}|", types[c].smt());
             let var: z3::ast::Dynamic = match types[c] {
                 Ty::Int => z3::ast::Int::new_const(name.trim_matches('|')).into(),
                 Ty::Real => z3::ast::Real::new_const(name.trim_matches('|')).into(),
@@ -406,7 +425,11 @@ fn width(s: &Solver, t: &str, reads: &BTreeSet<Col>, types: &BTreeMap<Col, Ty>) 
             let value = model.eval(&var, true)?;
             differ.push(format!("(not (= {name} {value}))"));
         }
+        let n = s.get_assertions().len();
         s.from_string(format!("(assert (or {}))", differ.join(" ")));
+        if s.get_assertions().len() == n {
+            break None;
+        }
     };
     s.pop(1);
     result
