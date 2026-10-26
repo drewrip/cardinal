@@ -97,7 +97,139 @@ impl Builder<'_> {
     pub(crate) fn filter(&mut self, x: RelId, e: &E) -> RelId {
         let x = self.rejecting(x, e);
         let ps = preds::conjuncts(self.terms, e);
-        self.filter_preds(x, &ps)
+        let y = self.filter_preds(x, &ps);
+        self.canonical(y)
+    }
+
+    /// Inner equi-joins `x` (with filters among them) in a normal form, so
+    /// that two plans' orders of one join give one term: its inputs in a
+    /// fixed order, each joined to those before it (one already joined if
+    /// any) on one column of each class of columns the joins make equal,
+    /// and each filter on the first input, or join, that has its columns.
+    /// `x` itself if it is not such a join.
+    fn canonical(&mut self, x: RelId) -> RelId {
+        if !self.cluster(x) {
+            return x;
+        }
+        let (mut leaves, mut pairs, mut filters) = (vec![], vec![], vec![]);
+        self.flatten(x, &mut leaves, &mut pairs, &mut filters);
+        // Classes of equal columns.
+        let mut class: BTreeMap<Col, Col> = BTreeMap::new();
+        fn find(class: &BTreeMap<Col, Col>, c: &Col) -> Col {
+            let mut c = c.clone();
+            while let Some(p) = class.get(&c).filter(|p| **p != c) {
+                c = p.clone();
+            }
+            c
+        }
+        for (a, b) in &pairs {
+            let (ra, rb) = (find(&class, a), find(&class, b));
+            class.insert(ra.clone(), ra.clone());
+            class.insert(rb.clone(), rb.clone());
+            if ra != rb {
+                let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                class.insert(hi, lo);
+            }
+        }
+        let mut cols = vec![];
+        for l in &leaves {
+            let Some(cs) = self.terms.cols_of(*l).cloned() else { return x };
+            // Two equal columns of one input: an equality no join makes.
+            let mut seen = BTreeSet::new();
+            for c in cs.iter().filter(|c| class.contains_key(*c)) {
+                if !seen.insert(find(&class, c)) {
+                    return x;
+                }
+            }
+            cols.push(cs);
+        }
+        if pairs.iter().any(|(a, b)| !cols.iter().any(|cs| cs.contains(a)) || !cols.iter().any(|cs| cs.contains(b))) {
+            return x;
+        }
+        // Each filter on the one input with its columns, first.
+        let mut rest = vec![];
+        for p in filters {
+            let reads = self.terms.reads(p);
+            match reads.and_then(|rs| cols.iter().position(|cs| rs.is_subset(cs))) {
+                Some(k) => {
+                    leaves[k] = self.terms.rel(Rel::Filter(p, leaves[k]));
+                }
+                None => rest.push(p),
+            }
+        }
+        rest.sort();
+        rest.dedup();
+        let mut order: Vec<usize> = (0..leaves.len()).collect();
+        let texts: Vec<String> = leaves.iter().map(|l| self.terms.rel_smt(*l)).collect();
+        order.sort_by(|a, b| texts[*a].cmp(&texts[*b]));
+        let classes_of = |k: usize| -> BTreeSet<Col> { cols[k].iter().filter(|c| class.contains_key(*c)).map(|c| find(&class, c)).collect() };
+        let mut done: Vec<usize> = vec![order[0]];
+        let mut joined: BTreeSet<Col> = classes_of(order[0]);
+        let mut have: BTreeSet<Col> = cols[order[0]].clone();
+        let mut rel = leaves[order[0]];
+        let mut left = rest;
+        while done.len() < leaves.len() {
+            let next = order
+                .iter()
+                .copied()
+                .filter(|k| !done.contains(k))
+                .find(|k| !classes_of(*k).is_disjoint(&joined))
+                .or_else(|| order.iter().copied().find(|k| !done.contains(k)))
+                .unwrap();
+            let mut ps = vec![];
+            for c in classes_of(next).intersection(&joined) {
+                let mine = |cs: &BTreeSet<Col>| cs.iter().filter(|x| find(&class, x) == *c).min().cloned();
+                if let (Some(a), Some(b)) = (mine(&have), mine(&cols[next])) {
+                    ps.push((a, b));
+                }
+            }
+            ps.sort();
+            let f = self.terms.family(Family { pairs: ps, null_eq: false, residual: None });
+            rel = self.terms.rel(Rel::Join(JoinKind::Inner, f, rel, leaves[next]));
+            done.push(next);
+            joined.extend(classes_of(next));
+            have.extend(cols[next].iter().cloned());
+            let (now, later): (Vec<PredId>, Vec<PredId>) =
+                left.into_iter().partition(|p| self.terms.reads(*p).is_some_and(|rs| rs.is_subset(&have)));
+            for p in now {
+                rel = self.terms.rel(Rel::Filter(p, rel));
+            }
+            left = later;
+        }
+        self.filter_preds(rel, &left)
+    }
+
+    /// Whether `x` is an inner equi-join, under filters.
+    fn cluster(&self, mut x: RelId) -> bool {
+        loop {
+            match *self.terms.get(x) {
+                Rel::Filter(_, y) => x = y,
+                Rel::Join(JoinKind::Inner, f, ..) => {
+                    let fam = &self.terms.families[f.0 as usize];
+                    return fam.residual.is_none() && !fam.null_eq;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn flatten(&self, x: RelId, leaves: &mut Vec<RelId>, pairs: &mut Vec<(Col, Col)>, filters: &mut Vec<PredId>) {
+        if !self.cluster(x) {
+            leaves.push(x);
+            return;
+        }
+        match *self.terms.get(x) {
+            Rel::Filter(p, y) => {
+                filters.push(p);
+                self.flatten(y, leaves, pairs, filters);
+            }
+            Rel::Join(_, f, a, b) => {
+                pairs.extend(self.terms.families[f.0 as usize].pairs.iter().cloned());
+                self.flatten(a, leaves, pairs, filters);
+                self.flatten(b, leaves, pairs, filters);
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// Outer join `x`, filtered by `e`, as the join it then is: a filter
@@ -231,7 +363,7 @@ impl Builder<'_> {
         let j = self.terms.rel(Rel::Join(k, fam, l, r));
         Some(match above {
             Some(e) => self.filter(j, &e),
-            None => j,
+            None => self.canonical(j),
         })
     }
 
