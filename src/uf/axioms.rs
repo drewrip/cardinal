@@ -91,6 +91,7 @@ pub(crate) const DECLS: &str = "\
 (declare-fun filter (Pred Rel) Rel)
 (declare-fun group (Cols Rel) Rel)
 (declare-fun limit (Int Rel) Rel)
+(declare-fun offset (Int Rel) Rel)
 (declare-fun union (Rel Rel) Rel)
 (declare-fun part (Occ Rel) Rel)
 (declare-fun opt (Occ Pred Rel) Rel)
@@ -269,6 +270,13 @@ pub(crate) fn shared() -> Vec<Axiom> {
             "(n Int) (x Rel)",
             "(and (sub (limit n x) x) (= (card (limit n x)) (ite (<= (card x) n) (card x) n)))",
             &["(limit n x)"],
+        ),
+        ax(
+            "offset_basic",
+            "(n Int) (x Rel)",
+            "(and (sub (offset n x) x) (= (cols (offset n x)) (cols x))
+                  (= (card (offset n x)) (ite (<= (card x) n) 0 (- (card x) n))))",
+            &["(offset n x)"],
         ),
         ax(
             "union_basic",

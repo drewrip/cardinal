@@ -211,12 +211,6 @@ impl<'c> Encoder<'c> {
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = std::fs::write(path.replace("{}", &format!("alone{n}")), &alone.text);
         }
-        let mut s = solve::Session::new(&alone);
-        let structural = s.bounds((0, None), false);
-        let structural_checks = s.checks;
-        if std::env::var("CARDINAL_UF_TIME").is_ok() {
-            eprintln!("uf: alone {structural:?} in {} checks", s.checks);
-        }
         facts.extend(shape);
         let timing = std::env::var("CARDINAL_UF_TIME").is_ok();
         let t0 = Instant::now();
@@ -230,15 +224,21 @@ impl<'c> Encoder<'c> {
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = std::fs::write(path.replace("{}", &n.to_string()), &program.text);
         }
-        let t0 = Instant::now();
+        // The target alone, and the facts' consistency check (§6.6), at
+        // once: neither needs the other.
         let mut s = solve::Session::new(&program);
-        if timing {
-            eprintln!("uf: load {:.2}s", t0.elapsed().as_secs_f64());
-        }
         let t0 = Instant::now();
-        let dropped = s.consistent();
+        let ((structural, structural_checks), dropped) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                let mut s = solve::Session::new(&alone);
+                let b = s.bounds((0, None), false);
+                (b, s.checks)
+            });
+            let dropped = s.consistent();
+            (a.join().unwrap(), dropped)
+        });
         if timing {
-            eprintln!("uf: consistent {:.2}s", t0.elapsed().as_secs_f64());
+            eprintln!("uf: alone {structural:?} in {structural_checks} checks, and consistent, {:.2}s", t0.elapsed().as_secs_f64());
         }
         let t0 = Instant::now();
         let (mut lower, mut upper) = s.bounds(structural, true);
@@ -350,6 +350,7 @@ fn prune(terms: &mut Terms, roots: &[RelId]) -> HashMap<RelId, RelId> {
             Rel::Filter(p, x) => Rel::Filter(p_of(p, terms, &map), m(&x, &map)),
             Rel::Group(k, x) => Rel::Group(k, m(&x, &map)),
             Rel::Limit(n, x) => Rel::Limit(n, m(&x, &map)),
+            Rel::Offset(n, x) => Rel::Offset(n, m(&x, &map)),
             Rel::Union(x, y) => Rel::Union(m(&x, &map), m(&y, &map)),
             Rel::Join(k, f, x, y) => Rel::Join(k, f, m(&x, &map), m(&y, &map)),
             Rel::Part(o, x) => Rel::Part(o, m(&x, &map)),

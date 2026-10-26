@@ -1025,6 +1025,29 @@ fn expr_axioms(e: &mut Emit, g: &str, tables: &Tables, decided: &Decided) -> Vec
     }
     let ty = def.ty();
     let inputs = def.reads();
+    // A CASE of literal values has at most those (and NULL, without ELSE).
+    if let E::Func(name, args, _) = &def
+        && let Some(shape) = name.strip_prefix("case")
+    {
+        let on = shape.starts_with("_on");
+        let has_else = shape.ends_with("_else");
+        let start = usize::from(on);
+        let pairs_end = if has_else { args.len() - 1 } else { args.len() };
+        let mut values: Vec<&E> = args[start..pairs_end].iter().skip(1).step_by(2).collect();
+        if has_else {
+            values.extend(args.last());
+        }
+        if !values.is_empty() && values.iter().all(|v| matches!(v, E::Lit(l, _) if !matches!(l, Lit::Null))) {
+            let distinct: BTreeSet<String> = values.iter().map(|v| v.text()).collect();
+            let k = distinct.len();
+            if has_else {
+                parts.push(format!("(<= (ndv {t} {gs}) {k})"));
+                parts.push(format!("(nonnull {t} {gs})"));
+            } else {
+                parts.push(format!("(<= (ndv {t} {gs}) {})", k + 1));
+            }
+        }
+    }
     if ty.numeric() {
         let mut smt = Smt::default();
         if let Some(v) = smt.value(&def) {

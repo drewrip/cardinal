@@ -1035,7 +1035,7 @@ impl Executed<'_> {
                 let input = self.node(b, node.children[0], suffix);
                 let mut x = b.terms.rel(Rel::Limit(fetch + offset, input.rel));
                 if *offset > 0 {
-                    x = b.terms.rel(Rel::Part(self.occ(i, suffix, ":offset"), x));
+                    x = b.terms.rel(Rel::Offset(*offset, x));
                 }
                 Out { rel: x, cols: input.cols, scalars: input.scalars }
             }
@@ -1631,7 +1631,7 @@ impl Logical {
                         if let Some(f) = f {
                             input.rel = b.terms.rel(Rel::Limit((f + s) as u64, input.rel));
                         }
-                        input.rel = b.terms.rel(Rel::Part(format!("{}#{id}", self.name), input.rel));
+                        input.rel = b.terms.rel(Rel::Offset(s as u64, input.rel));
                     }
                 }
                 input

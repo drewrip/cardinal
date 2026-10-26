@@ -80,6 +80,8 @@ pub(crate) enum Rel {
     Filter(PredId, RelId),
     Group(ColsId, RelId),
     Limit(u64, RelId),
+    /// All but the first `n` rows.
+    Offset(u64, RelId),
     Union(RelId, RelId),
     Join(JoinKind, FamId, RelId, RelId),
     /// Some sub-bag of the input, chosen by occurrence `o` (§3 rule 9).
@@ -283,7 +285,7 @@ impl Terms {
         let of = |t: &Terms, x: &RelId| t.rel_cols[x.0 as usize];
         match r {
             Rel::Scan(_) | Rel::Opaque(_) => None,
-            Rel::Filter(_, x) | Rel::Limit(_, x) | Rel::Part(_, x) | Rel::Opt(_, _, x) | Rel::Rt(_, _, x, _) => of(self, x),
+            Rel::Filter(_, x) | Rel::Limit(_, x) | Rel::Offset(_, x) | Rel::Part(_, x) | Rel::Opt(_, _, x) | Rel::Rt(_, _, x, _) => of(self, x),
             Rel::Group(k, _) => Some(*k),
             Rel::Union(x, _) => of(self, x),
             Rel::Join(JoinKind::Semi | JoinKind::Anti | JoinKind::NotIn, _, x, _) => of(self, x),
@@ -434,6 +436,11 @@ impl Terms {
                 rec(x, out);
                 out.push(')');
             }
+            Rel::Offset(n, x) => {
+                write!(out, "(offset {n} ").unwrap();
+                rec(x, out);
+                out.push(')');
+            }
             Rel::Union(x, y) => {
                 out.push_str("(union ");
                 rec(x, out);
@@ -523,6 +530,7 @@ impl Terms {
             Rel::Filter(_, x)
             | Rel::Group(_, x)
             | Rel::Limit(_, x)
+            | Rel::Offset(_, x)
             | Rel::Part(_, x)
             | Rel::Opt(_, _, x)
             | Rel::Extend(_, x)

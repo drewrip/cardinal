@@ -646,7 +646,11 @@ impl Reader<'_> {
                     args.push(x);
                 }
                 let ty = c.when_then_expr.first().map(|(_, t)| self.go(t).map(|t| t.ty())).flatten().unwrap_or(Ty::Other);
-                self.func("case", &args, ty)?
+                // The name tells where the values are: `case` (WHEN, THEN
+                // pairs), `case_on` (an operand first), and `_else` (an ELSE
+                // last).
+                let name = format!("case{}{}", if c.expr.is_some() { "_on" } else { "" }, if c.else_expr.is_some() { "_else" } else { "" });
+                self.func(&name, &args, ty)?
             }
             _ => return None,
         })
