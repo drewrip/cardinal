@@ -364,6 +364,12 @@ pub(crate) fn build(
             axs.push(a);
         }
     }
+    // A literal never TRUE, but not FALSE everywhere, keeps no rows; it is
+    // no constant (`never`), whose negation would keep them all.
+    for p in &decided.empty {
+        let ps = e.terms.pred_smt(*p);
+        axs.push(ax(format!("empty[{}]", e.terms.pred_text(*p)), "(x Rel)", &format!("(= (card (filter {ps} x)) 0)"), &[&format!("(filter {ps} x)")]));
+    }
 
     // ---------- ground facts ----------
     // The columns anything reads: only they get per-column facts.
@@ -496,6 +502,11 @@ pub(crate) fn build(
     for p in &decided.never {
         ground.push(format!("(= {} |p:false|)", e.terms.pred_smt(*p)));
     }
+    for p in &decided.total {
+        ground.push(format!("(total {})", e.terms.pred_smt(*p)));
+    }
+    ground.push("(total |p:true|)".into());
+    ground.push("(total |p:false|)".into());
     for p in &decided.always {
         ground.push(format!("(= {} |p:true|)", e.terms.pred_smt(*p)));
     }
@@ -1202,18 +1213,23 @@ fn universe(
     let mut tabs = table_sets.clone();
     for i in aliases {
         for s in all.clone() {
-            let a: BTreeSet<Col> = s.iter().map(|c| alias_col(c, *i)).collect();
             let u: BTreeSet<Col> = s.iter().filter_map(|c| unalias_col(c, *i)).collect();
-            if table_sets.contains(&s) {
-                tabs.insert(a.clone());
-            }
             if table_sets.contains(&u) {
                 tabs.insert(u.clone());
             }
-            all.insert(a);
             if !u.is_empty() {
                 all.insert(u);
             }
+            // Aliases are of scans: a set already aliased has no aliased
+            // form (else each alias doubles the sets: `t.c#2#3`, ...).
+            if s.iter().any(|c| alias_of(c).is_some()) {
+                continue;
+            }
+            let a: BTreeSet<Col> = s.iter().map(|c| alias_col(c, *i)).collect();
+            if table_sets.contains(&s) {
+                tabs.insert(a.clone());
+            }
+            all.insert(a);
         }
     }
     let _ = relations;

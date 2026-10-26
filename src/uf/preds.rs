@@ -138,12 +138,18 @@ pub(crate) struct Decided {
     pub implies: Vec<(PredId, PredId)>,
     /// `p = q`: each merged literal with its representative.
     pub equal: Vec<(PredId, PredId)>,
-    /// Literals that are never TRUE.
+    /// Literals FALSE on every row (so never TRUE, and their negations
+    /// TRUE on every row).
     pub never: Vec<PredId>,
+    /// Literals never TRUE, but NULL on some rows: no constant, since
+    /// their negations are not TRUE on every row (`x = NULL`, `NULL`).
+    pub empty: Vec<PredId>,
     /// Literals TRUE on every row.
     pub always: Vec<PredId>,
     /// Each literal's facts.
     pub facts: HashMap<PredId, Facts>,
+    /// Literals NULL only where a column they read is (`total`).
+    pub total: Vec<PredId>,
 }
 
 /// What one literal says about the rows it keeps.
@@ -212,13 +218,18 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
         r
     };
     let mut constant: HashMap<PredId, bool> = HashMap::new();
-    for (p, _, t, _, _) in &lits {
+    for (p, _, t, f, _) in &lits {
         let key = (t.clone(), "#never".to_string());
         let never = *cache.implies.entry(key).or_insert_with(|| check(&s, t) == SatResult::Unsat);
         let key = (t.clone(), "#always".to_string());
         let always = *cache.implies.entry(key).or_insert_with(|| check(&s, &format!("(not {t})")) == SatResult::Unsat);
-        if never {
+        let key = (f.clone(), "#always".to_string());
+        let false_always = never && *cache.implies.entry(key).or_insert_with(|| check(&s, &format!("(not {f})")) == SatResult::Unsat);
+        if never && false_always {
             out.never.push(*p);
+            constant.insert(*p, false);
+        } else if never {
+            out.empty.push(*p);
             constant.insert(*p, false);
         } else if always {
             out.always.push(*p);
@@ -246,10 +257,22 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
             }
         }
     }
-    // Literals that imply each other are one constant: the least by id.
+    // Literals that imply each other, and whose negations do, are one
+    // constant: the least by id. (`a = 2` and `a = 2 OR NULL` are TRUE on
+    // the same rows, but their negations are not: one term would make
+    // them so.)
     let mut rep: Vec<usize> = (0..lits.len()).collect();
     for &(i, j) in &implied {
         if i < j && implied.contains(&(j, i)) {
+            let (fi, fj) = (&lits[i].3, &lits[j].3);
+            let key = (format!("#f{fi}"), fj.clone());
+            let same = *cache.implies.entry(key).or_insert_with(|| {
+                check(&s, &format!("(and {fi} (not {fj}))")) == SatResult::Unsat
+                    && check(&s, &format!("(and {fj} (not {fi}))")) == SatResult::Unsat
+            });
+            if !same {
+                continue;
+            }
             let (a, b) = (find(&mut rep, i), find(&mut rep, j));
             if a != b {
                 rep[a.max(b)] = a.min(b);
@@ -269,6 +292,25 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
         }
     }
 
+    // Literals TRUE or FALSE wherever their columns are non-NULL.
+    for (p, e, t, f, reads) in &lits {
+        let key = (format!("#total{t}"), f.clone());
+        let total = *cache.implies.entry(key).or_insert_with(|| {
+            let mut smt = Smt::default();
+            let mut known = vec!["true".to_string()];
+            e.visit(&mut |x| {
+                if let E::Col(c, ty) = x
+                    && reads.contains(c)
+                {
+                    known.push(format!("(not {})", smt.var(c, *ty).null));
+                }
+            });
+            check(&s, &format!("(and {} (not {t}) (not {f}))", known.join(" "))) == SatResult::Unsat
+        });
+        if total {
+            out.total.push(*p);
+        }
+    }
     // Each literal's width, NULL-rejected columns and hull.
     for (p, e, t, _, reads) in &lits {
         if constant.contains_key(p) {
@@ -486,10 +528,29 @@ mod tests {
         let d = decide(&t, &[gt5, gt1, ge2, le1, inl, m3]);
         assert!(d.implies.contains(&(gt5, gt1)) || d.implies.contains(&(gt5, ge2.min(gt1))));
         assert!(d.equal.contains(&(ge2, gt1)) || d.equal.contains(&(gt1, ge2)));
-        assert!(d.never.contains(&m3));
+        // Never TRUE, but NULL where `a` is: no constant.
+        assert!(d.empty.contains(&m3) && !d.never.contains(&m3));
         assert_eq!(d.facts[&inl].width, Some(2));
         let h = &d.facts[&inl].hull["foo.a"];
         assert_eq!((h.lo, h.hi), (Some(((1, 1), false)), Some(((2, 1), false))));
         assert!(d.facts[&le1].nonnull.contains("foo.a"));
+    }
+
+    /// `a IN (2, NULL)` is TRUE where `a = 2` is, but never FALSE: the two
+    /// are no one predicate, or `NOT a = 2` would keep nothing. Nor is
+    /// `NULL` the constant `false`, whose negation keeps every row.
+    #[test]
+    fn null_three_valued() {
+        let mut t = Terms::default();
+        let eq2 = E::Cmp(Cmp::Eq, col("foo.a"), int(2));
+        let null = E::Lit(Lit::Null, Ty::Bool);
+        let p = make(&mut t, &eq2);
+        let q = make(&mut t, &flat_or(vec![eq2.clone(), null.clone()]));
+        let n = make(&mut t, &null);
+        let lits: Vec<PredId> = [p, q, n].iter().flat_map(|x| [*x, t.pred(Pred::Neg(*x))]).collect();
+        let d = decide(&t, &lits);
+        assert!(d.implies.contains(&(p, q)) && d.implies.contains(&(q, p)));
+        assert!(d.equal.is_empty());
+        assert!(d.empty.contains(&n) && d.empty.contains(&t.pred(Pred::Neg(n))) && d.never.is_empty());
     }
 }

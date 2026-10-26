@@ -117,6 +117,7 @@ pub(crate) const DECLS: &str = "\
 (declare-fun neg (Pred) Pred)
 (declare-fun implies (Pred Pred) Bool)
 (declare-fun point (Pred) Bool)
+(declare-fun total (Pred) Bool)
 (declare-fun cup (Cols Cols) Cols)
 (declare-fun jcup (Cols Cols) Cols)
 (declare-fun cdiff (Cols Cols) Cols)
@@ -202,12 +203,13 @@ pub(crate) fn shared() -> Vec<Axiom> {
         ),
         ax("neg_neg", "(p Pred)", "(and (= (neg (neg p)) p) (= (reads (neg p)) (reads p)))", &["(neg p)"]),
         // `p` and `NOT p` are never both TRUE; where `p`'s columns are
-        // non-NULL, one of them is.
+        // non-NULL and `p` is NULL only where they are (`total`), one of
+        // them is. (`a IN (0, NULL)` is NULL where `a` is not 0.)
         ax(
             "filter_complement",
             "(p Pred) (x Rel)",
             "(and (<= (+ (card (filter p x)) (card (filter (neg p) x))) (card x))
-                  (=> (nonnull x (reads p)) (= (+ (card (filter p x)) (card (filter (neg p) x))) (card x))))",
+                  (=> (and (total p) (nonnull x (reads p))) (= (+ (card (filter p x)) (card (filter (neg p) x))) (card x))))",
             &["(filter p x)"],
         ),
         ax(

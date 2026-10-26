@@ -548,9 +548,16 @@ impl Reader<'_> {
                     Operator::Multiply => arith(Arith::Mul),
                     Operator::Divide => arith(Arith::Div),
                     Operator::Modulo => arith(Arith::Mod),
+                    // Never NULL: `a = b` alone is NULL where either is,
+                    // so it is asked only where neither is.
                     Operator::IsDistinctFrom | Operator::IsNotDistinctFrom => {
-                        let eq = E::Cmp(Cmp::Eq, Box::new(a.clone()), Box::new(b.clone()));
-                        let both = E::And(vec![E::IsNull(Box::new(a.clone())), E::IsNull(Box::new(b.clone()))]);
+                        let (na, nb) = (E::IsNull(Box::new(a.clone())), E::IsNull(Box::new(b.clone())));
+                        let eq = flat_and(vec![
+                            E::Cmp(Cmp::Eq, Box::new(a.clone()), Box::new(b.clone())),
+                            E::Not(Box::new(na.clone())),
+                            E::Not(Box::new(nb.clone())),
+                        ]);
+                        let both = E::And(vec![na, nb]);
                         let same = flat_or(vec![eq, both]);
                         match op {
                             Operator::IsNotDistinctFrom => same,
@@ -925,5 +932,23 @@ mod tests {
         assert_eq!(float(-2.5e3), Some(Lit::Int(-2500)));
         let m = E::Arith(Arith::Mod, Box::new(col("foo.a")), Box::new(int(3)), Ty::Int);
         assert_eq!(E::Cmp(Cmp::Gt, Box::new(m), Box::new(int(2))).text(), "foo.a%3>2");
+    }
+
+    /// `a IS DISTINCT FROM 2` is TRUE where `a` is NULL, and `IS NOT
+    /// DISTINCT FROM` FALSE: neither is ever NULL.
+    #[test]
+    fn distinct_from_is_two_valued() {
+        use datafusion::prelude::{col as dcol, lit};
+        let reader = Reader { col: &|c: &datafusion::common::Column| Some((format!("foo.{}", c.name), Ty::Int)) };
+        for (op, distinct) in [(Operator::IsDistinctFrom, true), (Operator::IsNotDistinctFrom, false)] {
+            let e = reader.read(&Expr::BinaryExpr(BinaryExpr::new(Box::new(dcol("a")), op, Box::new(lit(2i64))))).unwrap();
+            let mut smt = Smt::default();
+            let t = smt.truth(&e).unwrap();
+            let s = z3::Solver::new();
+            s.from_string(format!("{}(assert |n!foo.a|)", smt.declarations()));
+            let truth = if distinct { &t.t } else { &t.f };
+            s.from_string(format!("(assert (not {truth}))"));
+            assert_eq!(s.check(), z3::SatResult::Unsat, "{op} with a NULL: {}", e.text());
+        }
     }
 }
