@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use z3::ast::{Bool, Int};
-use z3::{SatResult, Solver};
+use z3::{Model, SatResult, Solver};
 
 use crate::analyzer::solver_with_timeout;
 
@@ -113,6 +113,14 @@ pub(crate) struct Search {
     output: Int,
 }
 
+/// The outcome of trying to prove a claim.
+enum Check {
+    Proved,
+    /// A model of the constraints in which the claim fails.
+    Refuted(Model),
+    Undecided,
+}
+
 impl Search {
     /// A solver loaded with `constraints`, bounding variable `root`.
     pub(crate) fn new(constraints: &str, root: &str) -> (Self, usize) {
@@ -128,13 +136,46 @@ impl Search {
         )
     }
 
-    /// True if the constraints entail `claim`.
-    fn proves(&self, claim: Bool) -> bool {
+    /// Whether the constraints entail `claim`, with a counterexample if not.
+    fn check(&self, claim: Bool) -> Check {
         self.solver.push();
         self.solver.assert(claim.not());
-        let unsat = self.solver.check() == SatResult::Unsat;
+        let check = match self.solver.check() {
+            SatResult::Unsat => Check::Proved,
+            SatResult::Sat => self
+                .solver
+                .get_model()
+                .map_or(Check::Undecided, Check::Refuted),
+            SatResult::Unknown => Check::Undecided,
+        };
         self.solver.pop(1);
-        unsat
+        check
+    }
+
+    /// True if the constraints entail `claim`.
+    fn proves(&self, claim: Bool) -> bool {
+        matches!(self.check(claim), Check::Proved)
+    }
+
+    /// The smallest `i` in `0..=hi` with `claim(i)` proven, for claims that
+    /// weaken as `i` grows, `claim(hi)` proven. A counterexample to one claim
+    /// skips the later ones it also refutes: `at` reads values off its model,
+    /// and `holds(v, j)` says whether `claim(j)` holds at them.
+    fn first<V>(
+        &self,
+        hi: u64,
+        claim: impl Fn(u64) -> Bool,
+        at: impl Fn(&Model) -> Option<V>,
+        holds: impl Fn(&V, u64) -> bool,
+    ) -> u64 {
+        smallest(0, hi, |i| match self.check(claim(i)) {
+            Check::Proved => Ok(i),
+            Check::Refuted(m) => Err(match at(&m) {
+                Some(v) => (i + 1..hi).find(|&j| holds(&v, j)).unwrap_or(hi),
+                None => i + 1,
+            }),
+            Check::Undecided => Err(i + 1),
+        })
     }
 
     /// True if variable `x` is provably zero.
@@ -156,22 +197,37 @@ impl Search {
         let last = candidates.len() - 1;
         let below = |i: usize| {
             let (p, q) = candidates[i];
-            self.proves((&x * Int::from_u64(q)).le(&d * Int::from_u64(p)))
+            (&x * Int::from_u64(q)).le(&d * Int::from_u64(p))
         };
         let above = |i: usize| {
             let (p, q) = candidates[i];
-            self.proves((&x * Int::from_u64(q)).ge(&d * Int::from_u64(p)))
+            (&x * Int::from_u64(q)).ge(&d * Int::from_u64(p))
+        };
+        // A model with values `x` and `d` refutes `p/q` as an upper ratio
+        // if `q·x > p·d`, and as a lower one if `q·x < p·d`.
+        let at = |m: &Model| Some((value(m, &x)?, value(m, &d)?));
+        let scaled = |i: usize, x: i128, d: i128| {
+            let (p, q) = candidates[i];
+            (q as i128 * x, p as i128 * d)
         };
         // Most ratios are unconstrained: try the weakest claim on each side
         // before searching.
-        let hi = if below(last - 1) {
-            smallest(0, last as u64 - 1, |i| below(i as usize)) as usize
+        let hi = if self.proves(below(last - 1)) {
+            let holds = |&(x, d): &(i128, i128), j: u64| {
+                let (qx, pd) = scaled(j as usize, x, d);
+                qx <= pd
+            };
+            self.first(last as u64 - 1, |i| below(i as usize), at, holds) as usize
         } else {
             last
         };
-        let lo = if above(1) {
+        let lo = if self.proves(above(1)) {
             // `above` holds up to some index; search from the top.
-            last - smallest(0, last as u64 - 1, |i| above(last - i as usize)) as usize
+            let holds = |&(x, d): &(i128, i128), j: u64| {
+                let (qx, pd) = scaled(last - j as usize, x, d);
+                qx >= pd
+            };
+            last - self.first(last as u64 - 1, |i| above(last - i as usize), at, holds) as usize
         } else {
             0
         };
@@ -201,7 +257,14 @@ impl Search {
 
     /// The largest `N` with `X >= N`.
     pub(crate) fn lower(&self) -> u64 {
-        smallest(0, CAP, |n| !self.proves(self.output.ge(Int::from_u64(n + 1))))
+        // A model with `X = v` leaves `X >= v + 1` unproven.
+        smallest(0, CAP, |n| {
+            match self.check(self.output.ge(Int::from_u64(n + 1))) {
+                Check::Proved => Err(n + 1),
+                Check::Refuted(m) => Ok(natural(value(&m, &self.output)).unwrap_or(n)),
+                Check::Undecided => Ok(n),
+            }
+        })
     }
 
     /// The smallest `N` with `X <= N`.
@@ -209,25 +272,45 @@ impl Search {
         if !self.proves(self.output.le(Int::from_u64(CAP))) {
             return None;
         }
+        // A model with `X = v` refutes `X <= n` for every `n < v`.
         Some(smallest(0, CAP, |n| {
-            self.proves(self.output.le(Int::from_u64(n)))
+            match self.check(self.output.le(Int::from_u64(n))) {
+                Check::Proved => Ok(n),
+                Check::Refuted(m) => Err(natural(value(&m, &self.output)).unwrap_or(n + 1)),
+                Check::Undecided => Err(n + 1),
+            }
         }))
     }
 
     /// The smallest `c`, then smallest `d`, with `X <= c·s + d`.
     pub(crate) fn linear(&self, x: &Int) -> Option<(Linear, bool)> {
         let candidates = coefficients();
-        let feasible = |i: usize| {
-            let (num, den) = candidates[i];
-            self.proves(self.upper(x, num, den, CAP))
+        let claim = |i: u64| {
+            let (num, den) = candidates[i as usize];
+            self.upper(x, num, den, CAP)
         };
-        let last = candidates.len() - 1;
-        if !feasible(last) {
+        let last = candidates.len() as u64 - 1;
+        if !self.proves(claim(last)) {
             return None;
         }
-        let i = smallest(0, last as u64, |i| feasible(i as usize)) as usize;
-        let (num, den) = candidates[i];
-        let add = smallest(0, CAP, |d| self.proves(self.upper(x, num, den, d)));
+        // A model with `X = o` and `s` refutes `p/q` if `q·o > p·s + q·CAP`,
+        // and, for `num/den`, every `d` with `den·d < den·o - num·s`.
+        let at = |m: &Model| Some((value(m, &self.output)?, value(m, x)?));
+        let i = self.first(last, claim, at, |&(o, s), j| {
+            let (p, q) = candidates[j as usize];
+            q as i128 * o <= p as i128 * s + (q * CAP) as i128
+        });
+        let (num, den) = candidates[i as usize];
+        let add = smallest(0, CAP, |d| match self.check(self.upper(x, num, den, d)) {
+            Check::Proved => Ok(d),
+            Check::Refuted(m) => Err(at(&m)
+                .and_then(|(o, s)| {
+                    let (den, num) = (den as i128, num as i128);
+                    natural(Some((den * o - num * s + den - 1) / den))
+                })
+                .unwrap_or(d + 1)),
+            Check::Undecided => Err(d + 1),
+        });
         let bound = Linear { num, den, add };
         // Also at least the bound?
         let (lhs, rhs) = sides(&self.output, x, &bound);
@@ -244,17 +327,35 @@ pub(crate) fn sides(output: &Int, x: &Int, bound: &Linear) -> (Int, Int) {
     (lhs, rhs)
 }
 
-/// The smallest value in `lo..=hi` satisfying a monotone `pred` that holds at `hi`.
-fn smallest(mut lo: u64, mut hi: u64, pred: impl Fn(u64) -> bool) -> u64 {
+/// The smallest value in `lo..=hi` satisfying a monotone predicate that holds
+/// at `hi`. `test(n)` decides it at `n` and may tell more: `Ok(m)` that it
+/// holds at `m <= n`, `Err(m)` that it fails below `m > n`.
+///
+/// Answers are mostly far below `hi`, and only failures tell more, so this
+/// gallops up from `lo` in doubling steps before bisecting.
+fn smallest(mut lo: u64, mut hi: u64, test: impl Fn(u64) -> Result<u64, u64>) -> u64 {
+    let mut step = 0u64;
     while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if pred(mid) {
-            hi = mid;
-        } else {
-            lo = mid + 1;
+        let n = lo.saturating_add(step).min(lo + (hi - lo) / 2);
+        match test(n) {
+            Ok(m) => hi = m.clamp(lo, n),
+            Err(m) => {
+                lo = m.clamp(n + 1, hi);
+                step = 2 * step + 1;
+            }
         }
     }
     hi
+}
+
+/// `x`'s value in `model`.
+fn value(model: &Model, x: &Int) -> Option<i128> {
+    model.eval(x, true)?.as_i64().map(i128::from)
+}
+
+/// `v` if it is a `u64`.
+fn natural(v: Option<i128>) -> Option<u64> {
+    u64::try_from(v?).ok()
 }
 
 /// Reduced fractions `p/q` with `q <= MAX_DEN` and `p/q <= MAX_COEFF`, ascending.
