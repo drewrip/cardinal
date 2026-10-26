@@ -157,10 +157,11 @@ async fn compare() {
                     unsound.push(format!("{} {planner} {mode}: {} not {truth}", c.name, show(b.lower, b.upper)));
                 }
                 println!(
-                    "{:<22} {planner:<4} {mode:<6} truth {truth:<6} uf {:<12} ({tu:.1}s, {} checks, {} dropped) {main_text}",
+                    "{:<22} {planner:<4} {mode:<6} truth {truth:<6} uf {:<12} ({tu:.1}s, {} checks, {} needed, {} dropped) {main_text}",
                     c.name,
                     show(b.lower, b.upper),
                     b.checks,
+                    b.needed,
                     b.dropped.len(),
                 );
                 if std::env::var("STATS").is_ok() {
@@ -200,6 +201,23 @@ async fn describe() {
                 let l = state.optimize(&state.create_logical_plan(&sql).await.unwrap()).unwrap();
                 println!("{}", l.display_indent());
                 println!("datafusion: {}", enc.target_term(&l));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn columns() {
+    let Ok(name) = std::env::var("COLUMNS") else { return };
+    for dir in ["extra", "tpch"] {
+        for plan in plans(dir).await {
+            if plan.name == name {
+                for (i, n) in plan.nodes.iter().enumerate() {
+                    if let cardinal::observed::Op::Aggregate { values, .. } = &n.op {
+                        println!("#{i}: {:?}", n.columns.iter().map(|c| (&c.name, format!("{:?}", c.lineage))).collect::<Vec<_>>());
+                        println!("   values {:?}", values.iter().map(|v| v.as_ref().map(|v| v.to_string())).collect::<Vec<_>>());
+                    }
+                }
             }
         }
     }

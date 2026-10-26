@@ -44,6 +44,9 @@ pub struct Bound {
     pub dropped: Vec<String>,
     /// Solver checks made.
     pub checks: usize,
+    /// The most quantifier instances a proven check made: what a budget
+    /// must allow.
+    pub needed: u64,
     pub time: Duration,
     pub stats: Stats,
 }
@@ -204,8 +207,11 @@ impl<'c> Encoder<'c> {
         if timing {
             eprintln!("uf: program {:.2}s, {} bytes", t0.elapsed().as_secs_f64(), program.text.len());
         }
-        if std::env::var("CARDINAL_UF_DUMP").is_ok() {
-            let _ = std::fs::write(std::env::var("CARDINAL_UF_DUMP").unwrap(), &program.text);
+        if let Ok(path) = std::env::var("CARDINAL_UF_DUMP") {
+            // `{}` in the path numbers each program.
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::write(path.replace("{}", &n.to_string()), &program.text);
         }
         let t0 = Instant::now();
         let mut s = solve::Session::new(&program);
@@ -229,7 +235,7 @@ impl<'c> Encoder<'c> {
             lower = 0;
         }
         let _ = s.in_use();
-        Ok(Bound { lower, upper, dropped, checks: s.checks, time: start.elapsed(), stats: program.stats })
+        Ok(Bound { lower, upper, dropped, checks: s.checks, needed: s.needed, time: start.elapsed(), stats: program.stats })
     }
 }
 

@@ -169,6 +169,7 @@ impl Builder<'_> {
             JoinType::LeftSemi => JoinKind::Semi,
             JoinType::LeftAnti if null_aware => JoinKind::NotIn,
             JoinType::LeftAnti => JoinKind::Anti,
+            JoinType::Full => JoinKind::Full,
             _ => return None,
         };
         let j = self.terms.rel(Rel::Join(k, fam, l, r));
@@ -385,6 +386,10 @@ fn translate_observed(b: &mut Builder, plan: &ObservedPlan, physical: bool) -> (
     }
     t.plan_aliases(plan.root, "");
     let root = t.node(b, plan.root, "").rel;
+    // A scan read with and without its runtime filters states their
+    // values once.
+    let mut seen = BTreeSet::new();
+    t.facts.retain(|(n, _)| seen.insert(n.clone()));
     (t.facts, root)
 }
 
@@ -547,10 +552,12 @@ impl Executed<'_> {
         let node = self.plan.nodes.get(k)?;
         let Op::Aggregate { keys, values } = &node.op else { return None };
         let j = node.columns[keys.len()..].iter().position(|col| col.name == c.name)?;
-        let v = values.get(j)?.as_ref()?;
         let read = |e: &Expr| Reader { col: &|c| self.col(b, c, suffix) }.read(e);
-        let (name, agg) = aggregate(v, &read)?;
-        Some((name, agg.ty))
+        match values.get(j)?.as_ref().and_then(|v| aggregate(v, &read)) {
+            Some((name, agg)) => Some((name, agg.ty)),
+            // A value that did not read is still a column of its own.
+            None => Some((self.opaque_value(k, suffix, &c.name), Ty::Other)),
+        }
     }
 
     fn read(&self, b: &Builder, e: &Expr, suffix: &str) -> Option<E> {
@@ -562,6 +569,12 @@ impl Executed<'_> {
     fn opaque_pred(&self, b: &mut Builder, i: usize, k: usize, e: Option<&Expr>, suffix: &str) -> PredId {
         let reads = e.and_then(|e| e.column_refs().into_iter().map(|c| self.col(b, c, suffix).map(|(c, _)| c)).collect());
         b.terms.pred(Pred::Opaque(format!("{}#{i}{suffix}:{k}", self.name), reads))
+    }
+
+    /// The column of aggregate `k`'s value `name` that did not read: a
+    /// value of that operator alone.
+    fn opaque_value(&self, k: usize, suffix: &str, name: &str) -> Col {
+        format!("a:{}#{k}{suffix}.{name}", self.name)
     }
 
     fn occ(&self, i: usize, suffix: &str, what: &str) -> String {
@@ -576,6 +589,16 @@ impl Executed<'_> {
         // A join whose output the runtime filters below it cannot change:
         // its inputs read without them.
         let resolved = self.resolved_at.get(&i).cloned().unwrap_or_default();
+        // Its inputs as they ran, for their counts.
+        if !resolved.is_empty() {
+            let inner = match &self.plan.nodes[i].op {
+                Op::Reuse { suffix: s, .. } => format!("{s}{suffix}"),
+                _ => suffix.to_string(),
+            };
+            for c in self.plan.nodes[i].children.clone() {
+                self.node(b, c, &inner);
+            }
+        }
         let saved = self.dropping.clone();
         self.dropping.extend(resolved);
         let mut out = self.build(b, i, suffix);
@@ -611,15 +634,18 @@ impl Executed<'_> {
                 let (_, alias) = self.table_alias(&inst);
                 let mut x = b.scan(table, alias);
                 let (optional, required): (Vec<_>, Vec<_>) = filters.iter().partition(|p| p.optional);
+                // One conjunction, in the canonical order (§5).
+                let mut exprs = vec![];
                 for (k, p) in required.iter().enumerate() {
-                    x = match p.expr.as_ref().and_then(|e| self.read(b, e, suffix)) {
-                        Some(e) => b.filter(x, &e),
+                    match p.expr.as_ref().and_then(|e| self.read(b, e, suffix)) {
+                        Some(e) => exprs.push(e),
                         None => {
                             let q = self.opaque_pred(b, i, k, p.expr.as_ref(), suffix);
-                            b.filter_preds(x, &[q])
+                            x = b.filter_preds(x, &[q]);
                         }
-                    };
+                    }
                 }
+                x = b.filter(x, &flat_and(exprs));
                 for (k, p) in optional.iter().enumerate().filter(|_| self.physical) {
                     let o = self.occ(i, suffix, &format!(":opt{k}"));
                     match p.expr.as_ref().and_then(|e| self.read(b, e, suffix)) {
@@ -674,7 +700,10 @@ impl Executed<'_> {
                 for (j, v) in values.iter().enumerate() {
                     let col = &node.columns[keys.len() + j];
                     let read = format!("@{i}.{}", col.name);
-                    let named = v.as_ref().and_then(|v| aggregate(v, &|e| self.read(b, e, suffix)));
+                    let named = v.as_ref().and_then(|v| aggregate(v, &|e| self.read(b, e, suffix))).or_else(|| {
+                        let name = self.opaque_value(i, suffix, &col.name);
+                        Some((name, Agg { func: "opaque".into(), arg: None, distinct: false, ty: Ty::Other }))
+                    });
                     match named {
                         Some((c, a)) => {
                             cols.push(Some(E::Col(c.clone(), a.ty)));
@@ -737,6 +766,15 @@ impl Executed<'_> {
     }
 
     fn opaque(&mut self, b: &mut Builder, i: usize, suffix: &str) -> Out {
+        if std::env::var("CARDINAL_UF_OPAQUE").is_ok() {
+            let n = &self.plan.nodes[i];
+            let detail = match &n.op {
+                Op::Join { on, .. } => on.iter().map(|p| format!("{} => {:?}", p.text, p.expr.as_ref().map(|e| e.to_string()))).collect::<Vec<_>>().join("; "),
+                Op::Aggregate { keys, values } => format!("keys {keys:?} values {values:?}"),
+                _ => String::new(),
+            };
+            eprintln!("uf: opaque {}#{i} {}: {detail}", self.name, n.op);
+        }
         // Its inputs are still terms with counts.
         for &c in &self.plan.nodes[i].children.clone() {
             self.node(b, c, suffix);
@@ -757,6 +795,12 @@ impl Executed<'_> {
         suffix: &str,
     ) -> Option<(Vec<(E, E)>, Option<E>, bool)> {
         let exprs: Option<Vec<E>> = on.iter().map(|p| self.read(b, p.expr.as_ref()?, suffix)).collect();
+        if exprs.is_none() && std::env::var("CARDINAL_UF_OPAQUE").is_ok() {
+            for p in on {
+                let refs: Vec<String> = p.expr.iter().flat_map(|e| e.column_refs()).map(|c| format!("{c} -> {:?}", self.col(b, c, suffix))).collect();
+                eprintln!("uf: condition {} reads {refs:?}: {:?}", p.text, p.expr.as_ref().map(|e| self.read(b, e, suffix)));
+            }
+        }
         let exprs = exprs?;
         let side = |e: &E, o: &Out| e.reads().iter().all(|c| o.cols.iter().flatten().any(|x| x.reads().contains(c)));
         let null_eq = !on.is_empty()

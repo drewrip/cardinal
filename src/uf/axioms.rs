@@ -30,7 +30,49 @@ impl Axiom {
         for p in &self.patterns {
             write!(out, " :pattern ({p})").unwrap();
         }
-        writeln!(out, " :qid {name})))").unwrap();
+        writeln!(out, " :weight {} :qid {name})))", weight(&self.name)).unwrap();
+    }
+}
+
+/// An axiom's weight, which Z3 adds to an instance's generation to rank
+/// it: what states one operator's meaning goes first, what relates
+/// operators (pushing a filter down, regrouping joins) next, and what
+/// combines facts over many terms (containment chains, commuting and
+/// complementing filters, FD chains, products) last. A check's budget
+/// of instances is spent in that order.
+fn weight(name: &str) -> u32 {
+    let base = name.split(['[', '|']).next().unwrap_or(name);
+    const LAST: &[&str] = &[
+        "filter_commute",
+        "filter_complement",
+        "filter_incl_excl",
+        "filter_mono",
+        "sub_trans",
+        "sub_min",
+        "sub_max",
+        "sub_ndv",
+        "sub_fd",
+        "sub_nonnull",
+        "sub_key",
+        "fd_trans",
+        "fd_ndv",
+        "ndv_product",
+        "ndv_mono",
+        "range_point",
+        "range_order",
+        "range_ndv",
+        "one_row",
+        "or_incl_excl",
+        "and_lower",
+        "dom_sub",
+    ];
+    const NEXT: &[&str] = &["assoc", "inner_mono", "semi_mono", "anti_mono", "left_mono", "group_mono", "extend_join", "rt_push"];
+    if LAST.contains(&base) {
+        8
+    } else if NEXT.iter().any(|p| base.starts_with(p)) || base.ends_with("_push") || base.contains("push") {
+        3
+    } else {
+        0
     }
 }
 
@@ -76,6 +118,7 @@ pub(crate) const DECLS: &str = "\
 (declare-fun implies (Pred Pred) Bool)
 (declare-fun point (Pred) Bool)
 (declare-fun cup (Cols Cols) Cols)
+(declare-fun jcup (Cols Cols) Cols)
 (declare-fun cdiff (Cols Cols) Cols)
 (declare-fun csub (Cols Cols) Bool)
 (declare-fun orof (Pred Pred Pred) Bool)
@@ -129,20 +172,16 @@ pub(crate) fn shared() -> Vec<Axiom> {
             "(=> (and (fd x X Y) (csub X (cdiff W Y))) (<= (ndv x W) (ndv x (cdiff W Y))))",
             &["(fd x X Y) (ndv x W)"],
         ),
-        // A join's columns are a `cup` of its sides' (an expression
+        // A join's columns are a `jcup` of its sides' (an expression
         // column's, of its input's and its own): a set is within it if
-        // within either part, or split between them.
-        ax(
-            "csub_cup",
-            "(W Cols) (x Rel) (B Cols)",
-            "(=> (or (csub W (cols x)) (csub W B)) (csub W (cup (cols x) B)))",
-            &["(csub W (cup (cols x) B))"],
-        ),
+        // within either part, or split between them. Small sets' unions
+        // are `cup`, which these never match.
+        ax("csub_cup", "(W Cols) (A Cols) (B Cols)", "(=> (or (csub W A) (csub W B)) (csub W (jcup A B)))", &["(csub W (jcup A B))"]),
         ax(
             "csub_split",
-            "(W1 Cols) (W2 Cols) (x Rel) (B Cols)",
-            "(=> (and (csub W1 (cols x)) (csub W2 B)) (csub (cup W1 W2) (cup (cols x) B)))",
-            &["(csub (cup W1 W2) (cup (cols x) B))"],
+            "(W1 Cols) (W2 Cols) (A Cols) (B Cols)",
+            "(=> (and (csub W1 A) (csub W2 B)) (csub (cup W1 W2) (jcup A B)))",
+            &["(csub (cup W1 W2) (jcup A B))"],
         ),
         // A set of columns is non-NULL where each part is.
         ax(
@@ -346,7 +385,7 @@ pub(crate) fn shared() -> Vec<Axiom> {
         ax(
             "extend_basic",
             "(g Cols) (x Rel)",
-            "(and (= (card (extend g x)) (card x)) (= (cols (extend g x)) (cup (cols x) g)) (fd (extend g x) (def g) g))",
+            "(and (= (card (extend g x)) (card x)) (= (cols (extend g x)) (jcup (cols x) g)) (fd (extend g x) (def g) g))",
             &["(extend g x)"],
         ),
         ax(
@@ -518,7 +557,7 @@ pub(crate) fn family(f: &Fam) -> Vec<Axiom> {
             n("inner_basic"),
             "(x Rel) (y Rel)",
             &format!(
-                "(and (= (cols ({j} x y)) (cup (cols x) (cols y))) (<= (card ({j} x y)) (* (card x) (card y)))
+                "(and (= (cols ({j} x y)) (jcup (cols x) (cols y))) (<= (card ({j} x y)) (* (card x) (card y)))
                       (fd ({j} x y) {kl} {kr}) (fd ({j} x y) {kr} {kl}) (= ({j} x y) ({m} y x)))"
             ),
             &[&format!("({j} x y)")],
@@ -594,7 +633,7 @@ pub(crate) fn family(f: &Fam) -> Vec<Axiom> {
             n("left_basic"),
             "(x Rel) (y Rel)",
             &format!(
-                "(and (= (cols ({lj} x y)) (cup (cols x) (cols y))) (= (card ({lj} x y)) (+ (card ({j} x y)) (card ({a} x y)))))"
+                "(and (= (cols ({lj} x y)) (jcup (cols x) (cols y))) (= (card ({lj} x y)) (+ (card ({j} x y)) (card ({a} x y)))))"
             ),
             &[&format!("({lj} x y)")],
         ),

@@ -29,6 +29,8 @@ pub(crate) struct Program {
     pub tracked: Vec<(String, String)>,
     pub root: String,
     pub stats: Stats,
+    /// How many assertions the text holds, to check it parses whole.
+    pub assertions: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -650,7 +652,7 @@ pub(crate) fn build(
         writeln!(decls, "(declare-const {o} Rel)").unwrap();
     }
     for f in &fams {
-        for k in [JoinKind::Inner, JoinKind::Left, JoinKind::Semi, JoinKind::Anti, JoinKind::NotIn] {
+        for k in [JoinKind::Inner, JoinKind::Left, JoinKind::Semi, JoinKind::Anti, JoinKind::NotIn, JoinKind::Full] {
             writeln!(decls, "(declare-fun {} (Rel Rel) Rel)", e.terms.fam_fn(*f, k)).unwrap();
         }
     }
@@ -682,7 +684,8 @@ pub(crate) fn build(
         axioms: axs.len(),
         bytes: text.len(),
     };
-    Program { text, tracked, root: root_term, stats }
+    let assertions = text.matches("(assert ").count();
+    Program { text, tracked, root: root_term, stats, assertions }
 }
 
 fn fact_rels(f: &Fact) -> Vec<RelId> {
@@ -802,11 +805,34 @@ impl Emit<'_> {
     }
 }
 
-/// What families need beyond the table: NOT IN, and cross joins.
+/// What families need beyond the table: NOT IN, full joins, and cross
+/// joins.
 fn family_extra(e: &Emit, f: FamId, fam: &Fam) -> Vec<Axiom> {
     let ni = e.terms.fam_fn(f, JoinKind::NotIn);
+    let fj = e.terms.fam_fn(f, JoinKind::Full);
+    let ma = e.terms.fam_fn(e.terms.mirror(f), JoinKind::Anti);
     let (a, j, s, kl, kr, tag) = (&fam.a, &fam.j, &fam.s, &fam.kl, &fam.kr, &fam.tag);
-    let mut out = vec![ax(
+    let mut out = vec![
+        ax(
+            format!("full_basic{tag}"),
+            "(x Rel) (y Rel)",
+            &format!(
+                "(and (= (cols ({fj} x y)) (jcup (cols x) (cols y)))
+                      (= (card ({fj} x y)) (+ (card ({j} x y)) (card ({a} x y)) (card ({ma} y x)))))"
+            ),
+            &[&format!("({fj} x y)")],
+        ),
+        ax(
+            format!("full_vals{tag}"),
+            "(x Rel) (y Rel) (W Cols)",
+            &format!(
+                "(and (=> (csub W (cols x)) (<= (ndv ({fj} x y) W) (+ (ndv x W) 1)))
+                      (=> (csub W (cols y)) (<= (ndv ({fj} x y) W) (+ (ndv y W) 1))))"
+            ),
+            &[&format!("(ndv ({fj} x y) W)")],
+        ),
+    ];
+    out.push(ax(
         format!("notin_basic{tag}"),
         "(x Rel) (y Rel)",
         &format!(
@@ -814,7 +840,7 @@ fn family_extra(e: &Emit, f: FamId, fam: &Fam) -> Vec<Axiom> {
                   (=> (and (nonnull x {kl}) (nonnull y {kr})) (= ({ni} x y) ({a} x y))))"
         ),
         &[&format!("({ni} x y)")],
-    )];
+    ));
     let family = &e.terms.families[f.0 as usize];
     if family.pairs.is_empty() && family.residual.is_none() {
         out.push(ax(

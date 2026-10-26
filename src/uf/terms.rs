@@ -28,6 +28,9 @@ pub(crate) enum JoinKind {
     /// `x.L NOT IN (SELECT R FROM y)`: the anti join's rows, but none at all
     /// where `y` has a NULL key, and none with a NULL key of their own.
     NotIn,
+    /// The full outer join: the inner join's rows, and each side's rows
+    /// without a partner, padded.
+    Full,
 }
 
 impl JoinKind {
@@ -38,6 +41,7 @@ impl JoinKind {
             JoinKind::Semi => "semi",
             JoinKind::Anti => "anti",
             JoinKind::NotIn => "notin",
+            JoinKind::Full => "fjoin",
         }
     }
 }

@@ -141,24 +141,29 @@ impl Lit {
     }
 }
 
-/// A finite float as an exact fraction, if it fits.
+/// A finite float as the fraction its shortest decimal text names
+/// (`0.0001`), which is how a query wrote it.
 fn float(f: f64) -> Option<Lit> {
     if !f.is_finite() {
         return None;
     }
+    let text = format!("{f:e}");
+    let (mantissa, exp) = text.split_once('e')?;
+    let exp: i32 = exp.parse().ok()?;
+    let (neg, mantissa) = match mantissa.strip_prefix('-') {
+        Some(m) => (true, m),
+        None => (false, mantissa),
+    };
+    let (w, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut num: i128 = format!("{w}{frac}").parse().ok()?;
+    let scale = exp - frac.len() as i32;
     let mut den: i128 = 1;
-    let mut x = f;
-    while x.fract() != 0.0 {
-        x *= 2.0;
-        den = den.checked_mul(2)?;
-        if den > 1 << 60 {
-            return None;
-        }
+    if scale >= 0 {
+        num = num.checked_mul(10i128.checked_pow(scale as u32)?)?;
+    } else {
+        den = 10i128.checked_pow((-scale) as u32)?;
     }
-    if x.abs() > 1e30 {
-        return None;
-    }
-    Some(Lit::dec(x as i128, den))
+    Some(Lit::dec(if neg { -num } else { num }, den))
 }
 
 fn decimal_text(n: i128, d: i128) -> String {
@@ -916,6 +921,8 @@ mod tests {
         assert_eq!(Lit::dec(5, 100).text(), "0.05");
         assert_eq!(Lit::dec(-1, 2).text(), "-0.5");
         assert_eq!(Lit::dec(1, 3).text(), "1/3");
+        assert_eq!(float(0.0001), Some(Lit::dec(1, 10000)));
+        assert_eq!(float(-2.5e3), Some(Lit::Int(-2500)));
         let m = E::Arith(Arith::Mod, Box::new(col("foo.a")), Box::new(int(3)), Ty::Int);
         assert_eq!(E::Cmp(Cmp::Gt, Box::new(m), Box::new(int(2))).text(), "foo.a%3>2");
     }
