@@ -1,0 +1,256 @@
+//! Z3 checks over a program: the consistency check (§6.6) and bound
+//! extraction (§9).
+//!
+//! Every check runs under an instantiation budget (`smt.qi.max_instances`)
+//! besides the time limit: pattern matching never saturates on a program
+//! of many plans, so a claim it cannot prove would otherwise run to the
+//! time limit. A solver whose check stopped short proves less afterwards,
+//! so a check after one that failed starts a fresh solver; a proven check
+//! leaves its solver as it was (`push`/`pop`).
+//!
+//! Z3's optimizer gives no candidate over quantified axioms (its interval
+//! is unbounded), so bounds are searched for by checks alone: the lower
+//! bound by galloping up from 1, then the upper bound, first at the lower
+//! bound itself, else by bisection from the cap. The search runs on a
+//! small budget, and its last step again on a large one. The lower and
+//! upper searches run in threads of their own. Only proven bounds are
+//! returned.
+
+use z3::ast::Bool;
+use z3::{Params, SatResult, Solver};
+
+use super::program::Program;
+
+/// Per-check time limit (§8).
+pub(crate) const TIMEOUT_MS: u32 = 1_000;
+/// Quantifier instances per check while searching, and to confirm.
+const BUDGET: u32 = 5_000;
+const BUDGET_CONFIRM: u32 = 50_000;
+/// Largest bound tried; a bound needing more is no bound.
+const CAP: u64 = 1 << 30;
+
+/// Checks of claims about the root, in one thread.
+struct Checker<'a> {
+    text: &'a str,
+    root: &'a str,
+    /// The literals of the facts in use.
+    active: Vec<Bool>,
+    solver: Option<Solver>,
+    budget: u32,
+    checks: usize,
+}
+
+impl<'a> Checker<'a> {
+    fn new(text: &'a str, root: &'a str, active: &[String], budget: u32) -> Checker<'a> {
+        let active = active.iter().map(|l| Bool::new_const(l.trim_matches('|'))).collect();
+        Checker { text, root, active, solver: None, budget, checks: 0 }
+    }
+
+    fn solver(&mut self) -> &Solver {
+        if self.solver.is_none() {
+            let s = Solver::new();
+            let mut p = Params::new();
+            p.set_u32("timeout", TIMEOUT_MS);
+            p.set_bool("smt.auto_config", false);
+            p.set_bool("smt.mbqi", false);
+            p.set_u32("smt.qi.max_instances", self.budget);
+            s.set_params(&p);
+            s.from_string(self.text);
+            self.solver = Some(s);
+        }
+        self.solver.as_ref().unwrap()
+    }
+
+    /// Whether the axioms and facts in use entail `claim`.
+    fn proves(&mut self, claim: &str) -> bool {
+        self.checks += 1;
+        let root = self.root.to_string();
+        let active = self.active.clone();
+        let s = self.solver();
+        s.push();
+        s.from_string(format!("(assert (not {}))", claim.replace("|root!|", &root)));
+        let t = std::time::Instant::now();
+        let r = s.check_assumptions(&active);
+        s.pop(1);
+        if std::env::var("CARDINAL_UF_TIME").is_ok() {
+            eprintln!("uf: check {claim} {r:?} {:.2}s", t.elapsed().as_secs_f64());
+        }
+        if r != SatResult::Unsat {
+            self.solver = None;
+        }
+        r == SatResult::Unsat
+    }
+
+    fn le(&mut self, b: u64) -> bool {
+        self.proves(&format!("(<= |root!| {b})"))
+    }
+
+    fn ge(&mut self, b: u64) -> bool {
+        b == 0 || self.proves(&format!("(>= |root!| {b})"))
+    }
+
+    /// The budget for checks from now on.
+    fn budget(&mut self, b: u32) {
+        if b != self.budget {
+            self.budget = b;
+            self.solver = None;
+        }
+    }
+
+    /// The greatest `B` proven `root ≥ B`.
+    fn lower(&mut self) -> u64 {
+        if !self.ge(1) {
+            return 0;
+        }
+        // Galloping: `lo` proven, `hi` not.
+        let (mut lo, mut hi) = (1u64, None);
+        while hi.is_none() {
+            let next = lo.saturating_mul(2).min(CAP);
+            if next == lo {
+                return lo;
+            }
+            if self.ge(next) {
+                lo = next;
+            } else {
+                hi = Some(next);
+            }
+        }
+        let mut hi = hi.unwrap();
+        loop {
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if self.ge(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            // The last step again, on the large budget.
+            if self.budget == BUDGET_CONFIRM || !{
+                self.budget(BUDGET_CONFIRM);
+                self.ge(hi)
+            } {
+                return lo;
+            }
+            lo = hi;
+            hi = (hi.saturating_mul(2)).min(CAP);
+            if lo == hi {
+                return lo;
+            }
+        }
+    }
+
+    /// The least `B` proven `root ≤ B`, if any, given the root is at
+    /// least `lower`.
+    fn upper(&mut self, lower: u64) -> Option<u64> {
+        if lower > 0 && self.le(lower) {
+            return Some(lower);
+        }
+        if !self.le(CAP) {
+            self.budget(BUDGET_CONFIRM);
+            if !self.le(CAP) {
+                return None;
+            }
+        }
+        // `hi` proven, nothing below `lo` provable.
+        let (mut lo, mut hi) = (lower, CAP);
+        loop {
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if self.le(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            if hi == lower || self.budget == BUDGET_CONFIRM {
+                return Some(hi);
+            }
+            self.budget(BUDGET_CONFIRM);
+            if !self.le(hi - 1) {
+                return Some(hi);
+            }
+            hi -= 1;
+            lo = lower;
+        }
+    }
+}
+
+pub(crate) struct Session {
+    text: String,
+    /// Each tracked fact's name and literal.
+    tracked: Vec<(String, String)>,
+    /// The literals of the facts in use.
+    active: Vec<String>,
+    root: String,
+    budget: u32,
+    pub checks: usize,
+}
+
+impl Session {
+    pub(crate) fn new(program: &Program) -> Session {
+        let budget = std::env::var("CARDINAL_UF_BUDGET").ok().and_then(|b| b.parse().ok()).unwrap_or(BUDGET);
+        Session {
+            text: program.text.clone(),
+            tracked: program.tracked.clone(),
+            active: program.tracked.iter().map(|(_, l)| l.clone()).collect(),
+            root: format!("(card {})", program.root),
+            budget,
+            checks: 0,
+        }
+    }
+
+    /// Checks that the facts are consistent (§6.6): while they prove
+    /// `false`, drops every fact of the unsat core. The names dropped.
+    pub(crate) fn consistent(&mut self) -> Vec<String> {
+        let mut dropped = vec![];
+        for _ in 0..8 {
+            self.checks += 1;
+            let c = Checker::new(&self.text, &self.root, &self.active, self.budget);
+            let mut c = c;
+            let active = c.active.clone();
+            let s = c.solver();
+            if s.check_assumptions(&active) != SatResult::Unsat {
+                break;
+            }
+            let core: Vec<String> = s.get_unsat_core().iter().map(|b| format!("|{}|", b.to_string().trim_matches('|'))).collect();
+            if core.is_empty() {
+                break;
+            }
+            for (n, l) in &self.tracked {
+                if core.contains(l) {
+                    dropped.push(n.clone());
+                }
+            }
+            self.active.retain(|l| !core.contains(l));
+        }
+        dropped
+    }
+
+    /// The facts whose literals are in use.
+    pub(crate) fn in_use(&self) -> usize {
+        self.active.len()
+    }
+
+    /// The proven bounds `(lower, upper)`: the lower bound, and then the
+    /// upper, each searched for in a thread of its own; the upper search
+    /// starts from what the lower bound proves first.
+    pub(crate) fn bounds(&mut self) -> (u64, Option<u64>) {
+        let (text, root, active, budget) = (&self.text, &self.root, &self.active, self.budget);
+        let ((lower, lc), (upper, uc)) = std::thread::scope(|scope| {
+            let low = scope.spawn(move || {
+                let mut c = Checker::new(text, root, active, budget);
+                let l = c.lower();
+                (l, c.checks)
+            });
+            let up = scope.spawn(move || {
+                let mut c = Checker::new(text, root, active, budget);
+                let u = c.upper(0);
+                (u, c.checks)
+            });
+            (low.join().unwrap(), up.join().unwrap())
+        });
+        self.checks += lc + uc;
+        (lower, upper)
+    }
+}

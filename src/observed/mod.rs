@@ -201,9 +201,9 @@ impl fmt::Display for ObservedPlan {
 /// registered (they may be empty: only schemas are used).
 pub struct Catalog {
     state: SessionState,
-    tables: HashMap<String, SchemaRef>,
+    pub(crate) tables: HashMap<String, SchemaRef>,
     /// Every table's provider, to plan scans of it.
-    providers: HashMap<String, Arc<dyn TableProvider>>,
+    pub(crate) providers: HashMap<String, Arc<dyn TableProvider>>,
     /// Every table's columns, qualified by table name.
     all: Arc<DFSchema>,
     /// The predicate of each partial index of the tables, by its name, if

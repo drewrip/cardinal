@@ -17,6 +17,7 @@ mod selectivity;
 mod simple;
 pub mod trace;
 mod validate;
+pub mod uf;
 
 pub use bounds::{Bounds, Linear, TableBound};
 pub use informed::{FactMode, FactReport, Informed, Matched, MatchedReport};
