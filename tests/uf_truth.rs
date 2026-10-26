@@ -2,34 +2,42 @@
 //! queries over small generated tables run live.
 //!
 //! Four tables, deterministically seeded: two with primary keys, one
-//! referencing the other (its foreign key NULL in places), one with
-//! neither and many duplicates, and one empty; their columns skewed,
-//! duplicated and NULL in places. Queries are generated two ways: flat
-//! joins of the tables (self-joins among them; inner, left, right, full
-//! and cross; semi and anti joins as `EXISTS`, `IN` and `NOT IN` over
-//! columns with NULLs; scalar subqueries, correlated or not, in filters
-//! and in projections) under filters (NULL comparisons, `IS NULL`, `IN`
-//! and `NOT IN` lists with NULLs, `LIKE`, `OR`, `CASE`), with a grouping,
-//! HAVING, DISTINCT, LIMIT or UNION on top; and nested, as `tests/fuzz.rs`
-//! does.
+//! referencing the other by a foreign key (and by a column like it, but
+//! NULL and dangling in places), one with neither and many duplicates,
+//! and one empty; their columns skewed, duplicated and NULL in places.
+//! Queries are generated two ways: flat joins of the tables (self-joins
+//! among them; inner, left, right, full and cross; semi and anti joins as
+//! `EXISTS`, `IN` and `NOT IN` over columns with NULLs; scalar subqueries,
+//! correlated or not, in filters and in projections) under filters (NULL
+//! comparisons, `IS NULL`, `IN` and `NOT IN` lists with NULLs, `LIKE`,
+//! `OR`, `CASE`), with a grouping, HAVING, DISTINCT, LIMIT or UNION on
+//! top; and nested, as `tests/fuzz.rs` does.
 //!
 //! Each query runs in DuckDB (profiled with one thread and with four) and
 //! in DataFusion. In groups of consecutive queries, every other query's
-//! profiles are observed as facts; each query of the group is then bounded, as DataFusion plans it and as DuckDB planned
-//! it, with every observed plan's facts (an observed query's own too), and
-//! its true row count must lie within the bound.
+//! profiles are observed as facts; each query of the group is then
+//! bounded, as DataFusion plans it and as DuckDB planned it, with every
+//! observed plan's facts (an observed query's own too), and its true row
+//! count must lie within the bound.
 //!
 //! Needs the `duckdb` CLI; skipped without. `CARDINAL_UF_TRUTH_N` sets the
-//! number of generated queries (default 150), `CARDINAL_UF_TRUTH_SEED`
-//! their seed, `CARDINAL_UF_TRUTH_ONLY` (comma-separated names, `q007`)
-//! limits the queries bounded, `CARDINAL_UF_TRUTH_GROUP` the queries
-//! observed together (default 10: an encoder observing many plans of the
-//! same tables is slow), `CARDINAL_UF_TRUTH_THREADS` the groups bounded
-//! at once (default 4). Each bound's checks are limited by
-//! `CARDINAL_UF_TIMEOUT_MS` (1000 is enough).
+//! number of generated queries (default 700, about 15 minutes),
+//! `CARDINAL_UF_TRUTH_SEED` their seed, `CARDINAL_UF_TRUTH_ONLY`
+//! (comma-separated names, `q007`) limits the queries to those and their
+//! groups, `CARDINAL_UF_TRUTH_GROUP` the queries observed together
+//! (default 10: an encoder observing many plans of the same tables is
+//! slow), `CARDINAL_UF_TRUTH_THREADS` the groups bounded at once (default
+//! 4), `CARDINAL_UF_TRUTH_SHOW` prints the queries and
+//! `CARDINAL_UF_TRUTH_TRACE` each bound as it starts. Each bound's checks
+//! are limited by `CARDINAL_UF_TIMEOUT_MS` (1000 is enough).
+//!
+//! `one` bounds a single query (`CARDINAL_UF_ONE`), with other queries'
+//! profiles (`CARDINAL_UF_FACTS`), to minimize a case; `found` holds the
+//! cases minimized so far.
 //!
 //! ```sh
 //! CARDINAL_UF_TIMEOUT_MS=1000 cargo test --release --test uf_truth -- --nocapture
+//! CARDINAL_UF_ONE="SELECT * FROM rc WHERE x IN (2, NULL)" cargo test --release --test uf_truth one -- --nocapture
 //! ```
 
 mod common;
@@ -575,7 +583,7 @@ async fn uf_bounds_hold() {
         eprintln!("skipped: no duckdb CLI");
         return;
     }
-    let n: usize = env("CARDINAL_UF_TRUTH_N", 150);
+    let n: usize = env("CARDINAL_UF_TRUTH_N", 700);
     let seed: u64 = env("CARDINAL_UF_TRUTH_SEED", 11);
     let threads: usize = env("CARDINAL_UF_TRUTH_THREADS", 4);
     let group: usize = env("CARDINAL_UF_TRUTH_GROUP", 10);
