@@ -207,7 +207,7 @@ impl<'c> Encoder<'c> {
         // starts from there.
         let alone = program::build(&mut terms, &tables, &self.schema, &shape, &[], root);
         let mut s = solve::Session::new(&alone);
-        let structural = s.bounds((0, None));
+        let structural = s.bounds((0, None), false);
         let structural_checks = s.checks;
         if std::env::var("CARDINAL_UF_TIME").is_ok() {
             eprintln!("uf: alone {structural:?} in {} checks", s.checks);
@@ -236,7 +236,7 @@ impl<'c> Encoder<'c> {
             eprintln!("uf: consistent {:.2}s", t0.elapsed().as_secs_f64());
         }
         let t0 = Instant::now();
-        let (mut lower, mut upper) = s.bounds(structural);
+        let (mut lower, mut upper) = s.bounds(structural, true);
         s.checks += structural_checks;
         if timing {
             eprintln!("uf: bounds {:.2}s", t0.elapsed().as_secs_f64());

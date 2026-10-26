@@ -16,25 +16,45 @@
 //! upper searches run in threads of their own. Only proven bounds are
 //! returned.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use z3::ast::Bool;
 use z3::{Params, SatResult, Solver};
 
 use super::program::Program;
 
-/// Per-check time limit. §8 has 1 s; while the budget is very high,
-/// longer, to see what the axioms can prove (`CARDINAL_UF_TIMEOUT_MS`).
-pub(crate) const TIMEOUT_MS: u32 = 5_000;
-
-fn timeout_ms() -> u32 {
-    std::env::var("CARDINAL_UF_TIMEOUT_MS").ok().and_then(|t| t.parse().ok()).unwrap_or(TIMEOUT_MS)
+/// How long a check may run: its time limit and its quantifier instances
+/// beyond those made before it. Pattern matching never saturates on a
+/// program of many plans, so a claim the axioms do not prove runs to the
+/// limit: the search runs on a small tier, and each bound found is
+/// confirmed one step further on a large one.
+#[derive(Clone, Copy, PartialEq)]
+struct Tier {
+    timeout_ms: u32,
+    budget: u32,
 }
-/// Quantifier instances per check while searching, and to confirm.
-/// For now set very high, while the instances proofs need are logged
-/// (`Session::needed`), to choose a budget from.
-const BUDGET: u32 = 2_000_000;
-const BUDGET_CONFIRM: u32 = 2_000_000;
+
+/// §8 has 1 s per check (`CARDINAL_UF_TIMEOUT_MS`, `CARDINAL_UF_BUDGET`).
+fn search() -> Tier {
+    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|t| t.parse().ok()).unwrap_or(d);
+    Tier { timeout_ms: env("CARDINAL_UF_TIMEOUT_MS", 1_000), budget: env("CARDINAL_UF_BUDGET", 100_000) }
+}
+
+fn confirm() -> Tier {
+    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|t| t.parse().ok()).unwrap_or(d);
+    Tier { timeout_ms: env("CARDINAL_UF_CONFIRM_MS", 2_000), budget: env("CARDINAL_UF_CONFIRM_BUDGET", 2_000_000) }
+}
+
 /// Largest bound tried; a bound needing more is no bound.
 const CAP: u64 = 1 << 30;
+
+/// What the two searches have proven so far, shared between their
+/// threads: neither tries a claim the other's bound refutes.
+struct Proven {
+    lower: AtomicU64,
+    /// `u64::MAX` while there is none.
+    upper: AtomicU64,
+}
 
 /// Checks of claims about the root, in one thread.
 struct Checker<'a> {
@@ -44,23 +64,25 @@ struct Checker<'a> {
     /// The literals of the facts in use.
     active: Vec<Bool>,
     solver: Option<Solver>,
-    budget: u32,
+    tier: Tier,
+    /// The tier a bound found is confirmed on.
+    last: Tier,
+    proven: &'a Proven,
     checks: usize,
     /// The most instances a proven check made.
     needed: u64,
 }
 
 impl<'a> Checker<'a> {
-    fn new(text: &'a str, assertions: usize, root: &'a str, active: &[String], budget: u32) -> Checker<'a> {
+    fn new(text: &'a str, assertions: usize, root: &'a str, active: &[String], proven: &'a Proven, last: Tier) -> Checker<'a> {
         let active = active.iter().map(|l| Bool::new_const(l.trim_matches('|'))).collect();
-        Checker { text, assertions, root, active, solver: None, budget, checks: 0, needed: 0 }
+        Checker { text, assertions, root, active, solver: None, tier: search(), last, proven, checks: 0, needed: 0 }
     }
 
     fn solver(&mut self) -> &Solver {
         if self.solver.is_none() {
             let s = Solver::new();
             let mut p = Params::new();
-            p.set_u32("timeout", timeout_ms());
             p.set_bool("smt.auto_config", false);
             p.set_bool("smt.mbqi", false);
             s.set_params(&p);
@@ -75,7 +97,7 @@ impl<'a> Checker<'a> {
     /// Whether the axioms and facts in use entail `claim`. The claim's
     /// negation is guarded by a literal of its own, assumed for this
     /// check only, so that what the check instantiates serves the next
-    /// ones; each check has `budget` more instances than those before it.
+    /// ones; each check runs on the current tier.
     /// (Z3 cancels a check in a pushed scope under an instance limit at
     /// once.)
     fn proves(&mut self, claim: &str) -> bool {
@@ -83,7 +105,7 @@ impl<'a> Checker<'a> {
         let k = self.checks;
         let root = self.root.to_string();
         let mut assumptions = self.active.clone();
-        let budget = self.budget;
+        let tier = self.tier;
         let s = self.solver();
         s.from_string(format!(
             "(declare-const |claim!{k}| Bool) (assert (=> |claim!{k}| (not {})))",
@@ -92,7 +114,8 @@ impl<'a> Checker<'a> {
         assumptions.push(Bool::new_const(format!("claim!{k}")));
         let made = instances(s);
         let mut p = Params::new();
-        p.set_u32("smt.qi.max_instances", made.saturating_add(budget));
+        p.set_u32("smt.qi.max_instances", made.saturating_add(tier.budget));
+        p.set_u32("timeout", tier.timeout_ms);
         s.set_params(&p);
         let t = std::time::Instant::now();
         let r = s.check_assumptions(&assumptions);
@@ -116,23 +139,44 @@ impl<'a> Checker<'a> {
         r == SatResult::Unsat
     }
 
+    /// Whether `root ≤ b` is proven; not tried below the proven lower
+    /// bound.
     fn le(&mut self, b: u64) -> bool {
-        self.proves(&format!("(<= |root!| {b})"))
+        if b < self.proven.lower.load(Ordering::Relaxed) {
+            return false;
+        }
+        let r = self.proves(&format!("(<= |root!| {b})"));
+        if r {
+            self.proven.upper.fetch_min(b, Ordering::Relaxed);
+        }
+        r
     }
 
+    /// Whether `root ≥ b` is proven; not tried above the proven upper
+    /// bound.
     fn ge(&mut self, b: u64) -> bool {
-        b == 0 || self.proves(&format!("(>= |root!| {b})"))
+        if b == 0 {
+            return true;
+        }
+        if b > self.proven.upper.load(Ordering::Relaxed) {
+            return false;
+        }
+        let r = self.proves(&format!("(>= |root!| {b})"));
+        if r {
+            self.proven.lower.fetch_max(b, Ordering::Relaxed);
+        }
+        r
     }
 
-    /// The budget for checks from now on.
-    fn budget(&mut self, b: u32) {
-        self.budget = b;
-    }
-
-    /// The greatest `B` proven `root ≥ B`.
+    /// The greatest `B` proven `root ≥ B`, from `B = proven`.
     fn lower(&mut self, proven: u64) -> u64 {
         if proven == 0 && !self.ge(1) {
-            return 0;
+            if self.tier == self.last || {
+                self.tier = self.last;
+                !self.ge(1)
+            } {
+                return 0;
+            }
         }
         // Galloping: `lo` proven, `hi` not.
         let (mut lo, mut hi) = (proven.max(1), None);
@@ -150,6 +194,11 @@ impl<'a> Checker<'a> {
         let mut hi = hi.unwrap();
         loop {
             while hi - lo > 1 {
+                let up = self.proven.upper.load(Ordering::Relaxed);
+                hi = hi.min(up.saturating_add(1)).max(lo + 1);
+                if hi - lo <= 1 {
+                    break;
+                }
                 let mid = lo + (hi - lo) / 2;
                 if self.ge(mid) {
                     lo = mid;
@@ -157,9 +206,9 @@ impl<'a> Checker<'a> {
                     hi = mid;
                 }
             }
-            // The last step again, on the large budget.
-            if self.budget == BUDGET_CONFIRM || !{
-                self.budget(BUDGET_CONFIRM);
+            // The last step again, on the large tier.
+            if self.tier == self.last || !{
+                self.tier = self.last;
                 self.ge(hi)
             } {
                 return lo;
@@ -172,8 +221,8 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The least `B` proven `root ≤ B`, if any, given the root is at
-    /// least `lower`.
+    /// The least `B` proven `root ≤ B`, if any, from `B = proven`,
+    /// given the root is at least `lower`.
     fn upper(&mut self, lower: u64, proven: Option<u64>) -> Option<u64> {
         if lower > 0 && self.le(lower) {
             return Some(lower);
@@ -182,8 +231,10 @@ impl<'a> Checker<'a> {
             Some(h) => h,
             None => {
                 if !self.le(CAP) {
-                    self.budget(BUDGET_CONFIRM);
-                    if !self.le(CAP) {
+                    if self.tier == self.last || {
+                        self.tier = self.last;
+                        !self.le(CAP)
+                    } {
                         return None;
                     }
                 }
@@ -194,6 +245,10 @@ impl<'a> Checker<'a> {
         let (mut lo, mut hi) = (lower, start);
         loop {
             while lo < hi {
+                lo = lo.max(self.proven.lower.load(Ordering::Relaxed)).min(hi);
+                if lo == hi {
+                    break;
+                }
                 let mid = lo + (hi - lo) / 2;
                 if self.le(mid) {
                     hi = mid;
@@ -201,10 +256,10 @@ impl<'a> Checker<'a> {
                     lo = mid + 1;
                 }
             }
-            if hi == lower || self.budget == BUDGET_CONFIRM {
+            if hi == 0 || hi <= self.proven.lower.load(Ordering::Relaxed) || self.tier == self.last {
                 return Some(hi);
             }
-            self.budget(BUDGET_CONFIRM);
+            self.tier = self.last;
             if !self.le(hi - 1) {
                 return Some(hi);
             }
@@ -234,7 +289,6 @@ pub(crate) struct Session {
     /// The literals of the facts in use.
     active: Vec<String>,
     root: String,
-    budget: u32,
     pub checks: usize,
     /// The most instances a proven check of the bounds made.
     pub needed: u64,
@@ -242,14 +296,12 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) fn new(program: &Program) -> Session {
-        let budget = std::env::var("CARDINAL_UF_BUDGET").ok().and_then(|b| b.parse().ok()).unwrap_or(BUDGET);
         Session {
             text: program.text.clone(),
             assertions: program.assertions,
             tracked: program.tracked.clone(),
             active: program.tracked.iter().map(|(_, l)| l.clone()).collect(),
             root: format!("(card {})", program.root),
-            budget,
             checks: 0,
             needed: 0,
         }
@@ -261,11 +313,14 @@ impl Session {
         let mut dropped = vec![];
         for _ in 0..8 {
             self.checks += 1;
-            let mut c = Checker::new(&self.text, self.assertions, &self.root, &self.active, self.budget);
+            let proven = Proven { lower: AtomicU64::new(0), upper: AtomicU64::new(u64::MAX) };
+            let mut c = Checker::new(&self.text, self.assertions, &self.root, &self.active, &proven, search());
             let active = c.active.clone();
             let s = c.solver();
+            let tier = search();
             let mut p = Params::new();
-            p.set_u32("smt.qi.max_instances", self.budget);
+            p.set_u32("smt.qi.max_instances", tier.budget);
+            p.set_u32("timeout", tier.timeout_ms);
             s.set_params(&p);
             if s.check_assumptions(&active) != SatResult::Unsat {
                 break;
@@ -291,17 +346,20 @@ impl Session {
 
     /// The proven bounds `(lower, upper)`, given bounds `proven` already:
     /// the lower and the upper bound each searched for in a thread of its
-    /// own, from `proven`.
-    pub(crate) fn bounds(&mut self, proven: (u64, Option<u64>)) -> (u64, Option<u64>) {
-        let (text, n, root, active, budget) = (&self.text, self.assertions, &self.root, &self.active, self.budget);
+    /// own, from `proven`. Unless `confirming`, on the search tier only.
+    pub(crate) fn bounds(&mut self, proven: (u64, Option<u64>), confirming: bool) -> (u64, Option<u64>) {
+        let last = if confirming { confirm() } else { search() };
+        let (text, n, root, active) = (&self.text, self.assertions, &self.root, &self.active);
+        let shared = Proven { lower: AtomicU64::new(proven.0), upper: AtomicU64::new(proven.1.unwrap_or(u64::MAX)) };
+        let shared = &shared;
         let ((lower, lc, ln), (upper, uc, un)) = std::thread::scope(|scope| {
             let low = scope.spawn(move || {
-                let mut c = Checker::new(text, n, root, active, budget);
+                let mut c = Checker::new(text, n, root, active, shared, last);
                 let l = c.lower(proven.0);
                 (l, c.checks, c.needed)
             });
             let up = scope.spawn(move || {
-                let mut c = Checker::new(text, n, root, active, budget);
+                let mut c = Checker::new(text, n, root, active, shared, last);
                 let u = c.upper(proven.0, proven.1);
                 (u, c.checks, c.needed)
             });

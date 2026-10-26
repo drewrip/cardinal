@@ -1399,17 +1399,33 @@ impl Logical {
                     }
                 }
                 if let Some(f) = &j.filter {
-                    let both = |c: &Column| -> Option<(Col, Ty)> {
-                        let e = lookup(&j.left, &l, c).or_else(|| lookup(&j.right, &r, c))?;
-                        match e {
-                            E::Col(n, t) => Some((n, t)),
-                            _ => None,
+                    for c in split_conjunction(f) {
+                        // An equality of the two sides in the condition is a
+                        // key pair as well (as an unoptimized plan has it).
+                        if let Expr::BinaryExpr(BinaryExpr { left: x, op: Operator::Eq, right: y }) = c
+                            && !null_eq
+                        {
+                            let side = |e: &Expr, input: &LogicalPlan, o: &Out| {
+                                let refs = e.column_refs();
+                                let mine = !refs.is_empty() && refs.iter().all(|c| lookup(input, o, c).is_some());
+                                mine.then(|| read_in(b, input, o, e)).flatten()
+                            };
+                            let pair = match (side(x, &j.left, &l), side(y, &j.right, &r)) {
+                                (Some(a), Some(c)) => Some((a, c)),
+                                _ => match (side(y, &j.left, &l), side(x, &j.right, &r)) {
+                                    (Some(a), Some(c)) => Some((a, c)),
+                                    _ => None,
+                                },
+                            };
+                            if let Some(p) = pair {
+                                pairs.push(p);
+                                continue;
+                            }
                         }
-                    };
-                    // Expressions of the inputs' computed columns too.
-                    let e = read_with(b, f, &|c| lookup(&j.left, &l, c).or_else(|| lookup(&j.right, &r, c)));
-                    let _ = both;
-                    rest.push(e?);
+                        // Expressions of the inputs' computed columns too.
+                        let e = read_with(b, c, &|c| lookup(&j.left, &l, c).or_else(|| lookup(&j.right, &r, c)));
+                        rest.push(e?);
+                    }
                 }
                 let residual = if rest.is_empty() { None } else { Some(flat_and(rest)) };
                 if null_eq && !pairs.is_empty() && residual.is_none() {

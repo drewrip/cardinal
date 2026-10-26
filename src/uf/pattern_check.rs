@@ -132,6 +132,12 @@ const GUARDS: &[&str] = &[
     "sub", "key", "fd", "implies", "point", "csub", "orof", "andof", "dom",
 ];
 
+/// Axioms whose guard atom in a pattern is their conclusion: they derive
+/// `csub` of a union of columns when it is asked for, from the parts,
+/// instead of assuming it. No instance creates a new `csub` atom of
+/// sets not already in the program, so they cannot loop.
+const DERIVING: &[&str] = &["csub_cup", "csub_split"];
+
 /// Every violation in `text`'s quantified axioms, and how many it has.
 fn check(text: &str) -> (Vec<String>, usize) {
     let mut out = vec![];
@@ -193,7 +199,7 @@ fn check(text: &str) -> (Vec<String>, usize) {
                 let Some(S::Atom(f)) = xs.first() else {
                     continue;
                 };
-                if !GUARDS.contains(&f.as_str()) {
+                if !GUARDS.contains(&f.as_str()) || DERIVING.contains(&name.trim_matches('|')) {
                     continue;
                 }
                 if !hyps.iter().any(|h| h == t) {
