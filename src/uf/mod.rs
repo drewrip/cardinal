@@ -351,6 +351,7 @@ fn prune(terms: &mut Terms, roots: &[RelId]) -> HashMap<RelId, RelId> {
             Rel::Group(k, x) => Rel::Group(k, m(&x, &map)),
             Rel::Limit(n, x) => Rel::Limit(n, m(&x, &map)),
             Rel::Offset(n, x) => Rel::Offset(n, m(&x, &map)),
+            Rel::TopK(k, n, x) => Rel::TopK(k, n, m(&x, &map)),
             Rel::Union(x, y) => Rel::Union(m(&x, &map), m(&y, &map)),
             Rel::Join(k, f, x, y) => Rel::Join(k, f, m(&x, &map), m(&y, &map)),
             Rel::Part(o, x) => Rel::Part(o, m(&x, &map)),

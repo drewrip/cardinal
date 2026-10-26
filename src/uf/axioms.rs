@@ -92,6 +92,7 @@ pub(crate) const DECLS: &str = "\
 (declare-fun group (Cols Rel) Rel)
 (declare-fun limit (Int Rel) Rel)
 (declare-fun offset (Int Rel) Rel)
+(declare-fun topk (Cols Int Rel) Rel)
 (declare-fun union (Rel Rel) Rel)
 (declare-fun part (Occ Rel) Rel)
 (declare-fun opt (Occ Pred Rel) Rel)
@@ -277,6 +278,16 @@ pub(crate) fn shared() -> Vec<Axiom> {
             "(and (sub (offset n x) x) (= (cols (offset n x)) (cols x))
                   (= (card (offset n x)) (ite (<= (card x) n) 0 (- (card x) n))))",
             &["(offset n x)"],
+        ),
+        // At most `n` rows of each group, and at least one.
+        ax(
+            "topk_basic",
+            "(K Cols) (n Int) (x Rel)",
+            "(and (sub (topk K n x) x) (= (cols (topk K n x)) (cols x))
+                  (<= (card (topk K n x)) (* n (card (group K x))))
+                  (=> (>= n 1) (>= (card (topk K n x)) (card (group K x))))
+                  (= (group K (topk K n x)) (group K x)))",
+            &["(topk K n x)"],
         ),
         ax(
             "union_basic",

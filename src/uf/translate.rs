@@ -19,7 +19,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use super::expr::{Cmp, Col, E, Lit, Reader, Ty, flat_and};
 use super::preds;
-use super::terms::{CmpOp, Family, JoinKind, Pred, PredId, Rel, RelId, Terms, alias_col};
+use super::terms::{CmpOp, ColsId, Family, JoinKind, Pred, PredId, Rel, RelId, Terms, alias_col};
 use crate::observed::{Catalog, ObservedPlan, Op, base_table, relation};
 
 /// A fact about a term (§6.4).
@@ -1449,9 +1449,9 @@ fn admits(e: &Expr) -> (Option<i128>, Option<i128>, Option<u64>) {
 /// A DataFusion plan of the query to bound, as a term; facts its own
 /// shape gives (an empty relation's or a VALUES list's rows) in `facts`.
 pub(crate) fn logical(b: &mut Builder, plan: &LogicalPlan, name: &str, facts: &mut Vec<(String, Fact)>) -> RelId {
-    let mut t = Logical { name: name.to_string(), next: 0, alias: HashMap::new(), facts: vec![] };
+    let mut t = Logical { name: name.to_string(), next: 0, alias: HashMap::new(), facts: vec![], windows: HashMap::new() };
     // Instances first, to rename a join's right side.
-    let mut probe = Logical { name: name.to_string(), next: 0, alias: HashMap::new(), facts: vec![] };
+    let mut probe = Logical { name: name.to_string(), next: 0, alias: HashMap::new(), facts: vec![], windows: HashMap::new() };
     probe.plan_aliases(plan);
     t.alias = probe.alias;
     let out = t.node(b, plan);
@@ -1465,6 +1465,9 @@ struct Logical {
     next: usize,
     alias: HashMap<String, u32>,
     facts: Vec<(String, Fact)>,
+    /// Each `row_number()` column: its partition's columns, and the
+    /// relation it numbers.
+    windows: HashMap<Col, (ColsId, RelId)>,
 }
 
 impl Logical {
@@ -1569,7 +1572,30 @@ impl Logical {
                 let input = self.node(b, &f.input);
                 let mut x = input.rel;
                 let mut exprs = vec![];
-                for (k, c) in split_conjunction(&f.predicate).into_iter().enumerate() {
+                let mut conjuncts = split_conjunction(&f.predicate);
+                // `row_number() <= n` right over its window: the first `n`
+                // rows of each partition.
+                conjuncts.retain(|c| {
+                    let Some(E::Cmp(op, l, r)) = read_in(b, &f.input, &input, c) else { return true };
+                    let (col, n, op) = match (*l, *r) {
+                        (E::Col(c, _), E::Lit(Lit::Int(n), _)) => (c, n, op),
+                        (E::Lit(Lit::Int(n), _), E::Col(c, _)) => (c, n, op.flip()),
+                        _ => return true,
+                    };
+                    let Some(&(keys, over)) = self.windows.get(&col) else { return true };
+                    let n = match op {
+                        Cmp::Le => n,
+                        Cmp::Lt => n - 1,
+                        Cmp::Eq if n == 1 => 1,
+                        _ => return true,
+                    };
+                    if over != x || n < 0 {
+                        return true;
+                    }
+                    x = b.terms.rel(Rel::TopK(keys, n as u64, x));
+                    false
+                });
+                for (k, c) in conjuncts.into_iter().enumerate() {
                     // A comparison with a scalar subquery.
                     if let Some(p) = self.subquery_cmp(b, &f.input, &input, c) {
                         x = b.filter_preds(x, &[p]);
@@ -1604,7 +1630,33 @@ impl Logical {
             LogicalPlan::Subquery(s) => self.node(b, &s.subquery),
             LogicalPlan::Window(w) => {
                 let mut input = self.node(b, &w.input);
+                let n = input.cols.len();
                 input.cols.resize(plan.schema().fields().len(), None);
+                for (j, we) in w.window_expr.iter().enumerate() {
+                    let inner = match we {
+                        Expr::Alias(a) => a.expr.as_ref(),
+                        e => e,
+                    };
+                    let Expr::WindowFunction(wf) = inner else { continue };
+                    if wf.fun.name() != "row_number" || wf.params.filter.is_some() {
+                        continue;
+                    }
+                    let keys: Option<BTreeSet<Col>> = wf
+                        .params
+                        .partition_by
+                        .iter()
+                        .map(|p| match read_in(b, &w.input, &input, p) {
+                            Some(E::Col(c, _)) => Some(c),
+                            _ => None,
+                        })
+                        .collect();
+                    let Some(keys) = keys else { continue };
+                    let col = format!("w:row_number#{}#{id}.{j}", self.name);
+                    b.terms.types.insert(col.clone(), Ty::Int);
+                    input.cols[n + j] = Some(E::Col(col.clone(), Ty::Int));
+                    let k = b.terms.colset(keys);
+                    self.windows.insert(col, (k, input.rel));
+                }
                 input
             }
             LogicalPlan::Sort(s) => {
