@@ -615,11 +615,7 @@ pub(crate) fn family(f: &Fam) -> Vec<Axiom> {
                 "(and (=> (csub (reads p) (cols x)) (= (filter p ({j} x y)) ({j} (filter p x) y)))
                       (=> (csub (reads p) (cols y)) (= (filter p ({j} x y)) ({j} x (filter p y)))))"
             ),
-            &[
-                &format!("(filter p ({j} x y))"),
-                &format!("(filter p x) ({j} x y)"),
-                &format!("(filter p y) ({j} x y)"),
-            ],
+            &[&format!("(filter p ({j} x y))")],
         ),
         ax(
             n("inner_range"),

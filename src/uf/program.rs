@@ -644,6 +644,26 @@ pub(crate) fn build(
             writeln!(book, "(assert (intcol {xn}))").unwrap();
         }
     }
+    // Which small sets each join of the program has: what `csub_cup` and
+    // `csub_split` would derive, ground, for the terms there are.
+    for r in &rels {
+        if !matches!(e.terms.get(*r), Rel::Join(..)) {
+            continue;
+        }
+        let Some(c) = e.terms.rel_cols[r.0 as usize] else { continue };
+        let cs = e.terms.cols[c.0 as usize].clone();
+        let rs = e.terms.rel_smt(*r);
+        let mut within = vec![];
+        for (x, xs) in &sets {
+            if !tables_u.contains(x) && !xs.is_empty() && xs.is_subset(&cs) {
+                within.push(e.terms.cols_sym(*x));
+            }
+        }
+        if !within.is_empty() {
+            let parts: Vec<String> = within.iter().map(|w| format!("(csub {w} (cols {rs}))")).collect();
+            writeln!(book, "(assert (and {}))", parts.join(" ")).unwrap();
+        }
+    }
     for i in &aliases {
         for (x, xs) in &sets {
             let a: BTreeSet<Col> = xs.iter().map(|c| alias_col(c, *i)).collect();

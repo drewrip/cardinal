@@ -206,6 +206,11 @@ impl<'c> Encoder<'c> {
         // program small enough to search quickly. The facts' program then
         // starts from there.
         let alone = program::build(&mut terms, &tables, &self.schema, &shape, &[], root);
+        if let Ok(path) = std::env::var("CARDINAL_UF_DUMP") {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::write(path.replace("{}", &format!("alone{n}")), &alone.text);
+        }
         let mut s = solve::Session::new(&alone);
         let structural = s.bounds((0, None), false);
         let structural_checks = s.checks;

@@ -95,7 +95,22 @@ impl Builder<'_> {
 
     /// `x` filtered by each conjunct of `e`.
     pub(crate) fn filter(&mut self, x: RelId, e: &E) -> RelId {
-        let x = self.rejecting(x, e);
+        let mut x = self.rejecting(x, e);
+        // A conjunct comparing one expression with literals compares its
+        // expression column, which then has the literals' domain.
+        let mut parts = vec![];
+        for c in conjuncts_of(e.clone()) {
+            match subject(&c) {
+                // Only functions the decisions do not read into.
+                Some(s) if matches!(s, E::Func(..)) && !s.reads().is_empty() => {
+                    let g = self.column_of(&mut x, &s);
+                    let col = E::Col(g, s.ty());
+                    parts.push(replace(&c, &s, &col));
+                }
+                _ => parts.push(c),
+            }
+        }
+        let e = &flat_and(parts);
         let ps = preds::conjuncts(self.terms, e);
         let y = self.filter_preds(x, &ps);
         self.canonical(y)
@@ -105,10 +120,10 @@ impl Builder<'_> {
     /// that two plans' orders of one join give one term: its inputs in a
     /// fixed order, each joined to those before it (one already joined if
     /// any) on one column of each class of columns the joins make equal,
-    /// and each filter on the first input, or join, that has its columns.
+    /// each filter of one input on it, and the others above the joins.
     /// `x` itself if it is not such a join.
     fn canonical(&mut self, x: RelId) -> RelId {
-        if !self.cluster(x) {
+        if !self.cluster(x) || std::env::var("CARDINAL_UF_NOCANON").is_ok() {
             return x;
         }
         let (mut leaves, mut pairs, mut filters) = (vec![], vec![], vec![]);
@@ -167,7 +182,6 @@ impl Builder<'_> {
         let mut joined: BTreeSet<Col> = classes_of(order[0]);
         let mut have: BTreeSet<Col> = cols[order[0]].clone();
         let mut rel = leaves[order[0]];
-        let mut left = rest;
         while done.len() < leaves.len() {
             let next = order
                 .iter()
@@ -189,14 +203,10 @@ impl Builder<'_> {
             done.push(next);
             joined.extend(classes_of(next));
             have.extend(cols[next].iter().cloned());
-            let (now, later): (Vec<PredId>, Vec<PredId>) =
-                left.into_iter().partition(|p| self.terms.reads(*p).is_some_and(|rs| rs.is_subset(&have)));
-            for p in now {
-                rel = self.terms.rel(Rel::Filter(p, rel));
-            }
-            left = later;
         }
-        self.filter_preds(rel, &left)
+        // Filters of several inputs above all the joins: the facts about
+        // their values hold of the join itself.
+        self.filter_preds(rel, &rest)
     }
 
     /// Whether `x` is an inner equi-join, under filters.
@@ -1845,5 +1855,33 @@ fn rejects(e: &E) -> BTreeSet<Col> {
             _ => BTreeSet::new(),
         },
         _ => BTreeSet::new(),
+    }
+}
+
+/// The one non-literal operand of `e`'s comparisons, if `e` compares a
+/// single expression with literals, under ORs.
+fn subject(e: &E) -> Option<E> {
+    match e {
+        E::Cmp(_, a, b) => match (a.as_ref(), b.as_ref()) {
+            (x, E::Lit(..)) | (E::Lit(..), x) => Some(x.clone()),
+            _ => None,
+        },
+        E::Or(v) => {
+            let first = subject(v.first()?)?;
+            v.iter().all(|d| subject(d).as_ref() == Some(&first)).then_some(first)
+        }
+        _ => None,
+    }
+}
+
+/// `e` with `from` replaced by `to`.
+fn replace(e: &E, from: &E, to: &E) -> E {
+    if e == from {
+        return to.clone();
+    }
+    match e {
+        E::Cmp(op, a, b) => E::Cmp(*op, Box::new(replace(a, from, to)), Box::new(replace(b, from, to))),
+        E::Or(v) => E::Or(v.iter().map(|d| replace(d, from, to)).collect()),
+        e => e.clone(),
     }
 }

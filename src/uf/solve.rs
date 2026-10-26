@@ -54,6 +54,10 @@ fn confirm() -> Tier {
     }
 }
 
+/// Instances made before a check past which one cut short is tried again
+/// on a fresh solver.
+const POLLUTED: u32 = 100_000;
+
 /// Largest bound tried; a bound needing more is no bound.
 const CAP: u64 = 1 << 30;
 
@@ -153,6 +157,11 @@ impl<'a> Checker<'a> {
         }
         if cut {
             self.solver = None;
+            // What earlier checks made slows this one: again, on a
+            // fresh solver.
+            if made > POLLUTED {
+                return self.proves(claim);
+            }
         } else if r != SatResult::Unsat {
             self.saturated.insert(claim.to_string());
         }
@@ -383,8 +392,11 @@ impl Session {
                 let l = c.lower(proven.0);
                 (l, c.checks, c.needed)
             });
+            // The upper bound is confirmed even without `confirming`: its
+            // last step is one check, and proves what the facts' program,
+            // larger, may not.
             let up = scope.spawn(move || {
-                let mut c = Checker::new(text, n, root, active, shared, last);
+                let mut c = Checker::new(text, n, root, active, shared, confirm());
                 let u = c.upper(proven.0, proven.1);
                 (u, c.checks, c.needed)
             });
