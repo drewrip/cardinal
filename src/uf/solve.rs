@@ -23,26 +23,35 @@ use z3::{Params, SatResult, Solver};
 
 use super::program::Program;
 
-/// How long a check may run: its time limit and its quantifier instances
-/// beyond those made before it. Pattern matching never saturates on a
-/// program of many plans, so a claim the axioms do not prove runs to the
-/// limit: the search runs on a small tier, and each bound found is
-/// confirmed one step further on a large one.
+/// How long a check may run: its resource limit (Z3's `rlimit`, about
+/// 4M a second here: deterministic, unlike time, so that bounds do not
+/// depend on the machine's load), its quantifier instances beyond those
+/// made before it, and a time limit as a last resort. Pattern matching
+/// never saturates on a program of many plans, so a claim the axioms do
+/// not prove runs to the limit: the search runs on a small tier, and each
+/// bound found is confirmed one step further on a large one.
 #[derive(Clone, Copy, PartialEq)]
 struct Tier {
-    timeout_ms: u32,
+    rlimit: u32,
     budget: u32,
+    timeout_ms: u32,
 }
 
-/// §8 has 1 s per check (`CARDINAL_UF_TIMEOUT_MS`, `CARDINAL_UF_BUDGET`).
+fn env(k: &str, d: u32) -> u32 {
+    std::env::var(k).ok().and_then(|t| t.parse().ok()).unwrap_or(d)
+}
+
+/// About §8's 1 s per check (`CARDINAL_UF_RLIMIT`, `CARDINAL_UF_BUDGET`).
 fn search() -> Tier {
-    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|t| t.parse().ok()).unwrap_or(d);
-    Tier { timeout_ms: env("CARDINAL_UF_TIMEOUT_MS", 1_000), budget: env("CARDINAL_UF_BUDGET", 100_000) }
+    Tier { rlimit: env("CARDINAL_UF_RLIMIT", 4_000_000), budget: env("CARDINAL_UF_BUDGET", 150_000), timeout_ms: 10_000 }
 }
 
 fn confirm() -> Tier {
-    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|t| t.parse().ok()).unwrap_or(d);
-    Tier { timeout_ms: env("CARDINAL_UF_CONFIRM_MS", 2_000), budget: env("CARDINAL_UF_CONFIRM_BUDGET", 2_000_000) }
+    Tier {
+        rlimit: env("CARDINAL_UF_CONFIRM_RLIMIT", 8_000_000),
+        budget: env("CARDINAL_UF_CONFIRM_BUDGET", 2_000_000),
+        timeout_ms: 20_000,
+    }
 }
 
 /// Largest bound tried; a bound needing more is no bound.
@@ -69,6 +78,9 @@ struct Checker<'a> {
     last: Tier,
     proven: &'a Proven,
     checks: usize,
+    /// Claims whose check ran out of instances to make: more budget
+    /// proves them no better.
+    saturated: std::collections::HashSet<String>,
     /// The most instances a proven check made.
     needed: u64,
 }
@@ -76,7 +88,7 @@ struct Checker<'a> {
 impl<'a> Checker<'a> {
     fn new(text: &'a str, assertions: usize, root: &'a str, active: &[String], proven: &'a Proven, last: Tier) -> Checker<'a> {
         let active = active.iter().map(|l| Bool::new_const(l.trim_matches('|'))).collect();
-        Checker { text, assertions, root, active, solver: None, tier: search(), last, proven, checks: 0, needed: 0 }
+        Checker { text, assertions, root, active, solver: None, tier: search(), last, proven, checks: 0, saturated: Default::default(), needed: 0 }
     }
 
     fn solver(&mut self) -> &Solver {
@@ -101,6 +113,9 @@ impl<'a> Checker<'a> {
     /// (Z3 cancels a check in a pushed scope under an instance limit at
     /// once.)
     fn proves(&mut self, claim: &str) -> bool {
+        if self.saturated.contains(claim) {
+            return false;
+        }
         self.checks += 1;
         let k = self.checks;
         let root = self.root.to_string();
@@ -113,28 +128,33 @@ impl<'a> Checker<'a> {
         ));
         assumptions.push(Bool::new_const(format!("claim!{k}")));
         let made = instances(s);
+        let spent = stat(s, "rlimit count");
         let mut p = Params::new();
         p.set_u32("smt.qi.max_instances", made.saturating_add(tier.budget));
         p.set_u32("timeout", tier.timeout_ms);
+        p.set_u32("rlimit", tier.rlimit);
         s.set_params(&p);
         let t = std::time::Instant::now();
         let r = s.check_assumptions(&assumptions);
         let after = instances(s);
         if std::env::var("CARDINAL_UF_TIME").is_ok() {
             eprintln!(
-                "uf: check {claim} {r:?} {:.2}s {} instances {:?}",
+                "uf: check {claim} {r:?} {:.2}s {} instances {} rlimit {:?}",
                 t.elapsed().as_secs_f64(),
                 after - made,
+                stat(s, "rlimit count").saturating_sub(spent),
                 s.get_reason_unknown()
             );
         }
         // A check cut short leaves a solver that proves less.
-        let cut = r != SatResult::Unsat && s.get_reason_unknown().is_some_and(|w| w.contains("canceled") || w.contains("timeout"));
+        let cut = r != SatResult::Unsat && s.get_reason_unknown().is_some_and(|w| w.contains("canceled") || w.contains("timeout") || w.contains("resource"));
         if r == SatResult::Unsat {
             self.needed = self.needed.max((after - made) as u64);
         }
         if cut {
             self.solver = None;
+        } else if r != SatResult::Unsat {
+            self.saturated.insert(claim.to_string());
         }
         r == SatResult::Unsat
     }
@@ -271,9 +291,13 @@ impl<'a> Checker<'a> {
 
 /// The quantifier instances `s` has made.
 fn instances(s: &Solver) -> u32 {
+    stat(s, "quant instantiations")
+}
+
+fn stat(s: &Solver, key: &str) -> u32 {
     s.get_statistics()
         .entries()
-        .find(|e| e.key == "quant instantiations")
+        .find(|e| e.key == key)
         .and_then(|e| match e.value {
             z3::StatisticsValue::UInt(n) => Some(n),
             _ => None,
@@ -321,6 +345,7 @@ impl Session {
             let mut p = Params::new();
             p.set_u32("smt.qi.max_instances", tier.budget);
             p.set_u32("timeout", tier.timeout_ms);
+            p.set_u32("rlimit", tier.rlimit);
             s.set_params(&p);
             if s.check_assumptions(&active) != SatResult::Unsat {
                 break;

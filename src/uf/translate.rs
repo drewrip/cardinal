@@ -95,8 +95,48 @@ impl Builder<'_> {
 
     /// `x` filtered by each conjunct of `e`.
     pub(crate) fn filter(&mut self, x: RelId, e: &E) -> RelId {
+        let x = self.rejecting(x, e);
         let ps = preds::conjuncts(self.terms, e);
         self.filter_preds(x, &ps)
+    }
+
+    /// Outer join `x`, filtered by `e`, as the join it then is: a filter
+    /// false or NULL on a side's NULLs drops the rows padding that side,
+    /// so that the side is no longer preserved.
+    fn rejecting(&mut self, x: RelId, e: &E) -> RelId {
+        let Rel::Join(kind @ (JoinKind::Full | JoinKind::Left), f, l, r) = *self.terms.get(x) else { return x };
+        let rejected = rejects(e);
+        let on = |b: &Builder, s: RelId| b.terms.cols_of(s).is_some_and(|cs| !cs.is_disjoint(&rejected));
+        let (rl, rr) = (on(self, l), on(self, r));
+        let fam = self.terms.families[f.0 as usize].clone();
+        let (k, fam, l, r) = match (kind, rl, rr) {
+            (JoinKind::Full, true, true) | (JoinKind::Left, _, true) => (JoinKind::Inner, fam, l, r),
+            (JoinKind::Full, true, false) => (JoinKind::Left, fam, l, r),
+            (JoinKind::Full, false, true) => (JoinKind::Left, fam.mirrored(), r, l),
+            _ => return x,
+        };
+        // As `join` places a residual: an inner join's above it, a left
+        // join's on its right input where it reads only that.
+        let (fam, mut r, above) = match fam.residual {
+            Some(q) if k == JoinKind::Inner => (Family { residual: None, ..fam }, r, Some(q)),
+            Some(q) => {
+                let reads = self.terms.reads(q).unwrap_or_default();
+                let rc = self.terms.cols_of(r).cloned().unwrap_or_default();
+                if !reads.is_empty() && reads.is_subset(&rc) {
+                    (Family { residual: None, ..fam }, self.terms.rel(Rel::Filter(q, r)), None)
+                } else {
+                    (fam, r, None)
+                }
+            }
+            None => (fam, r, None),
+        };
+        let _ = &mut r;
+        let fam = self.terms.family(fam);
+        let j = self.terms.rel(Rel::Join(k, fam, l, r));
+        match above {
+            Some(q) => self.filter_preds(j, &[q]),
+            None => j,
+        }
     }
 
     pub(crate) fn filter_preds(&mut self, mut x: RelId, ps: &[PredId]) -> RelId {
@@ -156,6 +196,22 @@ impl Builder<'_> {
         }
         pairs.sort();
         pairs.dedup();
+        // What of an outer, semi or anti join's residual reads only its
+        // right input filters that input.
+        let residual = match (kind, residual) {
+            (JoinType::Left | JoinType::LeftSemi, Some(e)) | (JoinType::LeftAnti, Some(e)) if !null_aware => {
+                let rc = self.terms.cols_of(r).cloned().unwrap_or_default();
+                let (right, rest): (Vec<E>, Vec<E>) = conjuncts_of(e).into_iter().partition(|c| {
+                    let reads = c.reads();
+                    !reads.is_empty() && reads.is_subset(&rc)
+                });
+                for c in &right {
+                    r = self.filter(r, c);
+                }
+                (!rest.is_empty()).then(|| flat_and(rest))
+            }
+            (_, e) => e,
+        };
         // An inner join's residual is a filter above it.
         let (fam_residual, above) = match (kind, residual) {
             (JoinType::Inner, Some(e)) => (None, Some(e)),
@@ -1560,4 +1616,42 @@ fn provider_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
     let LogicalPlan::TableScan(s) = plan else { return None };
     let p = source_as_provider(&s.source).ok()?;
     Some(p.schema().fields().iter().map(|f| f.name().clone()).collect())
+}
+
+/// `e`'s conjuncts.
+fn conjuncts_of(e: E) -> Vec<E> {
+    match e {
+        E::And(v) => v.into_iter().flat_map(conjuncts_of).collect(),
+        e => vec![e],
+    }
+}
+
+/// Columns on whose NULL `e` is never true: a row NULL in any of them
+/// fails the filter.
+fn rejects(e: &E) -> BTreeSet<Col> {
+    /// Columns on whose NULL `e` is NULL.
+    fn strict(e: &E) -> BTreeSet<Col> {
+        match e {
+            E::Col(c, _) => [c.clone()].into(),
+            E::Arith(_, a, b, _) => &strict(a) | &strict(b),
+            E::Neg(a) => strict(a),
+            _ => BTreeSet::new(),
+        }
+    }
+    match e {
+        E::And(v) => v.iter().flat_map(rejects).collect(),
+        E::Or(v) => {
+            let mut sets = v.iter().map(rejects);
+            let first = sets.next().unwrap_or_default();
+            sets.fold(first, |a, b| &a & &b)
+        }
+        E::Cmp(_, a, b) => &strict(a) | &strict(b),
+        E::Like(a, _) => strict(a),
+        E::Not(a) => match &**a {
+            E::IsNull(x) => strict(x),
+            E::Cmp(..) | E::Like(..) => rejects(a),
+            _ => BTreeSet::new(),
+        },
+        _ => BTreeSet::new(),
+    }
 }
