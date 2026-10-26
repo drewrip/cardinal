@@ -292,6 +292,21 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
         }
     }
 
+    // Each literal's width, NULL-rejected columns and hull, on a solver of
+    // their own: after the checks above, the shared one answered some of
+    // these wrongly (satisfiable).
+    let fs = solver();
+    fs.from_string(decls.clone());
+    for (p, e, t, _, reads) in &lits {
+        if constant.contains_key(p) {
+            continue;
+        }
+        let key = t.clone();
+        let facts = cache.facts.entry(key).or_insert_with(|| facts(&fs, &decls, e, t, reads)).clone();
+        if let Some(f) = facts {
+            out.facts.insert(*p, f);
+        }
+    }
     // Literals TRUE or FALSE wherever their columns are non-NULL.
     for (p, e, t, f, reads) in &lits {
         let key = (format!("#total{t}"), f.clone());
@@ -309,17 +324,6 @@ pub(crate) fn decide(terms: &Terms, literals: &[PredId]) -> Decided {
         });
         if total {
             out.total.push(*p);
-        }
-    }
-    // Each literal's width, NULL-rejected columns and hull.
-    for (p, e, t, _, reads) in &lits {
-        if constant.contains_key(p) {
-            continue;
-        }
-        let key = t.clone();
-        let facts = cache.facts.entry(key).or_insert_with(|| facts(&s, &decls, e, t, reads)).clone();
-        if let Some(f) = facts {
-            out.facts.insert(*p, f);
         }
     }
     out

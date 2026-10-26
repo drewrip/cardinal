@@ -254,10 +254,32 @@ pub(crate) fn build(
     for f in &fams {
         fam_text.insert(*f, fam_of(&e, *f));
     }
+    // The kinds of join each family has terms of.
+    let mut kinds: BTreeSet<(FamId, JoinKind)> = BTreeSet::new();
+    for r in &rels {
+        if let Rel::Join(k, f, ..) = e.terms.get(*r) {
+            kinds.insert((*f, *k));
+        }
+    }
     for f in &fams {
         let fam = &fam_text[f];
-        axs.extend(axioms::family(fam));
-        axs.extend(family_extra(&e, *f, fam));
+        let family = &e.terms.families[f.0 as usize];
+        // A cross join's semi, anti and outer joins are trivial, and
+        // their terms, made for each pair of inputs, cost much: only for
+        // a family with such joins.
+        let inner_only = family.pairs.is_empty()
+            && family.residual.is_none()
+            && kinds.iter().all(|(g, k)| g != f || *k == JoinKind::Inner);
+        let mut own = axioms::family(fam);
+        if inner_only {
+            own.retain(|a| a.name.starts_with("inner_") && !a.name.starts_with("inner_semi"));
+        }
+        axs.extend(own);
+        let mut extra = family_extra(&e, *f, fam);
+        if inner_only {
+            extra.retain(|a| a.name.starts_with("cross"));
+        }
+        axs.extend(extra);
         for (_, g, p) in extensions.iter().filter(|(x, ..)| x == f) {
             let (fj, gj, ps) = (&fam.j, &fam_text[g].j, e.terms.pred_smt(*p));
             axs.push(ax(
@@ -944,11 +966,14 @@ fn family_extra(e: &Emit, f: FamId, fam: &Fam) -> Vec<Axiom> {
         out.push(ax(
             format!("cross{tag}"),
             "(x Rel) (y Rel)",
-            &format!(
-                "(and (= (card ({j} x y)) (* (card x) (card y)))
-                      (= (card ({s} x y)) (ite (>= (card y) 1) (card x) 0)))"
-            ),
-            &[&format!("({j} x y)"), &format!("({s} x y)")],
+            &format!("(= (card ({j} x y)) (* (card x) (card y)))"),
+            &[&format!("({j} x y)")],
+        ));
+        out.push(ax(
+            format!("cross_semi{tag}"),
+            "(x Rel) (y Rel)",
+            &format!("(= (card ({s} x y)) (ite (>= (card y) 1) (card x) 0))"),
+            &[&format!("({s} x y)")],
         ));
     }
     out
