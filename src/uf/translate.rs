@@ -179,6 +179,31 @@ impl Builder<'_> {
         })
     }
 
+    /// A join of `kind` on predicate `q` alone, which nothing models.
+    pub(crate) fn join_on(&mut self, kind: JoinType, null_aware: bool, q: PredId, l: RelId, r: RelId) -> Option<RelId> {
+        let (kind, l, r) = match kind {
+            JoinType::Right => (JoinType::Left, r, l),
+            JoinType::RightSemi => (JoinType::LeftSemi, r, l),
+            JoinType::RightAnti => (JoinType::LeftAnti, r, l),
+            k => (k, l, r),
+        };
+        let k = match kind {
+            JoinType::Inner => {
+                let f = self.terms.family(Family { pairs: vec![], null_eq: false, residual: None });
+                let j = self.terms.rel(Rel::Join(JoinKind::Inner, f, l, r));
+                return Some(self.filter_preds(j, &[q]));
+            }
+            JoinType::Left => JoinKind::Left,
+            JoinType::LeftSemi => JoinKind::Semi,
+            JoinType::LeftAnti if null_aware => JoinKind::NotIn,
+            JoinType::LeftAnti => JoinKind::Anti,
+            JoinType::Full => JoinKind::Full,
+            _ => return None,
+        };
+        let f = self.terms.family(Family { pairs: vec![], null_eq: false, residual: Some(q) });
+        Some(self.terms.rel(Rel::Join(k, f, l, r)))
+    }
+
     fn residual(&mut self, e: &E) -> PredId {
         let e = e.nnf(false).sorted();
         preds::make(self.terms, &e)
@@ -257,6 +282,34 @@ impl Builder<'_> {
         }
         x = self.filter(x, &flat_and(rest));
         self.filter_preds(x, &cmps)
+    }
+
+    /// `x` read without the inexact filters (`opt`) below it that `e`
+    /// checks again: a filter keeping only rows satisfying `p`, over
+    /// `opt o p y`, keeps those of `y` (§7.4 `opt_check`, here so that
+    /// the filter needs no other filters moved out of its way).
+    pub(crate) fn rechecked(&mut self, x: RelId, e: &E) -> RelId {
+        let checked: BTreeSet<PredId> = preds::conjuncts(self.terms, e).into_iter().collect();
+        self.strip_opts(x, &checked)
+    }
+
+    fn strip_opts(&mut self, x: RelId, checked: &BTreeSet<PredId>) -> RelId {
+        match self.terms.get(x).clone() {
+            Rel::Opt(_, p, y) if checked.contains(&p) => self.strip_opts(y, checked),
+            Rel::Opt(o, p, y) => {
+                let y2 = self.strip_opts(y, checked);
+                if y2 == y { x } else { self.terms.rel(Rel::Opt(o, p, y2)) }
+            }
+            Rel::Filter(p, y) => {
+                let y2 = self.strip_opts(y, checked);
+                if y2 == y { x } else { self.terms.rel(Rel::Filter(p, y2)) }
+            }
+            Rel::Rt(f, o, y, bld) => {
+                let y2 = self.strip_opts(y, checked);
+                if y2 == y { x } else { self.terms.rel(Rel::Rt(f, o, y2, bld)) }
+            }
+            _ => x,
+        }
     }
 
     /// A relation nothing models, with columns `cols` if known.
@@ -462,7 +515,10 @@ impl Executed<'_> {
             path.push((p, self.plan.nodes[p].children.first() == Some(&at)));
             at = p;
         }
-        if !self.parents[at].is_empty() {
+        // A materialized result (a CTE) is computed whole before anything
+        // reads it: its reads are as far as its filters reach.
+        let reused = self.parents[at].iter().all(|p| matches!(self.plan.nodes[*p].op, Op::Reuse { .. }));
+        if !reused {
             return None;
         }
         let h = path.iter().rposition(|(p, _)| matches!(&self.plan.nodes[*p].op, Op::Join { on, .. } if keys(on).contains(column)))?;
@@ -675,7 +731,9 @@ impl Executed<'_> {
                         }
                     }
                 }
-                x = b.filter_with(x, &flat_and(exprs), &input.scalars);
+                let all = flat_and(exprs);
+                x = b.rechecked(x, &all);
+                x = b.filter_with(x, &all, &input.scalars);
                 Out { rel: x, cols: input.cols, scalars: input.scalars }
             }
             Op::Project | Op::Sort | Op::Window => {
@@ -849,10 +907,15 @@ impl Executed<'_> {
         let (lc, rc) = (node.children[0], node.children[1]);
         let r = self.node(b, rc, suffix);
         let l = self.node(b, lc, suffix);
-        let (pairs, residual, null_eq) = self.condition(b, on, &l, &r, suffix)?;
-        // A join of a side with a table the other side also reads, under
-        // one name, has no model.
-        let rel = b.join(kind, null_aware, &pairs, residual, null_eq, l.rel, r.rel)?;
+        let rel = match self.condition(b, on, &l, &r, suffix) {
+            Some((pairs, residual, null_eq)) => b.join(kind, null_aware, &pairs, residual, null_eq, l.rel, r.rel)?,
+            // A condition that did not read is a predicate of its own.
+            None => {
+                let reads = None;
+                let q = b.terms.pred(Pred::Opaque(format!("{}#{i}{suffix}:on", self.name), reads));
+                b.join_on(kind, null_aware, q, l.rel, r.rel)?
+            }
+        };
         let cols = match kind {
             JoinType::LeftSemi | JoinType::LeftAnti => l.cols.clone(),
             JoinType::RightSemi | JoinType::RightAnti => r.cols.clone(),
@@ -1231,7 +1294,9 @@ impl Logical {
                         }
                     }
                 }
-                x = b.filter_with(x, &flat_and(exprs), &input.scalars);
+                let all = flat_and(exprs);
+                x = b.rechecked(x, &all);
+                x = b.filter_with(x, &all, &input.scalars);
                 Out { rel: x, cols: input.cols, scalars: input.scalars }
             }
             LogicalPlan::SubqueryAlias(a) => {

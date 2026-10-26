@@ -21,8 +21,13 @@ use z3::{Params, SatResult, Solver};
 
 use super::program::Program;
 
-/// Per-check time limit (§8).
-pub(crate) const TIMEOUT_MS: u32 = 1_000;
+/// Per-check time limit. §8 has 1 s; while the budget is very high,
+/// longer, to see what the axioms can prove (`CARDINAL_UF_TIMEOUT_MS`).
+pub(crate) const TIMEOUT_MS: u32 = 5_000;
+
+fn timeout_ms() -> u32 {
+    std::env::var("CARDINAL_UF_TIMEOUT_MS").ok().and_then(|t| t.parse().ok()).unwrap_or(TIMEOUT_MS)
+}
 /// Quantifier instances per check while searching, and to confirm.
 /// For now set very high, while the instances proofs need are logged
 /// (`Session::needed`), to choose a budget from.
@@ -55,7 +60,7 @@ impl<'a> Checker<'a> {
         if self.solver.is_none() {
             let s = Solver::new();
             let mut p = Params::new();
-            p.set_u32("timeout", TIMEOUT_MS);
+            p.set_u32("timeout", timeout_ms());
             p.set_bool("smt.auto_config", false);
             p.set_bool("smt.mbqi", false);
             s.set_params(&p);
@@ -100,8 +105,13 @@ impl<'a> Checker<'a> {
                 s.get_reason_unknown()
             );
         }
+        // A check cut short leaves a solver that proves less.
+        let cut = r != SatResult::Unsat && s.get_reason_unknown().is_some_and(|w| w.contains("canceled") || w.contains("timeout"));
         if r == SatResult::Unsat {
             self.needed = self.needed.max((after - made) as u64);
+        }
+        if cut {
+            self.solver = None;
         }
         r == SatResult::Unsat
     }
@@ -120,12 +130,12 @@ impl<'a> Checker<'a> {
     }
 
     /// The greatest `B` proven `root ≥ B`.
-    fn lower(&mut self) -> u64 {
-        if !self.ge(1) {
+    fn lower(&mut self, proven: u64) -> u64 {
+        if proven == 0 && !self.ge(1) {
             return 0;
         }
         // Galloping: `lo` proven, `hi` not.
-        let (mut lo, mut hi) = (1u64, None);
+        let (mut lo, mut hi) = (proven.max(1), None);
         while hi.is_none() {
             let next = lo.saturating_mul(2).min(CAP);
             if next == lo {
@@ -164,18 +174,24 @@ impl<'a> Checker<'a> {
 
     /// The least `B` proven `root ≤ B`, if any, given the root is at
     /// least `lower`.
-    fn upper(&mut self, lower: u64) -> Option<u64> {
+    fn upper(&mut self, lower: u64, proven: Option<u64>) -> Option<u64> {
         if lower > 0 && self.le(lower) {
             return Some(lower);
         }
-        if !self.le(CAP) {
-            self.budget(BUDGET_CONFIRM);
-            if !self.le(CAP) {
-                return None;
+        let start = match proven {
+            Some(h) => h,
+            None => {
+                if !self.le(CAP) {
+                    self.budget(BUDGET_CONFIRM);
+                    if !self.le(CAP) {
+                        return None;
+                    }
+                }
+                CAP
             }
-        }
+        };
         // `hi` proven, nothing below `lo` provable.
-        let (mut lo, mut hi) = (lower, CAP);
+        let (mut lo, mut hi) = (lower, start);
         loop {
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
@@ -273,26 +289,29 @@ impl Session {
         self.active.len()
     }
 
-    /// The proven bounds `(lower, upper)`: the lower bound, and then the
-    /// upper, each searched for in a thread of its own; the upper search
-    /// starts from what the lower bound proves first.
-    pub(crate) fn bounds(&mut self) -> (u64, Option<u64>) {
+    /// The proven bounds `(lower, upper)`, given bounds `proven` already:
+    /// the lower and the upper bound each searched for in a thread of its
+    /// own, from `proven`.
+    pub(crate) fn bounds(&mut self, proven: (u64, Option<u64>)) -> (u64, Option<u64>) {
         let (text, n, root, active, budget) = (&self.text, self.assertions, &self.root, &self.active, self.budget);
         let ((lower, lc, ln), (upper, uc, un)) = std::thread::scope(|scope| {
             let low = scope.spawn(move || {
                 let mut c = Checker::new(text, n, root, active, budget);
-                let l = c.lower();
+                let l = c.lower(proven.0);
                 (l, c.checks, c.needed)
             });
             let up = scope.spawn(move || {
                 let mut c = Checker::new(text, n, root, active, budget);
-                let u = c.upper(0);
+                let u = c.upper(proven.0, proven.1);
                 (u, c.checks, c.needed)
             });
             (low.join().unwrap(), up.join().unwrap())
         });
         self.checks += lc + uc;
         self.needed = ln.max(un);
-        (lower, upper)
+        (lower.max(proven.0), match (upper, proven.1) {
+            (Some(u), Some(p)) => Some(u.min(p)),
+            (u, p) => u.or(p),
+        })
     }
 }

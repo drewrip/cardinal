@@ -199,8 +199,18 @@ impl<'c> Encoder<'c> {
             facts.extend(fs.iter().filter(|(_, f)| fact_rel(f).iter().all(relevant)).cloned());
             groups.push(rels.iter().copied().filter(relevant).collect::<Vec<_>>());
         }
-        facts.extend(shape);
         let tables = Tables { catalog: self.catalog };
+        // First the target alone: what the axioms prove of its shape, on a
+        // program small enough to search quickly. The facts' program then
+        // starts from there.
+        let alone = program::build(&mut terms, &tables, &self.schema, &shape, &[], root);
+        let mut s = solve::Session::new(&alone);
+        let structural = s.bounds((0, None));
+        let structural_checks = s.checks;
+        if std::env::var("CARDINAL_UF_TIME").is_ok() {
+            eprintln!("uf: alone {structural:?} in {} checks", s.checks);
+        }
+        facts.extend(shape);
         let timing = std::env::var("CARDINAL_UF_TIME").is_ok();
         let t0 = Instant::now();
         let program = program::build(&mut terms, &tables, &self.schema, &facts, &groups, root);
@@ -224,7 +234,8 @@ impl<'c> Encoder<'c> {
             eprintln!("uf: consistent {:.2}s", t0.elapsed().as_secs_f64());
         }
         let t0 = Instant::now();
-        let (mut lower, mut upper) = s.bounds();
+        let (mut lower, mut upper) = s.bounds(structural);
+        s.checks += structural_checks;
         if timing {
             eprintln!("uf: bounds {:.2}s", t0.elapsed().as_secs_f64());
         }

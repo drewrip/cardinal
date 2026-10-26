@@ -75,6 +75,26 @@ pub(crate) fn build(
     let mut opaque: Vec<PredId> = vec![];
     let mut cmps: Vec<PredId> = vec![];
     let mut todo: Vec<PredId> = rels.iter().flat_map(|r| terms.rel_preds(*r)).collect();
+    // A join on several key pairs is a join on fewer, filtered by the rest
+    // (`extend_keys`): each family with one pair less, and the equality.
+    let mut extensions: Vec<(FamId, FamId, PredId)> = vec![];
+    let joined: BTreeSet<FamId> = rels.iter().filter_map(|r| if let Rel::Join(_, f, ..) = terms.get(*r) { Some(*f) } else { None }).collect();
+    for f in joined {
+        let fam = terms.families[f.0 as usize].clone();
+        if fam.residual.is_some() || fam.null_eq || fam.pairs.len() < 2 {
+            continue;
+        }
+        for (k, (a, b)) in fam.pairs.iter().enumerate() {
+            let ty = |c: &Col| terms.types.get(c).copied().unwrap_or(Ty::Other);
+            let eq = E::Cmp(super::expr::Cmp::Eq, Box::new(E::Col(a.clone(), ty(a))), Box::new(E::Col(b.clone(), ty(b))));
+            let p = preds::make(terms, &eq);
+            let mut pairs = fam.pairs.clone();
+            pairs.remove(k);
+            let g = terms.family(super::terms::Family { pairs, null_eq: false, residual: None });
+            extensions.push((f, g, p));
+            todo.push(p);
+        }
+    }
     let mut upreds: Vec<(u32, PredId, PredId)> = vec![];
     let mut unfolds: Vec<(Col, PredId, PredId)> = vec![];
     while let Some(p) = todo.pop() {
@@ -152,6 +172,10 @@ pub(crate) fn build(
             fams.insert(p);
             fams.insert(terms.mirror(p));
         }
+    }
+    for (_, g, _) in &extensions {
+        fams.insert(*g);
+        fams.insert(terms.mirror(*g));
     }
     let rt_fams: BTreeSet<FamId> = rels.iter().filter_map(|r| if let Rel::Rt(f, ..) = terms.get(*r) { Some(*f) } else { None }).collect();
     // Families each plan uses, for associativity; and with each runtime
@@ -232,6 +256,15 @@ pub(crate) fn build(
         let fam = &fam_text[f];
         axs.extend(axioms::family(fam));
         axs.extend(family_extra(&e, *f, fam));
+        for (_, g, p) in extensions.iter().filter(|(x, ..)| x == f) {
+            let (fj, gj, ps) = (&fam.j, &fam_text[g].j, e.terms.pred_smt(*p));
+            axs.push(ax(
+                format!("extend_keys{}{}", fam.tag, fam_text[g].tag),
+                "(x Rel) (y Rel)",
+                &format!("(= ({fj} x y) (filter {ps} ({gj} x y)))"),
+                &[&format!("({fj} x y)"), &format!("(filter {ps} ({gj} x y))")],
+            ));
+        }
         if let Some(p) = plain.get(f) {
             let r = e.terms.families[f.0 as usize].residual.unwrap();
             axs.extend(axioms::residual(fam, &fam_text[p], &e.terms.pred_smt(r)));
@@ -272,7 +305,7 @@ pub(crate) fn build(
     }
     // Expression columns: their domains, unfolding, and moving above joins.
     for g in &exprs {
-        axs.extend(expr_axioms(&mut e, g));
+        axs.extend(expr_axioms(&mut e, g, tables, &decided));
         for f in expr_pairs.iter().filter(|(c, _)| c == g).map(|(_, f)| f) {
             let fam = &e.terms.families[f.0 as usize];
             if fam.pairs.iter().any(|(l, _)| l == g) {
@@ -892,11 +925,14 @@ fn range_axiom(e: &mut Emit, p: PredId, d: &Decided) -> Option<Axiom> {
 
 /// `dom[g]` (§7.6): what expression column `g`'s values are, from the
 /// expression alone.
-fn expr_axioms(e: &mut Emit, g: &str) -> Vec<Axiom> {
+fn expr_axioms(e: &mut Emit, g: &str, tables: &Tables, decided: &Decided) -> Vec<Axiom> {
     let def = e.terms.exprs[g].clone();
     let gs = e.one(g);
     let t = format!("(extend {gs} x)");
     let mut parts = vec![];
+    if let Some(p) = date_part_axioms(e, &def, &gs, &t, tables, decided) {
+        parts.push(p);
+    }
     let ty = def.ty();
     let inputs = def.reads();
     if ty.numeric() {
@@ -1151,4 +1187,104 @@ fn universe(
     out.sort_by_key(|c| (e.terms.cols[c.0 as usize].len(), *c));
     let tabs: BTreeSet<ColsId> = tabs.into_iter().map(|s| e.terms.colset(s)).collect();
     (out, tabs)
+}
+
+/// What `date_part(part, d)` of a date column `d` says (§7.6, `dom[g]`):
+/// a fixed range for a part of a year or day, and for the year, which
+/// side of each New Year near the predicates' dates the values lie on.
+fn date_part_axioms(e: &mut Emit, def: &E, gs: &str, t: &str, tables: &Tables, decided: &Decided) -> Option<String> {
+    let E::Func(name, args, _) = def else { return None };
+    let [E::Lit(Lit::Str(part), _), E::Col(d, _)] = args.as_slice() else { return None };
+    if name != "date_part" {
+        return None;
+    }
+    // A date column (days), not a timestamp.
+    let base = match alias_of(d) {
+        Some(i) => unalias_col(d, i).unwrap(),
+        None => d.clone(),
+    };
+    let (table, column) = base.split_once('.')?;
+    let ty = tables.catalog.tables.get(table)?.field_with_name(column).ok()?.data_type().clone();
+    if ty != datafusion::arrow::datatypes::DataType::Date32 {
+        return None;
+    }
+    let ds = e.one(d);
+    let total = format!("(=> (nonnull x {ds}) (nonnull {t} {gs}))");
+    let fixed = match part.to_lowercase().as_str() {
+        "month" => Some((1, 12)),
+        "quarter" => Some((1, 4)),
+        "day" => Some((1, 31)),
+        "dow" => Some((0, 6)),
+        "isodow" => Some((1, 7)),
+        "doy" => Some((1, 366)),
+        "week" => Some((1, 53)),
+        _ => None,
+    };
+    if let Some((lo, hi)) = fixed {
+        return Some(format!(
+            "(and {total} (>= (min {t} {gs}) {}) (<= (max {t} {gs}) {}))",
+            real(lo),
+            real(hi)
+        ));
+    }
+    if part.to_lowercase() != "year" {
+        return None;
+    }
+    // New Years around every date a predicate bounds the column by.
+    let mut years: BTreeSet<i128> = BTreeSet::new();
+    for f in decided.facts.values() {
+        for (c, h) in &f.hull {
+            if *c != *d && *c != base {
+                continue;
+            }
+            for ((n, den), _) in [h.lo, h.hi].into_iter().flatten() {
+                let y = year_of(n.div_euclid(den));
+                years.extend([y, y + 1]);
+            }
+        }
+    }
+    let mut out = vec![total];
+    for y in years {
+        let b = days_of(y);
+        out.push(format!("(=> (< (max x {ds}) {}) (< (max {t} {gs}) {}))", real(b), real(y)));
+        out.push(format!("(=> (>= (min x {ds}) {}) (>= (min {t} {gs}) {}))", real(b), real(y)));
+    }
+    Some(format!("(and {})", out.join(" ")))
+}
+
+/// The year of day `z` since 1970-01-01 (Hinnant's civil-from-days).
+fn year_of(z: i128) -> i128 {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 { y + 1 } else { y }
+}
+
+/// The day since 1970-01-01 of January 1 of year `y`.
+fn days_of(y: i128) -> i128 {
+    let y = y - 1;
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = 306;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar() {
+        assert_eq!(days_of(1970), 0);
+        assert_eq!(days_of(1995), 9131);
+        assert_eq!(year_of(9131), 1995);
+        assert_eq!(year_of(9130), 1994);
+        assert_eq!(year_of(days_of(2000) + 365), 2000);
+    }
 }
