@@ -9,7 +9,6 @@ mod analyzer;
 mod bounds;
 mod domain;
 pub mod facts;
-mod grounded;
 mod informed;
 pub mod observed;
 mod origin;
@@ -20,7 +19,7 @@ pub mod trace;
 mod validate;
 
 pub use bounds::{Bounds, Linear, SearchStats, TableBound};
-pub use grounded::{Grounded, SolverSize, Timings};
+pub use facts::store::{Grounded, SolverSize, Timings};
 pub use informed::{FactMode, FactReport, Informed, Matched, MatchedReport};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 pub use simple::{Simple, SimpleKind, SimpleSelectivity};

@@ -38,16 +38,16 @@
 //! Three sets of rules turn executed plans into constraints on a query:
 //!
 //! ```text
-//!  ObservedPlan ─[rules]─▶ FactSet ─[derive]─▶ closed FactSet ─▶ Analysis::with_facts
-//!                            facts   = v
-//!                            bounds  ≤ v
-//!                            floors  ≥ v
-//!                            unobserved
-//!                              │
-//!                              └─[axioms]─▶ Analysis::with_store ─▶ Grounded
+//!  ObservedPlan ─[observe]─▶ FactSet ─[derive]─▶ closed FactSet ─▶ Analysis::with_facts
+//!                              facts   = v
+//!                              bounds  ≤ v
+//!                              floors  ≥ v
+//!                              unobserved
+//!                                │
+//!                                └─[axioms]─▶ Analysis::with_store ─▶ Grounded
 //! ```
 //!
-//! 1. [`rules`] read each operator of one executed plan
+//! 1. [`observe`] reads each operator of one executed plan
 //!    ([`FactSet::observe`], and [`FactSet::observe_translated`] for the
 //!    rows only a query names). Out come facts, bounds, floors, and the kinds
 //!    of operators whose rows were not counted ([`FactSet::unobserved`]),
@@ -67,30 +67,28 @@
 //!
 //! Each fact records the rule it came from ([`Origin`]), and
 //! [`Grounded::axioms`](crate::Grounded::axioms) counts axioms by rule: the
-//! name is the heading of its spec in [`rules`], [`derive`](mod@derive) or [`axioms`].
+//! name is the heading of its spec in [`observe`], [`derive`](mod@derive) or [`axioms`].
 //!
 //! [`Analysis::with_facts`]: crate::Analysis::with_facts
 //! [`Analysis::with_store`]: crate::Analysis::with_store
 
 pub mod axioms;
 pub mod derive;
-pub mod rules;
+pub mod observe;
 mod sql;
-mod serialize;
 mod state;
 pub(crate) mod store;
-pub(crate) mod translated;
 
 pub use crate::rows::{Context, Exists, ExistsKind, Term};
 pub use state::{Pending, State, Taint, Value, states};
-pub use rules::{FactRule, Observation, RULES};
+pub use observe::{FactRule, Observation, RULES};
 pub use sql::{CountDialect, Counts};
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Options;
 use crate::observed::{Catalog, ObservedPlan};
@@ -309,20 +307,20 @@ pub struct Conflict {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactSet {
-    #[serde(serialize_with = "serialize::values", deserialize_with = "facts")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "facts")]
     facts: BTreeMap<FactKind, Fact>,
     /// The least upper bound seen on each size, distinct count or greatest
     /// value: the rows of an operator that may have let through more than
     /// its context's, or the values a runtime filter let through.
-    #[serde(serialize_with = "serialize::values", deserialize_with = "bounds")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "bounds")]
     bounds: BTreeMap<FactKind, Fact>,
     /// The greatest lower bound seen on each size, distinct count or least
     /// value: the rows of an operator that may have kept fewer than its
     /// context's, or the values a runtime filter let through.
-    #[serde(serialize_with = "serialize::values", deserialize_with = "floors")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "floors")]
     floors: BTreeMap<FactKind, Fact>,
     /// What each aggregate value the facts read is, by name.
-    #[serde(serialize_with = "serialize::values", deserialize_with = "values")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "values")]
     values: BTreeMap<String, Value>,
     /// The facts of operators whose rows were not counted.
     unobserved: BTreeSet<FactKind>,
@@ -400,7 +398,7 @@ impl FactSet {
     /// Adds every fact and bound the rules read off `plan`, and notes the
     /// facts it could not give a value (see [`FactSet::unobserved`]).
     pub fn observe(&mut self, plan: &ObservedPlan) {
-        let observed = rules::observe(plan);
+        let observed = observe::observe(plan);
         for fact in observed.facts {
             self.insert(fact);
         }
@@ -418,10 +416,10 @@ impl FactSet {
 
     /// Adds the facts `plan`'s counts give the rows of its operators as a
     /// query names them, once translated with `catalog` (see
-    /// [rule `translated`](rules#translated)): rows the rules may not name. A plan that does not
+    /// [rule `translated`](observe#translated)): rows the rules may not name. A plan that does not
     /// translate adds none.
     pub fn observe_translated(&mut self, catalog: &Catalog, plan: &ObservedPlan, options: &Options) {
-        for (fact, floor) in translated::observe(catalog, plan, options) {
+        for (fact, floor) in observe::observe_translated(catalog, plan, options) {
             if floor {
                 self.insert_floor(fact);
             } else {
@@ -580,4 +578,9 @@ pub fn derive_facts(plans: &[ObservedPlan]) -> FactSet {
     }
     set.close();
     set
+}
+
+/// A map's values, written as a list.
+fn serialize_values<K, V: Serialize, S: Serializer>(m: &BTreeMap<K, V>, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(m.values())
 }
