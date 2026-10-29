@@ -10,6 +10,7 @@ mod bounds;
 mod domain;
 mod first;
 pub mod facts;
+mod grounded;
 mod informed;
 pub mod observed;
 mod origin;
@@ -18,7 +19,8 @@ mod simple;
 pub mod trace;
 mod validate;
 
-pub use bounds::{Bounds, Linear, TableBound};
+pub use bounds::{Bounds, Linear, SearchStats, TableBound};
+pub use grounded::{Grounded, SolverSize, Timings};
 pub use informed::{FactMode, FactReport, Informed, Matched, MatchedReport};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 pub use simple::{Simple, SimpleKind, SimpleSelectivity};
@@ -194,6 +196,15 @@ impl Analysis {
     /// a plan of other data gives bounds about that data.
     pub fn with_facts(&self, facts: &facts::FactSet, mode: FactMode) -> Result<Informed> {
         informed::inform(self, facts, mode)
+    }
+
+    /// This analysis with every fact, bound and floor `facts` stores among
+    /// its constraints, as a claim on the quantity of the rows it is about,
+    /// related to the query's by axioms. Z3 derives what
+    /// follows. Facts that contradict each other or the constraints are
+    /// rejected. Pass facts as observed, not closed.
+    pub fn with_store(&self, facts: &facts::FactSet) -> Result<Grounded> {
+        facts::store::with_store(self, facts)
     }
 
     /// The fact each selectivity of [`Analysis::selectivity`]'s `required`
@@ -445,6 +456,16 @@ fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str)
         r.to_string()
     };
     ScanKind::Base { key, display }
+}
+
+/// The analyzer's nodes for `plan`, and each base-table scan as (scan
+/// variable, table name), as [`analyze_observed`] builds them.
+pub(crate) fn nodes(plan: &LogicalPlan, options: &Options) -> (Vec<Node>, Vec<(String, String)>) {
+    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
+    let mut a = Analyzer::new(&resolve, options.max_product, &options.foreign_keys, false).with_ranges(plan);
+    a.visit(plan);
+    let scans = a.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
+    (a.nodes, scans)
 }
 
 fn analyze_with(

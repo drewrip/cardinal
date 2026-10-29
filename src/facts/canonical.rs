@@ -21,8 +21,10 @@ impl FactKind {
     pub fn canonical(&self) -> FactKind {
         // Lookups no term reads taken out, and decorrelated first: what they
         // take out is no instance to name.
-        let unpadded = self.unpadded();
-        let this = unpadded.as_ref().unwrap_or(self);
+        let ungrouped = self.ungrouped();
+        let this = ungrouped.as_ref().unwrap_or(self);
+        let unpadded = this.unpadded();
+        let this = unpadded.as_ref().unwrap_or(this);
         let decorrelated = this.decorrelated();
         let this = decorrelated.as_ref().unwrap_or(this);
         let instances = this.instances();
@@ -45,6 +47,32 @@ impl FactKind {
             }
         });
         best.unwrap_or_else(|| this.clone())
+    }
+
+    /// A distinct count, min or max of keys over a GROUP BY on them and
+    /// more, as over the GROUP BY's input: a group is kept for each
+    /// combination of its keys the input has, so the keys take the input's
+    /// values. Repeated for GROUP BYs of GROUP BYs. `None` if it is none.
+    fn ungrouped(&self) -> Option<FactKind> {
+        let input = |keys: &BTreeSet<Term>, over: &Context| match over {
+            Context::Derived { op, args, inputs } if op == "group" && keys.iter().all(|k| args.contains(k)) => {
+                Some(inputs[0].clone())
+            }
+            _ => None,
+        };
+        let mut this = self.clone();
+        loop {
+            let next = match &this {
+                FactKind::Distinct { keys, over } => input(keys, over).map(|o| FactKind::Distinct { keys: keys.clone(), over: o }),
+                FactKind::Min { key, over } => input(&[key.clone()].into(), over).map(|o| FactKind::Min { key: key.clone(), over: o }),
+                FactKind::Max { key, over } => input(&[key.clone()].into(), over).map(|o| FactKind::Max { key: key.clone(), over: o }),
+                _ => None,
+            };
+            match next {
+                Some(n) => this = n,
+                None => return (this != *self).then_some(this),
+            }
+        }
     }
 
     /// This fact with its left joins that only look up groups nothing
@@ -126,7 +154,7 @@ impl FactKind {
     /// contexts as [`rewrite`] builds them, a selectivity's predicates as its
     /// rows with them write them, and keys and conditions with columns
     /// written as the least column equal to them.
-    fn rename(&self, names: &HashMap<String, String>) -> FactKind {
+    pub(crate) fn rename(&self, names: &HashMap<String, String>) -> FactKind {
         let f = |r: &str| names.get(r).cloned();
         let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
         match self {
@@ -161,7 +189,7 @@ impl FactKind {
     }
 
     /// Every table instance named, in order of first appearance.
-    fn instances(&self) -> Vec<String> {
+    pub(crate) fn instances(&self) -> Vec<String> {
         let mut out = vec![];
         let terms = |ts: &mut dyn Iterator<Item = &Term>, out: &mut Vec<String>| {
             for t in ts {
@@ -291,4 +319,24 @@ fn permutations<'a>(items: &[&'a String]) -> Vec<Vec<&'a String>> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::prelude::col;
+
+    use super::*;
+    use crate::facts::context::terms;
+
+    #[test]
+    fn keys_over_a_group_on_more_keys_are_over_its_input() {
+        let part = Context::table("part");
+        let keys = terms([col("part.p_brand"), col("part.p_size")]);
+        let more = Context::Derived { op: "group".into(), args: terms([col("part.p_brand"), col("part.p_size"), col("part.p_type")]).into_iter().collect(), inputs: vec![part.clone()] };
+        let grouped = FactKind::Distinct { keys: keys.clone(), over: more.clone() };
+        assert_eq!(grouped.canonical(), FactKind::Distinct { keys: keys.clone(), over: part.clone() });
+        // Keys the group does not have stay over it.
+        let other = FactKind::Distinct { keys: terms([col("part.p_name")]), over: more };
+        assert_eq!(other.canonical(), other);
+    }
 }

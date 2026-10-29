@@ -15,6 +15,7 @@
 //! DataFusion rejects) becomes an opaque operator or predicate, which bounds
 //! nothing and names no rows: the analysis stays sound, only weaker.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
@@ -40,7 +41,16 @@ impl Catalog {
     /// `plan`'s operators as a [`LogicalPlan`] over this catalog's tables, in
     /// the engine's order. Scans are aliased by instance (`lineitem#3`).
     pub fn to_logical(&self, plan: &ObservedPlan) -> crate::Result<LogicalPlan> {
-        Ok(Translator { catalog: self, plan }.build(plan.root, "").plan)
+        Ok(self.to_logical_mapped(plan)?.0)
+    }
+
+    /// [`Catalog::to_logical`], and for each operator of `plan` that became
+    /// one of the plan's (a projection or sort its input's), the subplans
+    /// it became: those of each copy of it a reuse reads.
+    pub(crate) fn to_logical_mapped(&self, plan: &ObservedPlan) -> crate::Result<(LogicalPlan, Vec<(usize, LogicalPlan)>)> {
+        let t = Translator { catalog: self, plan, built: RefCell::new(vec![]) };
+        let root = t.build(plan.root, "").plan;
+        Ok((root, t.built.into_inner()))
     }
 }
 
@@ -62,12 +72,22 @@ impl Built {
 struct Translator<'a> {
     catalog: &'a Catalog,
     plan: &'a ObservedPlan,
+    /// Each operator built, with what it became.
+    built: RefCell<Vec<(usize, LogicalPlan)>>,
 }
 
 impl Translator<'_> {
     /// Node `i`, with each of its instances renamed with `suffix`: the copy a
     /// [`Op::Reuse`] reads.
     fn build(&self, i: usize, suffix: &str) -> Built {
+        let b = self.build_node(i, suffix);
+        if !matches!(self.plan.nodes[i].op, Op::Reuse { .. }) {
+            self.built.borrow_mut().push((i, b.plan.clone()));
+        }
+        b
+    }
+
+    fn build_node(&self, i: usize, suffix: &str) -> Built {
         let node = &self.plan.nodes[i];
         match &node.op {
             Op::Reuse { suffix: s, .. } => return self.build(node.children[0], &format!("{s}{suffix}")),

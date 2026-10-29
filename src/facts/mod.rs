@@ -7,6 +7,7 @@
 //! and [`derive_facts`] combines what several plans show into everything
 //! that follows from it.
 
+pub(crate) mod axioms;
 mod canonical;
 pub(crate) mod contain;
 mod context;
@@ -16,6 +17,8 @@ mod rewrite;
 mod rules;
 mod sql;
 mod serialize;
+pub(crate) mod store;
+pub(crate) mod translated;
 
 pub use context::{Context, Exists, ExistsKind, Pending, State, Taint, Term, Value, states};
 pub use rules::{FactRule, Observation, RULES};
@@ -27,7 +30,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::observed::ObservedPlan;
+use crate::Options;
+use crate::observed::{Catalog, ObservedPlan};
 use context::join;
 
 /// A non-negative rational, in lowest terms.
@@ -348,6 +352,20 @@ impl FactSet {
             self.insert_value(value);
         }
         self.unobserved.extend(observed.unobserved);
+    }
+
+    /// Adds the facts `plan`'s counts give the rows of its operators as a
+    /// query names them, once translated with `catalog` (see
+    /// [`translated`]): rows the rules may not name. A plan that does not
+    /// translate adds none.
+    pub fn observe_translated(&mut self, catalog: &Catalog, plan: &ObservedPlan, options: &Options) {
+        for (fact, floor) in translated::observe(catalog, plan, options) {
+            if floor {
+                self.insert_floor(fact);
+            } else {
+                self.insert(fact);
+            }
+        }
     }
 
     /// The facts the observed plans have and did not count, that nothing

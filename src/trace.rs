@@ -226,6 +226,20 @@ impl Trace {
         trace
     }
 
+    /// This trace, declaring too every variable `smt` declares that it does
+    /// not: those of the constraints facts added.
+    pub(crate) fn declare(&mut self, smt: &str) {
+        let known: HashSet<String> = declared(&self.declarations).into_iter().map(str::to_string).collect();
+        for l in smt.lines() {
+            if let Some(name) = declared_name(l)
+                && !known.contains(name)
+            {
+                self.declarations.push_str(l);
+                self.declarations.push('\n');
+            }
+        }
+    }
+
     /// This trace with only the analyzer's constraints, none from facts.
     pub fn without_facts(&self) -> Trace {
         let mut trace = self.clone();
@@ -380,7 +394,7 @@ fn vars(smt: &str, declared: &HashSet<&str>) -> Vec<String> {
 
 /// `core` with each tracker dropped that the proof does not need, so that
 /// dropping any one left leaves the claim unproven.
-fn shrink(solver: &Solver, core: Vec<Bool>) -> Vec<Bool> {
+pub(crate) fn shrink(solver: &Solver, core: Vec<Bool>) -> Vec<Bool> {
     if core.len() > SHRINK_MAX {
         return core;
     }
