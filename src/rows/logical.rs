@@ -19,10 +19,10 @@ use datafusion::logical_expr::logical_plan::{Distinct, LogicalPlan};
 use datafusion::logical_expr::utils::split_conjunction_owned;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, ExistsKind, Taint, Term};
-use super::FactKind;
+use super::{Context, ExistsKind, Term};
+use crate::facts::{FactKind, Taint};
 use crate::analyzer::{self, Node};
-use crate::first;
+use super::first;
 use crate::observed::{base_table, normalize, qualified};
 
 /// Every node's context, and what it is computed from.

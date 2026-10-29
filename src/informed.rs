@@ -26,8 +26,8 @@ use z3::ast::{Bool, Int, Real};
 
 use crate::analyzer::Node;
 use crate::bounds::{Bounds, Search, SearchStats};
-use crate::facts::contain::{fewer, groups_among, renamed};
-use crate::facts::logical::Logical;
+use crate::rows::contain::{fewer, groups_among, renamed};
+use crate::rows::logical::Logical;
 use crate::facts::{Context, Fact, FactKind, FactSet, Ratio, Term};
 use crate::selectivity::{Card, Interval, Kind, Selectivity, SelectivityReport};
 use crate::trace::{self, FactClaim, FactInfo, FactRef, Proof, Trace};

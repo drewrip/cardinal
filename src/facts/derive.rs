@@ -81,7 +81,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::rewrite::Spj;
+use crate::rows::rewrite::Spj;
 use super::{Context, Exists, ExistsKind, Fact, FactKind, FactSet, Origin, Ratio, Term};
 
 pub(super) fn close(set: &mut FactSet) {

@@ -12,9 +12,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::FactKind;
 use super::canonical::{MAX_ORDERS, each_order};
-use super::context::{Context, Exists, ExistsKind};
+use super::{Context, Exists, ExistsKind};
+use crate::facts::FactKind;
 use super::rewrite::Spj;
 
 /// True if `a`'s rows are among `b`'s, as many times or fewer: `a` is `b`
@@ -175,7 +175,7 @@ mod tests {
     use datafusion::prelude::{col, lit};
 
     use super::*;
-    use crate::facts::context::{Term, terms};
+    use crate::rows::{Term, terms};
 
     fn t(name: &str) -> Context {
         Context::table(name)

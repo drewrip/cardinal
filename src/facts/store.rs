@@ -15,8 +15,8 @@ use datafusion::logical_expr::Expr;
 use z3::ast::Int;
 
 use super::axioms::{Axiom, Space, over};
-use super::context::{Context, Term};
-use super::logical::Logical;
+use crate::rows::logical::Logical;
+use crate::rows::{Context, Term};
 use super::{FactKind, FactSet};
 use crate::analyzer::Node;
 use crate::grounded::{self, Grounded, Observations, Tracked};

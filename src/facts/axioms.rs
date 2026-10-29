@@ -148,9 +148,9 @@ use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use z3::ast::{Bool, Int};
 
-use super::contain::{fewer, renamed, renamed_kind, subset};
-use super::context::{Context, Exists, ExistsKind, Term};
-use super::rewrite::Spj;
+use crate::rows::contain::{fewer, renamed, renamed_kind, subset};
+use crate::rows::rewrite::Spj;
+use crate::rows::{Context, Exists, ExistsKind, Term};
 use super::FactKind;
 
 /// An assertion every data satisfies, and the rule it is from.
@@ -611,7 +611,7 @@ mod tests {
     use datafusion::arrow::datatypes::DataType;
 
     use super::*;
-    use crate::facts::context::terms;
+    use crate::rows::terms;
 
     fn t(name: &str) -> Context {
         Context::table(name)

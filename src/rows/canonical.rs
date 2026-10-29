@@ -9,7 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::{Context, Exists, ExistsKind, FactKind, Term, rewrite};
+use super::{Context, Exists, ExistsKind, Term, rewrite};
+use crate::facts::FactKind;
 use crate::observed::base_table;
 
 /// More orders than this are not tried: instances are then numbered as they
@@ -326,7 +327,7 @@ mod tests {
     use datafusion::prelude::col;
 
     use super::*;
-    use crate::facts::context::terms;
+    use crate::rows::terms;
 
     #[test]
     fn keys_over_a_group_on_more_keys_are_over_its_input() {

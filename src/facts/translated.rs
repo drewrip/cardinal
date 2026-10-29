@@ -19,8 +19,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use datafusion::logical_expr::LogicalPlan;
 
-use super::context::{Context, State, states, stopped};
-use super::logical::Logical;
+use super::state::{State, states, stopped};
+use crate::rows::Context;
+use crate::rows::logical::Logical;
 use super::{Fact, FactKind, Origin, Ratio};
 use crate::Options;
 use crate::analyzer::Node;

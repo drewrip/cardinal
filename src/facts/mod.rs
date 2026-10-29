@@ -73,19 +73,16 @@
 //! [`Analysis::with_store`]: crate::Analysis::with_store
 
 pub mod axioms;
-mod canonical;
-pub(crate) mod contain;
-mod context;
 pub mod derive;
-pub(crate) mod logical;
-mod rewrite;
 pub mod rules;
 mod sql;
 mod serialize;
+mod state;
 pub(crate) mod store;
 pub(crate) mod translated;
 
-pub use context::{Context, Exists, ExistsKind, Pending, State, Taint, Term, Value, states};
+pub use crate::rows::{Context, Exists, ExistsKind, Term};
+pub use state::{Pending, State, Taint, Value, states};
 pub use rules::{FactRule, Observation, RULES};
 pub use sql::{CountDialect, Counts};
 
@@ -97,7 +94,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::Options;
 use crate::observed::{Catalog, ObservedPlan};
-use context::join;
+use crate::rows::join;
 
 /// A non-negative rational, in lowest terms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

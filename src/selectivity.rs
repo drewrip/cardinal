@@ -20,7 +20,7 @@ use datafusion::logical_expr::utils::conjunction;
 use crate::analyzer::{self, Node};
 use crate::bounds::Search;
 use crate::facts::Ratio;
-use crate::first;
+use crate::rows::first;
 use crate::{Error, Result};
 
 /// A cardinality as an expression over table sizes and selectivities.

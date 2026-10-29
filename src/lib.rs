@@ -8,12 +8,12 @@
 mod analyzer;
 mod bounds;
 mod domain;
-mod first;
 pub mod facts;
 mod grounded;
 mod informed;
 pub mod observed;
 mod origin;
+pub mod rows;
 mod selectivity;
 mod simple;
 pub mod trace;

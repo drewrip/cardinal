@@ -147,7 +147,8 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::common::JoinType;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, Pending, State, Value, Values, join_keys, states_hidden, stopped};
+use super::state::{Pending, State, Value, Values, join_keys, states_hidden, stopped};
+use crate::rows::Context;
 use super::{Fact, FactKind, Origin, Ratio, Term};
 use crate::observed::{ObservedPlan, Op, column_key};
 
