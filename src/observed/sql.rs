@@ -66,6 +66,9 @@ pub struct QueryText {
     relations: HashMap<String, Vec<String>>,
     /// Whether some `SELECT` is `DISTINCT ON`.
     distinct_on: bool,
+    /// Whether some `GROUP BY` has grouping sets (`ROLLUP`, `CUBE`,
+    /// `GROUPING SETS`) or another modifier.
+    grouping_sets: bool,
     /// Every window function the query calls.
     window_functions: Vec<Expr>,
 }
@@ -132,6 +135,7 @@ impl QueryText {
             limits: scan.limits.clone(),
             offsets: scan.offsets.clone(),
             distinct_on: scan.distinct_on,
+            grouping_sets: scan.grouping_sets,
             ..Default::default()
         };
         for e in &scan.exprs {
@@ -395,6 +399,12 @@ impl QueryText {
         self.distinct_on
     }
 
+    /// Whether some `GROUP BY` of the query has grouping sets, and so
+    /// outputs rows for more than one set of keys.
+    pub fn grouping_sets(&self) -> bool {
+        self.grouping_sets
+    }
+
     /// The query's `LIMIT` (and `FETCH`) clauses: each one's row count, or
     /// `None` for one that is not a constant.
     pub fn limits(&self) -> &[Option<u64>] {
@@ -558,6 +568,7 @@ struct Scan {
     limits: Vec<Option<u64>>,
     offsets: Vec<Option<u64>>,
     distinct_on: bool,
+    grouping_sets: bool,
     /// Every expression.
     exprs: Vec<Expr>,
 }
@@ -614,6 +625,12 @@ impl Visitor for Scan {
         selects(&query.body, &mut found);
         for s in found {
             self.distinct_on |= matches!(s.distinct, Some(ast::Distinct::On(_)));
+            self.grouping_sets |= match &s.group_by {
+                ast::GroupByExpr::All(modifiers) => !modifiers.is_empty(),
+                ast::GroupByExpr::Expressions(keys, modifiers) => {
+                    !modifiers.is_empty() || keys.iter().any(|k| matches!(k, Expr::Rollup(_) | Expr::Cube(_) | Expr::GroupingSets(_)))
+                }
+            };
             for item in &s.projection {
                 if let SelectItem::ExprWithAlias { expr, alias } = item {
                     let alias = alias.value.to_lowercase();
