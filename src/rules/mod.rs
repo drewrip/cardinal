@@ -135,7 +135,7 @@ use std::collections::BTreeSet;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::{Column, Constraint};
+use datafusion::common::Column;
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, LogicalPlan, SkipType, TableScan};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
@@ -453,7 +453,7 @@ impl<'a> Analyzer<'a> {
                     raw.fetch = None;
                     raw_scan = Some((name, self.names_of(&s), LogicalPlan::TableScan(raw)));
                     self.raw_ranges = (range_names(&s.min), range_names(&s.max));
-                    self.range_domains(plan, &s);
+                    self.range_within_domain(plan, &s);
                 }
                 s
             }
@@ -481,39 +481,6 @@ impl<'a> Analyzer<'a> {
             out = f;
         }
         (out, raw_scan)
-    }
-
-    /// A composite primary key, or a composite UNIQUE constraint on NOT NULL
-    /// columns, is unique as a tuple: the table has at most as many rows as
-    /// the product of its key columns' NDVs.
-    pub(crate) fn composite_key(&self, scan: &TableScan, rel: &Rel) {
-        let Some(constraints) = scan.source.constraints() else {
-            return;
-        };
-        let schema = scan.source.schema();
-        for c in constraints.iter() {
-            let pk = match c {
-                Constraint::PrimaryKey(pk) => pk,
-                Constraint::Unique(u) if u.iter().all(|i| !schema.field(*i).is_nullable()) => u,
-                Constraint::Unique(_) => continue,
-            };
-            if pk.len() < 2 {
-                continue;
-            }
-            let positions: Option<Vec<usize>> = pk
-                .iter()
-                .map(|src| match &scan.projection {
-                    None => Some(*src),
-                    Some(proj) => proj.iter().position(|p| p == src),
-                })
-                .collect();
-            if let Some(positions) = positions {
-                let factors: Vec<&Int> = positions.iter().map(|i| &rel.ndv[*i]).collect();
-                if let Some(p) = product(&factors, self.max_product) {
-                    self.assert(rel.card.le(p));
-                }
-            }
-        }
     }
 
     /// Ranking functions number rows from 1, and `row_number()` numbers each

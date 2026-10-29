@@ -28,7 +28,7 @@ use datafusion::logical_expr::Expr;
 use z3::ast::{Ast, Bool, Dynamic, Int};
 use z3::{AstKind, DeclKind, SatResult, Solver};
 
-use super::axioms::{Axiom, Space, over};
+use crate::axioms::{Axiom, Space, over};
 use super::{FactKind, FactSet};
 use crate::analysis::{Node, new_solver};
 use crate::bounds::{Bounds, Search, SearchStats};

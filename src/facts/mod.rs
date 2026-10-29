@@ -58,7 +58,7 @@
 //!    an exact fact contradicts is recorded in [`FactSet::conflicts`], as is
 //!    a second value for one fact. [`Analysis::with_facts`] substitutes the
 //!    closed set's selectivities into the query's formula.
-//! 3. [`axioms`] instead relate the facts' rows to the query's rows inside
+//! 3. [`axioms`](crate::axioms) instead relate the facts' rows to the query's rows inside
 //!    Z3 ([`Analysis::with_store`]), taking the facts as observed. Each
 //!    fact, bound and floor on a quantity becomes a tracked claim on a Z3
 //!    term; the axioms relating the terms are asserted untracked. Claims in
@@ -67,12 +67,11 @@
 //!
 //! Each fact records the rule it came from ([`Origin`]), and
 //! [`Grounded::axioms`](crate::Grounded::axioms) counts axioms by rule: the
-//! name is the heading of its spec in [`observe`], [`derive`](mod@derive) or [`axioms`].
+//! name is the heading of its spec in [`observe`], [`derive`](mod@derive) or [`axioms`](crate::axioms).
 //!
 //! [`Analysis::with_facts`]: crate::Analysis::with_facts
 //! [`Analysis::with_store`]: crate::Analysis::with_store
 
-pub mod axioms;
 pub mod derive;
 pub mod observe;
 mod sql;

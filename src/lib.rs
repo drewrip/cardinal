@@ -6,6 +6,7 @@
 //! cardinality must be at most the sum of all base-table scan cardinalities.
 
 mod analysis;
+pub mod axioms;
 mod bounds;
 mod domain;
 mod keys;
@@ -476,7 +477,7 @@ fn analyze_with(
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
     let root = a.visit(plan).card;
-    a.assert_partitions();
+    a.disjoint_partitions();
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();
     let assertions = a.solver.get_assertions().len();

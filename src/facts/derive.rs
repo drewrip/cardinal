@@ -15,7 +15,7 @@
 //!   passes until one adds no new fact; this terminates, since every
 //!   context reached is a combination of ones already known.
 //! - **Not done**: no inequalities. Bounds, floors, and facts relating rows
-//!   by containment are [`super::axioms`]' work, in Z3.
+//!   by containment are [`crate::axioms`]' work, in Z3.
 //!
 //! # Rules
 //!

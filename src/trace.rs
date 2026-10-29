@@ -151,6 +151,7 @@ const SHRINK_MAX: usize = 300;
 /// lines that made each one.
 const SOURCES: &[(&str, &str)] = &[
     ("analysis.rs", include_str!("analysis.rs")),
+    ("axioms.rs", include_str!("axioms.rs")),
     ("keys.rs", include_str!("keys.rs")),
     ("rules/mod.rs", include_str!("rules/mod.rs")),
     ("rules/aggregate.rs", include_str!("rules/aggregate.rs")),

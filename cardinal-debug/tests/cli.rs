@@ -41,7 +41,7 @@ fn dump_then_view_as_text_and_html() {
     let proof = run(&["view", json.to_str().unwrap(), "--proof", "table:orders"]);
     assert!(proof.contains("● [") && proof.contains("Proof table:orders"), "{proof}");
     let node = run(&["view", json.to_str().unwrap(), "--node", "0"]);
-    assert!(node.contains("rule: fresh at src/analysis.rs:"), "{node}");
+    assert!(node.contains("rule: non_negative at src/axioms.rs:"), "{node}");
 
     run(&["view", json.to_str().unwrap(), "--html", html.to_str().unwrap()]);
     let page = std::fs::read_to_string(&html).unwrap();

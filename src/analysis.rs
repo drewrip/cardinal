@@ -22,8 +22,7 @@ use z3::{Params, Solver};
 
 use crate::ForeignKey;
 use crate::domain::{self, Facts};
-use crate::keys::Nulls;
-use crate::origin::{self, Origin};
+use crate::origin::Origin;
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,7 +300,7 @@ impl<'a> Analyzer<'a> {
     #[track_caller]
     pub(crate) fn new_var(&mut self, name: String) -> Int {
         let v = Int::new_const(name.as_str());
-        self.assert(v.ge(int(0)));
+        self.non_negative(&v);
         self.vars.push((name, v.clone()));
         v
     }
@@ -324,11 +323,10 @@ impl<'a> Analyzer<'a> {
             .enumerate()
             .map(|(j, t)| {
                 let v = self.new_var(format!("{base}_c{j}"));
-                self.assert(v.le(&card));
-                self.assert(card.ge(int(1)).implies(v.ge(int(1))));
+                self.ndv_within_rows(&v, &card);
+                self.nonempty_ndv(&v, &card);
                 if *t == DataType::Boolean {
-                    // true, false, NULL
-                    self.assert(v.le(int(3)));
+                    self.boolean_ndv(&v);
                 }
                 v
             })
@@ -349,20 +347,8 @@ impl<'a> Analyzer<'a> {
             rows: Rows::default(),
             origin: None,
         };
-        self.unique_columns(plan, &rel);
+        self.key_ndv(plan, &rel);
         rel
-    }
-
-    /// A column that traces to a declared key takes a distinct value on every
-    /// row: its NDV (NULL counted as one value) equals the cardinality.
-    pub(crate) fn unique_columns(&self, plan: &LogicalPlan, rel: &Rel) {
-        let schema = plan.schema();
-        for j in 0..schema.fields().len() {
-            let col = Column::from(schema.qualified_field(j));
-            if self.covers_key(plan, &[col], Nulls::Equal) {
-                self.assert(rel.ndv[j].eq(&rel.card));
-            }
-        }
     }
 
     /// The unquoted name of a variable created by `new_var`.
@@ -398,7 +384,7 @@ impl<'a> Analyzer<'a> {
         // with operator variables (which start with `op`).
         let symbol = format!("T{}_{}", self.tables.len(), symbol(display));
         let var = Int::new_const(symbol.as_str());
-        self.assert(var.ge(int(0)));
+        self.non_negative(&var);
         self.tables.insert(
             key.to_string(),
             TableVar {
@@ -456,22 +442,23 @@ impl<'a> Analyzer<'a> {
         out
     }
 
-    /// Bounds each output column's NDV by the size of its domain. A relation
-    /// with an expression that can take no value has no rows.
+    /// What `rel`'s value domains and row facts give: the domain axioms,
+    /// and the bounds unique columns, summed columns and padded columns put
+    /// on its rows.
     pub(crate) fn apply_domains(&self, plan: &LogicalPlan, rel: &Rel) {
         let schema = plan.schema();
         if rel.facts.contradictory() {
-            self.assert(rel.card.eq(int(0)));
+            self.empty_domain(&rel.card);
         }
         for (j, v) in rel.ndv.iter().enumerate() {
             let col = Expr::Column(Column::from(schema.qualified_field(j)));
             match rel.facts.dom(&col, schema).size() {
-                Some(0) => self.assert(rel.card.eq(int(0))),
-                Some(n) if n <= u64::MAX as u128 => self.assert(v.le(int(n as u64))),
+                Some(0) => self.empty_domain(&rel.card),
+                Some(n) if n <= u64::MAX as u128 => self.ndv_within_domain(v, n as u64),
                 _ => {}
             }
         }
-        self.range_domains(plan, rel);
+        self.range_within_domain(plan, rel);
         // A unique set of columns has a distinct combination on every row.
         // Columns with few possible values count as constants, which keeps
         // the product linear where possible.
@@ -510,56 +497,6 @@ impl<'a> Analyzer<'a> {
             } else if d.never_null() {
                 self.assert(rel.card.le(values));
             }
-        }
-    }
-
-    /// Each column's interval holds the values its domain allows, and isn't
-    /// empty where the column has a value; it holds at most its width of
-    /// distinct values, and NULL.
-    pub(crate) fn range_domains(&self, plan: &LogicalPlan, rel: &Rel) {
-        let schema = plan.schema();
-        for (j, (lo, hi)) in rel.min.iter().zip(&rel.max).enumerate() {
-            let (Some(lo), Some(hi)) = (lo, hi) else { continue };
-            let col = Expr::Column(Column::from(schema.qualified_field(j)));
-            let d = rel.facts.dom(&col, schema);
-            let (from, to) = d.int_range();
-            if let Some(from) = from.and_then(|v| i64::try_from(v).ok()) {
-                self.assert(lo.ge(Int::from_i64(from)));
-            }
-            if let Some(to) = to.and_then(|v| i64::try_from(v).ok()) {
-                self.assert(hi.le(Int::from_i64(to)));
-            }
-            if d.never_null() {
-                self.assert(rel.card.ge(int(1)).implies(lo.le(hi)));
-            }
-            let width = hi.ge(lo).ite(&(hi - lo + int(1)), &int(0));
-            self.assert(rel.ndv[j].le(width + int(!d.never_null() as u64)));
-        }
-    }
-
-    /// Relations over one table whose rows are provably disjoint together hold
-    /// at most the table's rows. Each class of relations with the same domains
-    /// gets a variable for the table rows in those domains, bounding all of
-    /// its members, and disjoint classes' variables sum to at most the table.
-    pub(crate) fn assert_partitions(&mut self) {
-        let origins: Vec<Origin> = self.origins.iter().map(|(_, o)| o.clone()).collect();
-        let (classes, cliques) = origin::disjoint_classes(&origins, 64);
-        let mut part: HashMap<usize, Int> = HashMap::new();
-        for clique in cliques {
-            let table = self.tables[&origins[classes[clique[0]][0]].table].var.clone();
-            let mut sum = vec![];
-            for c in clique {
-                if !part.contains_key(&c) {
-                    let v = self.new_var(format!("part{c}"));
-                    for &m in &classes[c] {
-                        self.assert(self.origins[m].0.le(&v));
-                    }
-                    self.assert(v.le(&table));
-                    part.insert(c, v);
-                }
-                sum.push(part[&c].clone());
-            }
-            self.assert(Int::add(&sum).le(&table));
         }
     }
 }

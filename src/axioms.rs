@@ -1,28 +1,117 @@
-//! What any data satisfies, relating the quantities of named rows.
+//! Axioms: what holds of any data, relating the quantities of rows.
 //!
-//! Stage 3 of the [pipeline](super#pipeline), run by
-//! [`Analysis::with_store`](crate::Analysis::with_store); notation as in
-//! [the module](super#notation).
+//! A rule ([`crate::rules`]) relates one operator to its inputs. An axiom
+//! holds of rows whatever operator made them: a column has no more
+//! distinct values than its relation has rows, rows among another's are
+//! fewer, two filters that cannot both hold split their input. Notation as
+//! in [`crate::facts`](crate::facts#notation).
 //!
 //! # Spec
 //!
-//! - **Input**: every quantity (`|C|`, `ndv(K | C)`, `min(k | C)`,
-//!   `max(k | C)`, canonical) with the Z3 terms known to equal it: the
-//!   query's operator variables for the rows they name, and a variable of
-//!   its own for each fact's quantity that no operator has.
-//! - **Output**: ground Z3 assertions over those terms, each tagged with
-//!   its rule ([`Grounded::axioms`](crate::Grounded::axioms) counts them).
-//!   No quantifiers: Rust decides which contexts relate, Z3 does the
-//!   arithmetic.
-//! - **Guarantees**: each axiom holds for any data, so it is asserted
-//!   untracked, and only the facts' claims can be rejected. The tests on
-//!   contexts are conservative: missing a relation loses an axiom, never
+//! - **Input**: the quantities an analysis knows: each relation's rows,
+//!   `ndv`, `min` and `max` variables, the value domains its rules found,
+//!   and the declared keys. With facts ([`Analysis::with_store`]), also
+//!   each fact's quantity (`|C|`, `ndv(K | C)`, `min(k | C)`, `max(k | C)`),
+//!   on the variable of the operator with those rows, or one of its own.
+//! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
+//!   names the function that asserted it, and
+//!   [`Grounded::axioms`](crate::Grounded::axioms) counts those between
+//!   named rows. No quantifiers: Rust decides where an axiom applies, Z3
+//!   does the arithmetic.
+//! - **Guarantees**: each axiom holds for any data; a schema axiom for any
+//!   data satisfying the declared keys. So axioms are asserted untracked:
+//!   only the facts' claims can be rejected. The tests deciding where an
+//!   axiom applies are conservative: missing a case loses an axiom, never
 //!   adds a wrong one.
-//! - **Not done**: selectivities and match shares get no axioms (the store
-//!   claims only quantities); contexts outside the relevant set are not
-//!   related.
+//! - **Not done**: selectivities and match shares get no axioms; contexts
+//!   outside the relevant set are not related.
 //!
-//! # Relevant contexts
+//! Axioms come in two kinds, by when they are asserted:
+//!
+//! - [On each relation](#axioms-on-each-relation), as the analysis makes
+//!   its variables, in every analysis.
+//! - [Between named rows](#axioms-between-named-rows), over the quantities
+//!   of rows named as contexts (the `Space`), by [`Analysis::with_store`].
+//!
+//! [`Analysis::with_store`]: crate::Analysis::with_store
+//!
+//! # Axioms on each relation
+//!
+//! ## `non-negative`
+//!
+//! - **Claim**: `v ≥ 0` for every row count and `ndv`, and each table's
+//!   size; between named rows, for each fact's own variable on a size or
+//!   distinct count.
+//!
+//! ## `ndv within rows`
+//!
+//! - **Claim**: `ndv ≤ X` for each column; between named rows,
+//!   `ndv(K | C) ≤ |C|`.
+//!
+//! ## `nonempty ndv`
+//!
+//! - **Claim**: `X ≥ 1 ⇒ ndv ≥ 1`: a row has a value, NULL counting as one.
+//!
+//! ## `boolean ndv`
+//!
+//! - **Claim**: `ndv ≤ 3` for a boolean column: true, false and NULL.
+//!
+//! ## `empty domain`
+//!
+//! - **Claim**: `X = 0`.
+//! - **When**: the relation's value domains contradict (`x < 1 AND x > 5`),
+//!   or a column's domain holds no value.
+//! - **Why**: every row satisfies its domains, so there is none.
+//!
+//! ## `ndv within domain`
+//!
+//! - **Claim**: `ndv ≤ n`, for a column whose domain holds `n` values,
+//!   NULL included if it may occur.
+//!
+//! ```text
+//! WHERE d BETWEEN 1 AND 7  ⇒  ndv(d) ≤ 7
+//! ```
+//!
+//! ## `range within domain`
+//!
+//! - **Claim**: for a column with `min` and `max` variables: they lie
+//!   within its domain's integer range; `X ≥ 1 ⇒ min ≤ max` if it is never
+//!   NULL; and `ndv ≤ max − min + 1`, plus 1 if it may be NULL.
+//!
+//! ## `key ndv`
+//!
+//! - **Claim**: `ndv = X` for a column that traces to a declared primary
+//!   key or NOT NULL UNIQUE column, through every operator that keeps it
+//!   unique (`keys.rs`).
+//!
+//! ## `composite key`
+//!
+//! - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or of
+//!   a composite UNIQUE constraint's on NOT NULL columns.
+//! - **Why**: each row has its own combination of key values.
+//!
+//! ## `disjoint partitions`
+//!
+//! - **Claim**: for relations made of distinct rows of one stored table
+//!   whose value domains on some column do not meet: their rows together
+//!   are at most the table's. Relations with the same domains form a class
+//!   bounded by one variable, and each set of pairwise disjoint classes
+//!   sums to at most `|T|`.
+//! - **When**: each relation reached the table through operators that
+//!   never repeat a row (filter, projection, sort, limit, distinct, semi
+//!   and anti joins); at most 64 classes per table.
+//!
+//! ```text
+//! σ(age < 18)(users) ∪ σ(age ≥ 65)(users)  ⇒  |σ(age < 18)| + |σ(age ≥ 65)| ≤ |users|
+//! ```
+//!
+//! # Axioms between named rows
+//!
+//! These relate the quantities of rows named as [`Context`]s, wherever
+//! terms for them exist: the analysis's variables for the rows its
+//! operators name (`rows::logical`), and the facts' own.
+//!
+//! ## Relevant contexts
 //!
 //! Only contexts near the query's are related. Starting from the contexts
 //! of the query's operators, add each context two contexts relate to (one
@@ -30,7 +119,7 @@
 //! inputs and conditions) among those over the same base tables, twice;
 //! then each context any of these [joins](#relations-between-contexts).
 //!
-//! # Relations between contexts
+//! ## Relations between contexts
 //!
 //! Each test holds up to renaming the instances of one table among
 //! themselves (`t@1`, `t@2`).
@@ -45,18 +134,12 @@
 //! - `D` joins `C`: both SPJs, `D` with more inputs, and all of `C`'s
 //!   tables, atoms, conditions and predicates.
 //!
-//! # Axioms
-//!
 //! ## `same rows`
 //!
 //! - **Claim**: `t = t'` for any two terms of one quantity. And for `A ⊆ B`:
 //!   `|A| = |B| ⇒` each key quantity of `A` equals `B`'s of the same keys.
 //! - **Why**: one quantity has one value; `A ⊆ B` with as many rows makes
 //!   them the same rows.
-//!
-//! ## `ndv within rows`
-//!
-//! - **Claim**: `ndv(K | C) ≤ |C|`.
 //!
 //! ## `subset`
 //!
@@ -135,23 +218,153 @@
 //! ```text
 //! |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
 //! ```
-//!
-//! ## `non-negative`
-//!
-//! - **Claim**: `t ≥ 0` for a fact's own variable on a size or distinct
-//!   count. The query's variables have this among their constraints.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use datafusion::common::ScalarValue;
+use datafusion::common::{Column, Constraint, ScalarValue};
+use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use z3::ast::{Bool, Int};
 
+use crate::analysis::{Analyzer, Rel, int, product};
+use crate::facts::FactKind;
+use crate::keys::Nulls;
+use crate::origin::{self, Origin};
 use crate::rows::contain::{fewer, renamed, renamed_kind, subset};
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
-use super::FactKind;
+
+// Axioms on each relation's variables, asserted as the analysis makes
+// them. Each is a function of its own, named as its heading above, so a
+// trace names the axiom a constraint is from.
+impl<'a> Analyzer<'a> {
+    /// [`non-negative`](self#non-negative): `v ≥ 0`.
+    pub(crate) fn non_negative(&self, v: &Int) {
+        self.assert(v.ge(int(0)));
+    }
+
+    /// [`ndv within rows`](self#ndv-within-rows): `ndv ≤ rows`.
+    pub(crate) fn ndv_within_rows(&self, ndv: &Int, rows: &Int) {
+        self.assert(ndv.le(rows));
+    }
+
+    /// [`nonempty ndv`](self#nonempty-ndv): `rows ≥ 1 ⇒ ndv ≥ 1`.
+    pub(crate) fn nonempty_ndv(&self, ndv: &Int, rows: &Int) {
+        self.assert(rows.ge(int(1)).implies(ndv.ge(int(1))));
+    }
+
+    /// [`boolean ndv`](self#boolean-ndv): true, false, NULL.
+    pub(crate) fn boolean_ndv(&self, ndv: &Int) {
+        self.assert(ndv.le(int(3)));
+    }
+
+    /// [`empty domain`](self#empty-domain): no rows.
+    pub(crate) fn empty_domain(&self, rows: &Int) {
+        self.assert(rows.eq(int(0)));
+    }
+
+    /// [`ndv within domain`](self#ndv-within-domain): `ndv ≤ n`, for a
+    /// column whose domain holds `n` values.
+    pub(crate) fn ndv_within_domain(&self, ndv: &Int, n: u64) {
+        self.assert(ndv.le(int(n)));
+    }
+
+    /// Each column's interval holds the values its domain allows, and isn't
+    /// empty where the column has a value; it holds at most its width of
+    /// distinct values, and NULL.
+    pub(crate) fn range_within_domain(&self, plan: &LogicalPlan, rel: &Rel) {
+        let schema = plan.schema();
+        for (j, (lo, hi)) in rel.min.iter().zip(&rel.max).enumerate() {
+            let (Some(lo), Some(hi)) = (lo, hi) else { continue };
+            let col = Expr::Column(Column::from(schema.qualified_field(j)));
+            let d = rel.facts.dom(&col, schema);
+            let (from, to) = d.int_range();
+            if let Some(from) = from.and_then(|v| i64::try_from(v).ok()) {
+                self.assert(lo.ge(Int::from_i64(from)));
+            }
+            if let Some(to) = to.and_then(|v| i64::try_from(v).ok()) {
+                self.assert(hi.le(Int::from_i64(to)));
+            }
+            if d.never_null() {
+                self.assert(rel.card.ge(int(1)).implies(lo.le(hi)));
+            }
+            let width = hi.ge(lo).ite(&(hi - lo + int(1)), &int(0));
+            self.assert(rel.ndv[j].le(width + int(!d.never_null() as u64)));
+        }
+    }
+
+    /// A column that traces to a declared key takes a distinct value on every
+    /// row: its NDV (NULL counted as one value) equals the cardinality.
+    pub(crate) fn key_ndv(&self, plan: &LogicalPlan, rel: &Rel) {
+        let schema = plan.schema();
+        for j in 0..schema.fields().len() {
+            let col = Column::from(schema.qualified_field(j));
+            if self.covers_key(plan, &[col], Nulls::Equal) {
+                self.assert(rel.ndv[j].eq(&rel.card));
+            }
+        }
+    }
+
+    /// A composite primary key, or a composite UNIQUE constraint on NOT NULL
+    /// columns, is unique as a tuple: the table has at most as many rows as
+    /// the product of its key columns' NDVs.
+    pub(crate) fn composite_key(&self, scan: &TableScan, rel: &Rel) {
+        let Some(constraints) = scan.source.constraints() else {
+            return;
+        };
+        let schema = scan.source.schema();
+        for c in constraints.iter() {
+            let pk = match c {
+                Constraint::PrimaryKey(pk) => pk,
+                Constraint::Unique(u) if u.iter().all(|i| !schema.field(*i).is_nullable()) => u,
+                Constraint::Unique(_) => continue,
+            };
+            if pk.len() < 2 {
+                continue;
+            }
+            let positions: Option<Vec<usize>> = pk
+                .iter()
+                .map(|src| match &scan.projection {
+                    None => Some(*src),
+                    Some(proj) => proj.iter().position(|p| p == src),
+                })
+                .collect();
+            if let Some(positions) = positions {
+                let factors: Vec<&Int> = positions.iter().map(|i| &rel.ndv[*i]).collect();
+                if let Some(p) = product(&factors, self.max_product) {
+                    self.assert(rel.card.le(p));
+                }
+            }
+        }
+    }
+
+    /// Relations over one table whose rows are provably disjoint together hold
+    /// at most the table's rows. Each class of relations with the same domains
+    /// gets a variable for the table rows in those domains, bounding all of
+    /// its members, and disjoint classes' variables sum to at most the table.
+    pub(crate) fn disjoint_partitions(&mut self) {
+        let origins: Vec<Origin> = self.origins.iter().map(|(_, o)| o.clone()).collect();
+        let (classes, cliques) = origin::disjoint_classes(&origins, 64);
+        let mut part: HashMap<usize, Int> = HashMap::new();
+        for clique in cliques {
+            let table = self.tables[&origins[classes[clique[0]][0]].table].var.clone();
+            let mut sum = vec![];
+            for c in clique {
+                if !part.contains_key(&c) {
+                    let v = self.new_var(format!("part{c}"));
+                    for &m in &classes[c] {
+                        self.assert(self.origins[m].0.le(&v));
+                    }
+                    self.assert(v.le(&table));
+                    part.insert(c, v);
+                }
+                sum.push(part[&c].clone());
+            }
+            self.assert(Int::add(&sum).le(&table));
+        }
+    }
+}
 
 /// An assertion every data satisfies, and the rule it is from.
 pub(crate) struct Axiom {
