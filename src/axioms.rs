@@ -226,6 +226,7 @@ use crate::analysis::{Analyzer, Node, Rel, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
+use crate::rows::canonical::Renamed;
 use crate::rows::contain::{fewer, renamed, renamed_kind, subset};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
@@ -382,8 +383,9 @@ impl<'a> Analyzer<'a> {
 pub(crate) fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> (HashMap<FactKind, usize>, BTreeSet<Context>) {
     let mut node_of = HashMap::new();
     let mut contexts = BTreeSet::new();
+    let mut renamings = Renamed::default();
     let mut add = |space: &mut Space, q: FactKind, var: &str, i: usize, contexts: &mut BTreeSet<Context>| {
-        let q = q.canonical();
+        let q = q.canonical_in(&mut renamings);
         contexts.insert(over(&q).clone());
         node_of.entry(q.clone()).or_insert(i);
         space.add(q, Int::new_const(var));
