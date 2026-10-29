@@ -102,10 +102,12 @@ const CASES: &[Case] = &[
         no_keys: Reduces,
     },
     Case {
+        // Grouped by part's columns: at most |part| groups, keys or not
+        // (the `wider rows` axiom).
         name: "tpch_q16",
         sql: include_str!("tpch/q16.sql"),
         keys: Reduces,
-        no_keys: MightGrow,
+        no_keys: Reduces,
     },
     Case {
         // ungrouped aggregate

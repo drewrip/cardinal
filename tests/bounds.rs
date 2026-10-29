@@ -473,6 +473,38 @@ async fn full_join_keeps_rows_with_null_keys() {
     }
 }
 
+#[tokio::test]
+async fn a_scalar_subquerys_padded_count_reads_as_its_own_column() {
+    // Found by the fuzzer. Decorrelated, each count is a left join's padded
+    // column, read through `CASE WHEN __always_true IS NULL THEN 0 ELSE
+    // count END`: on padded rows `__always_true` is NULL, not the literal
+    // `true` it is computed as, so the CASE is not the count.
+    let sql = "SELECT t876.c0, TRY_CAST(row_number() OVER (PARTITION BY t876.c1 ORDER BY t876.c0) AS BIGINT) AS c1
+               FROM (SELECT t877.c0, t877.c1 FROM (SELECT t878.c0, t878.c1 FROM (SELECT t879.c0, t879.c1 FROM
+               (SELECT id AS c0, age AS c1 FROM users) t879 ORDER BY t879.c0 OFFSET 0) t878 WHERE t878.c1 % 2 = 0
+               OR EXISTS (SELECT 1 FROM (SELECT t880.c0, (SELECT count(*) FROM (SELECT id AS c0, TRY_CAST(price AS
+               BIGINT) AS c1 FROM products) t881 WHERE t881.c0 = t880.c1) AS c1 FROM (SELECT user_id AS c0, id AS
+               c1 FROM orders) t880) t882 WHERE t882.c1 = t878.c1)) t877 WHERE t877.c1 < 29 UNION ALL SELECT
+               t883.c0, t883.c1 FROM (SELECT t878.c0, t878.c1 FROM (SELECT t879.c0, t879.c1 FROM (SELECT id AS c0,
+               age AS c1 FROM users) t879 ORDER BY t879.c0 OFFSET 0) t878 WHERE t878.c1 % 2 = 0 OR EXISTS (SELECT 1
+               FROM (SELECT t880.c0, (SELECT count(*) FROM (SELECT id AS c0, TRY_CAST(price AS BIGINT) AS c1 FROM
+               products) t881 WHERE t881.c0 = t880.c1) AS c1 FROM (SELECT user_id AS c0, id AS c1 FROM orders)
+               t880) t882 WHERE t882.c1 = t878.c1)) t883 WHERE t883.c1 >= 29 UNION ALL SELECT t884.c0, t884.c1 FROM
+               (SELECT t878.c0, t878.c1 FROM (SELECT t879.c0, t879.c1 FROM (SELECT id AS c0, age AS c1 FROM users)
+               t879 ORDER BY t879.c0 OFFSET 0) t878 WHERE t878.c1 % 2 = 0 OR EXISTS (SELECT 1 FROM (SELECT t880.c0,
+               (SELECT count(*) FROM (SELECT id AS c0, TRY_CAST(price AS BIGINT) AS c1 FROM products) t881 WHERE
+               t881.c0 = t880.c1) AS c1 FROM (SELECT user_id AS c0, id AS c1 FROM orders) t880) t882 WHERE t882.c1
+               = t878.c1)) t884 WHERE t884.c1 IS NULL) t876";
+    for data in common::shop_datasets() {
+        let name = data.name.clone();
+        let keys = data.unique_keys;
+        let ctx = data.context(keys);
+        let a = analyze_sql(&ctx, sql).await.unwrap();
+        let v = a.validate(&ctx).await.unwrap();
+        assert_eq!(v.violation, None, "{name}");
+    }
+}
+
 /// Tables `t (a, c)` and `u (b)` of integers, for range tests.
 async fn ranges() -> SessionContext {
     let ctx = SessionContext::new();

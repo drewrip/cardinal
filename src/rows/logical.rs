@@ -228,6 +228,22 @@ impl Logical {
                     JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => pass(1),
                     _ => pass(0).into_iter().chain(pass(1)).collect(),
                 };
+                // A padded side's columns are NULL on its padded rows. A
+                // column of a table reads so too, but a literal or computed
+                // value (`true`, `coalesce(x, 0)`) would read as a value it
+                // does not take there.
+                let left = pass(0).len();
+                let (pad_left, pad_right) = match join.join_type {
+                    JoinType::Left => (false, true),
+                    JoinType::Right => (true, false),
+                    JoinType::Full => (true, true),
+                    _ => (false, false),
+                };
+                for (j, e) in lineage.iter_mut().enumerate() {
+                    if (if j < left { pad_left } else { pad_right }) && !matches!(e, Some(Expr::Column(_))) {
+                        *e = None;
+                    }
+                }
                 // On exactly the partition of a side's first rows: the rows
                 // of a semi join with the window's input, whose key columns
                 // read as their partners'.
@@ -244,7 +260,6 @@ impl Logical {
                     None
                 };
                 if let Some(kind) = semi {
-                    let left = pass(0).len();
                     for (j, e) in lineage.iter_mut().enumerate() {
                         let grouped = (kind == JoinType::LeftSemi) == (j >= left);
                         if grouped {
