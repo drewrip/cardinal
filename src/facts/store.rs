@@ -24,73 +24,16 @@ use std::fmt;
 use std::panic::Location;
 use std::time::{Duration, Instant};
 
-use datafusion::logical_expr::Expr;
 use z3::ast::{Ast, Bool, Dynamic, Int};
 use z3::{AstKind, DeclKind, SatResult, Solver};
 
-use crate::axioms::{Axiom, Space, over};
 use super::{FactKind, FactSet};
-use crate::analysis::{Node, new_solver};
+use crate::analysis::new_solver;
+use crate::axioms::{Axiom, Space, add_nodes, over};
 use crate::bounds::{Bounds, Search, SearchStats};
 use crate::rows::logical::Logical;
-use crate::rows::{Context, Term};
 use crate::trace::{self, FactClaim, FactInfo, FactRef, Proof, Trace};
 use crate::{Analysis, Error, Result};
-
-/// Adds the quantities of `nodes`' rows, named by `logical`, to `space`.
-/// Returns each quantity's first node, and the contexts of the nodes' rows.
-fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> (HashMap<FactKind, usize>, BTreeSet<Context>) {
-    let mut node_of = HashMap::new();
-    let mut contexts = BTreeSet::new();
-    let mut add = |space: &mut Space, q: FactKind, var: &str, i: usize, contexts: &mut BTreeSet<Context>| {
-        let q = q.canonical();
-        contexts.insert(over(&q).clone());
-        node_of.entry(q.clone()).or_insert(i);
-        space.add(q, Int::new_const(var));
-    };
-    for (i, node) in nodes.iter().enumerate() {
-        let schema = node.plan.schema();
-        // A column `j` of the rows, if it is a column of a table and not a
-        // float: the constraints count a float's values by bits, facts by
-        // SQL equality.
-        let column = |j: usize| -> Option<Term> {
-            let Some(Some(e @ Expr::Column(_))) = logical.lineage[i].get(j) else { return None };
-            (j < schema.fields().len() && !schema.field(j).data_type().is_floating()).then(|| Term::new(e.clone()))
-        };
-        let mut rows = vec![];
-        if let (Some((raw, ndvs, _)), Some(instance)) = (&node.raw_scan, &logical.instances[i]) {
-            rows.push((Context::table(instance), raw, ndvs, &node.raw_min_vars, &node.raw_max_vars));
-        }
-        if let Ok(ctx) = &logical.contexts[i] {
-            rows.push((ctx.clone(), &node.var, &node.ndv_vars, &node.min_vars, &node.max_vars));
-            // A grouping's rows are its keys' distinct values.
-            if let Context::Derived { op, args, inputs } = ctx
-                && op == "group"
-            {
-                let keys = args.iter().cloned().collect();
-                add(space, FactKind::Distinct { keys, over: inputs[0].clone() }, &node.var, i, &mut contexts);
-            }
-        }
-        for (ctx, card, ndvs, mins, maxs) in rows {
-            add(space, FactKind::Cardinality(ctx.clone()), card, i, &mut contexts);
-            for (j, ndv) in ndvs.iter().enumerate() {
-                if let Some(key) = column(j) {
-                    add(space, FactKind::Distinct { keys: [key].into(), over: ctx.clone() }, ndv, i, &mut contexts);
-                }
-            }
-            for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
-                let Some(key) = column(j) else { continue };
-                if let Some(lo) = lo {
-                    add(space, FactKind::Min { key: key.clone(), over: ctx.clone() }, lo, i, &mut contexts);
-                }
-                if let Some(hi) = hi {
-                    add(space, FactKind::Max { key, over: ctx.clone() }, hi, i, &mut contexts);
-                }
-            }
-        }
-    }
-    (node_of, contexts)
-}
 
 /// How a claim relates its quantity to a value.
 #[derive(Debug, Clone, Copy)]
@@ -146,8 +89,10 @@ pub(crate) fn with_store(analysis: &Analysis, facts: &FactSet) -> Result<Grounde
             own.push(f.kind.clone());
         }
     }
+    // Axioms among the query's own variables are among its constraints
+    // already ([`Analyzer::named_rows`]): only those on a fact's are new.
     let relevant = space.relevant(&seeds);
-    let mut axioms = space.axioms(&relevant);
+    let mut axioms: Vec<Axiom> = space.axioms(&relevant).into_iter().filter(|a| a.claim.to_string().contains("fq_")).collect();
     for q in &own {
         if relevant.contains(over(q)) && matches!(q, FactKind::Cardinality(_) | FactKind::Distinct { .. }) {
             let t = space.term(q).unwrap();

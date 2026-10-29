@@ -183,9 +183,10 @@ impl Trace {
                 let smt = l.expr.to_string();
                 let line = l.at.line() as usize;
                 let file = l.at.file().replace('\\', "/");
-                let (function, code) = match sources.iter().find(|(p, _)| file.ends_with(&format!("src/{p}"))) {
-                    Some((_, source)) => rule(source, line),
-                    None => (String::new(), String::new()),
+                let (function, code) = match (l.rule, sources.iter().find(|(p, _)| file.ends_with(&format!("src/{p}")))) {
+                    (Some(r), Some((_, source))) => (r.to_string(), rule(source, line).1),
+                    (None, Some((_, source))) => rule(source, line),
+                    _ => (String::new(), String::new()),
                 };
                 let vars = vars(&smt, &declared);
                 Constraint {

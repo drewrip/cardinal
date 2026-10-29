@@ -146,6 +146,9 @@ pub(crate) struct Logged {
     pub(crate) expr: Bool,
     pub(crate) frame: Option<usize>,
     pub(crate) at: &'static Location<'static>,
+    /// The axiom it is, for one asserted by name rather than by a function
+    /// of its own.
+    pub(crate) rule: Option<&'static str>,
 }
 
 /// One plan node and the variables describing its output.
@@ -371,7 +374,17 @@ impl<'a> Analyzer<'a> {
                 expr: b.clone(),
                 frame: self.owners.last().copied(),
                 at: Location::caller(),
+                rule: None,
             });
+        }
+        self.solver.assert(b);
+    }
+
+    /// Asserts `b`, an instance of axiom `rule`, for no node in particular.
+    #[track_caller]
+    pub(crate) fn assert_named(&self, rule: &'static str, b: Bool) {
+        if self.trace {
+            self.log.borrow_mut().push(Logged { expr: b.clone(), frame: None, at: Location::caller(), rule: Some(rule) });
         }
         self.solver.assert(b);
     }

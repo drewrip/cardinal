@@ -227,11 +227,12 @@ use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use z3::ast::{Bool, Int};
 
-use crate::analysis::{Analyzer, Rel, int, product};
+use crate::analysis::{Analyzer, Node, Rel, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
 use crate::rows::contain::{fewer, renamed, renamed_kind, subset};
+use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
 
@@ -364,6 +365,76 @@ impl<'a> Analyzer<'a> {
             self.assert(Int::add(&sum).le(&table));
         }
     }
+
+    /// Every axiom between named rows over the quantities of this
+    /// analysis's own operators, each operator's rows named as facts name
+    /// them. `ndv within rows` is left out: each relation has it already.
+    pub(crate) fn named_rows(&mut self) {
+        let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
+        let logical = Logical::new(&self.nodes, &scans);
+        let mut space = Space::default();
+        let (_, seeds) = add_nodes(&mut space, &self.nodes, &logical);
+        for a in space.axioms(&space.relevant(&seeds)) {
+            if a.rule != "ndv within rows" {
+                self.assert_named(a.rule, a.claim);
+            }
+        }
+    }
+}
+
+/// Adds the quantities of `nodes`' rows, named by `logical`, to `space`.
+/// Returns each quantity's first node, and the contexts of the nodes' rows.
+pub(crate) fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> (HashMap<FactKind, usize>, BTreeSet<Context>) {
+    let mut node_of = HashMap::new();
+    let mut contexts = BTreeSet::new();
+    let mut add = |space: &mut Space, q: FactKind, var: &str, i: usize, contexts: &mut BTreeSet<Context>| {
+        let q = q.canonical();
+        contexts.insert(over(&q).clone());
+        node_of.entry(q.clone()).or_insert(i);
+        space.add(q, Int::new_const(var));
+    };
+    for (i, node) in nodes.iter().enumerate() {
+        let schema = node.plan.schema();
+        // A column `j` of the rows, if it is a column of a table and not a
+        // float: the constraints count a float's values by bits, facts by
+        // SQL equality.
+        let column = |j: usize| -> Option<Term> {
+            let Some(Some(e @ Expr::Column(_))) = logical.lineage[i].get(j) else { return None };
+            (j < schema.fields().len() && !schema.field(j).data_type().is_floating()).then(|| Term::new(e.clone()))
+        };
+        let mut rows = vec![];
+        if let (Some((raw, ndvs, _)), Some(instance)) = (&node.raw_scan, &logical.instances[i]) {
+            rows.push((Context::table(instance), raw, ndvs, &node.raw_min_vars, &node.raw_max_vars));
+        }
+        if let Ok(ctx) = &logical.contexts[i] {
+            rows.push((ctx.clone(), &node.var, &node.ndv_vars, &node.min_vars, &node.max_vars));
+            // A grouping's rows are its keys' distinct values.
+            if let Context::Derived { op, args, inputs } = ctx
+                && op == "group"
+            {
+                let keys = args.iter().cloned().collect();
+                add(space, FactKind::Distinct { keys, over: inputs[0].clone() }, &node.var, i, &mut contexts);
+            }
+        }
+        for (ctx, card, ndvs, mins, maxs) in rows {
+            add(space, FactKind::Cardinality(ctx.clone()), card, i, &mut contexts);
+            for (j, ndv) in ndvs.iter().enumerate() {
+                if let Some(key) = column(j) {
+                    add(space, FactKind::Distinct { keys: [key].into(), over: ctx.clone() }, ndv, i, &mut contexts);
+                }
+            }
+            for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
+                let Some(key) = column(j) else { continue };
+                if let Some(lo) = lo {
+                    add(space, FactKind::Min { key: key.clone(), over: ctx.clone() }, lo, i, &mut contexts);
+                }
+                if let Some(hi) = hi {
+                    add(space, FactKind::Max { key, over: ctx.clone() }, hi, i, &mut contexts);
+                }
+            }
+        }
+    }
+    (node_of, contexts)
 }
 
 /// An assertion every data satisfies, and the rule it is from.
