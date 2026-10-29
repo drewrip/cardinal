@@ -1,12 +1,83 @@
 //! Facts that follow from other facts.
 //!
-//! Rows counted in one plan and a filter measured in another combine: a
-//! filtered size over a base size is a selectivity, a selectivity times its
-//! input's size is a size, a join's size over the sizes of its inputs is a
-//! join selectivity, and a semi join's over its kept side's is a match share.
-//! These are applied until nothing new follows. Every fact is exact, so this
-//! terminates: the contexts it can reach are combinations of ones already
-//! known.
+//! Stage 2 of the [pipeline](super#pipeline); notation as in
+//! [the module](super#notation).
+//!
+//! # Spec
+//!
+//! - **Input**: the exact facts of a [`FactSet`]. Bounds and floors are not
+//!   read.
+//! - **Output**: new exact facts, canonical, each with
+//!   [`Origin::Derived`] naming its rule. A value
+//!   that disagrees with a known fact is recorded as a conflict, not kept.
+//! - **Guarantees**: every rule is exact arithmetic on exact values, so a
+//!   derived fact is as true as the facts it is from. The rules run in
+//!   passes until one adds no new fact; this terminates, since every
+//!   context reached is a combination of ones already known.
+//! - **Not done**: no inequalities. Bounds, floors, and facts relating rows
+//!   by containment are [`super::axioms`]' work, in Z3.
+//!
+//! # Rules
+//!
+//! ## `ratio`
+//!
+//! - **Claim**: `s(P | C) = |C ∧ P| / |C|`.
+//! - **When**: both sizes are known; `C` and `C ∧ P` are SPJs with the same
+//!   inputs and conditions, and `P` (the predicates only `C ∧ P` has) is not
+//!   empty. Also for `C` a single atom `G`: `s(P | G) = |σP(G)| / |G|`.
+//!
+//! ## `product`
+//!
+//! - **Claim**: `|C ∧ P| = s(P | C) · |C|`, and back, `|C| = |C ∧ P| /
+//!   s(P | C)`.
+//! - **When**: the result is an integer. Not back to a `C` over several
+//!   inputs: a cross product's size is its inputs' product.
+//!
+//! ## `join`
+//!
+//! - **Claim**: `s(Q | L × R) = |C| / (|L| · |R|)`.
+//! - **When**: `C`, `L` and `R` are SPJs with known sizes; `L`'s and `R`'s
+//!   inputs split `C`'s, their conditions are among `C`'s, and `C` is
+//!   `(L × R) ∧ Q`. Some term of `Q` reads columns of both sides.
+//!
+//! ```text
+//! |orders| = 1500, |customer| = 150,
+//! |orders × customer ∧ o_custkey = c_custkey| = 1500
+//! ⇒ s(o_custkey = c_custkey | orders × customer) = 1/150
+//! ```
+//!
+//! ## `match`
+//!
+//! - **Claim**: for `S` an SPJ with a semi or anti condition on `on` against
+//!   `O`, and `K` the same without it: `m(on | K ⋉ O) = |S| / |K|` (semi),
+//!   or `(|K| − |S|) / |K|` (anti).
+//! - **When**: both sizes are known and `|K| > 0`. Not for `NOT IN`, whose
+//!   rows also depend on NULLs in `O`.
+//!
+//! ## `redundant`
+//!
+//! - **Claim**: a fact on rows `D ∧ p` holds of `D` too, with the same
+//!   value; and `s(P | D) = s(P − {p} | D)` for `p ∈ P`, `P` with another
+//!   term.
+//! - **When**: `s(P' | C) = 1` for some SPJ `C` with `p ∈ P'`, `p` not
+//!   among `C`'s predicates, and `D` has at least `C`'s inputs, conditions
+//!   and predicates. Applies to the rows of any fact, and to both sides of
+//!   a `m`. One term is dropped per fact per pass.
+//! - **Why**: every row of `C` satisfies `p`, and a row of `D` is, on `C`'s
+//!   inputs, a row of `C`. Engines add such terms (DuckDB filters a join's
+//!   side by the other's key range), and queries that do not spell them out
+//!   find facts without them.
+//!
+//! ```text
+//! s(o_custkey <= 150000 | orders) = 1
+//! |orders ∧ o_custkey <= 150000 ∧ o_orderdate < d| = 900
+//! ⇒ |orders ∧ o_orderdate < d| = 900
+//! ```
+//!
+//! ## `unique`
+//!
+//! - **Claim**: `unique(K | C) = 1`.
+//! - **When**: `ndv(K | C) = |C|`.
 
 use std::collections::{BTreeSet, HashMap};
 

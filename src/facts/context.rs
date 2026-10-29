@@ -144,7 +144,7 @@ pub fn terms(exprs: impl IntoIterator<Item = Expr>) -> BTreeSet<Term> {
 
 /// A set of rows, named by how they derive from the base tables.
 ///
-/// Contexts are built in a normal form ([`super::rewrite`]), so that plans
+/// Contexts are built in a normal form (`facts::rewrite`), so that plans
 /// computing the same rows in a different order name them the same: inner
 /// joins, filters, and semi and anti joins all flatten into one
 /// [`Context::Spj`].
@@ -222,7 +222,7 @@ impl Context {
     /// inputs are in order, so that each reads one way whichever side an
     /// engine built. A semi or anti join keeps its kept side's rows that
     /// pass an [`Exists`] condition, and a left join is in the normal form
-    /// [`rewrite::left_join`] gives.
+    /// `rewrite::left_join` gives.
     pub fn join(kind: JoinType, on: BTreeSet<Term>, l: Context, r: Context) -> Context {
         let (kind, mut inputs) = match kind {
             JoinType::Right => (JoinType::Left, vec![r, l]),

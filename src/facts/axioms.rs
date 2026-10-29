@@ -1,32 +1,145 @@
 //! What any data satisfies, relating the quantities of named rows.
 //!
-//! A quantity is a fact's kind without its value: `|C|`, `ndv(k | C)`,
-//! `min(k | C)` or `max(k | C)`, over canonical contexts. A [`Space`] holds
-//! the Z3 terms each quantity is known to equal: an analyzer's variables for
-//! operators with those rows, or a variable of its own. Rust reads how two
-//! contexts relate off their terms ([`super::contain`]); each relation found
-//! becomes one ground assertion over their terms, so Z3 does the arithmetic:
+//! Stage 3 of the [pipeline](super#pipeline), run by
+//! [`Analysis::with_store`](crate::Analysis::with_store); notation as in
+//! [the module](super#notation).
 //!
-//! - `A ⊆ B`: `|A| <= |B|`, and each key's `ndv`, `min` and `max` of `A`
-//!   within `B`'s. And `|A| = |B|` makes them the same rows, so their keys'
-//!   quantities are equal too.
-//! - `fewer(A, B)` (outer joins over narrower inputs): `|A| <= |B|`.
-//! - `D ⊆ C`: the rows of `D` failing `P` are among those of `C`, so
-//!   `|D| − |D ∧ P| <= |C| − |C ∧ P|`.
-//! - `|C ∧ P| = |C|` says every row of `C` satisfies `P`, and so does every
-//!   row of a context `D` over at least `C`'s inputs, conditions and
-//!   predicates, which is a row of `C` on `C`'s inputs: `|D ∧ P| = |D|`.
-//! - A semi and an anti join of the same rows split them: `|K ⋉ O| + |K ▷ O| = |K|`.
-//! - `ndv(k | C) <= |C|`, and fewer keys have fewer combinations:
-//!   `ndv(K' | C) <= ndv(K | C)` for `K' ⊆ K`.
-//! - `D` is `C` joined to more tables: each row of `D` holds a row of `C`,
-//!   so keys of `C`'s tables have their values among `C`'s:
-//!   `ndv(K | D) <= ndv(K | C) <= |C|`, `min` and `max` within.
-//! - `C ∧ P` and `C ∧ Q` with `P ∧ Q` false share no row:
-//!   `|C ∧ P| + |C ∧ Q| <= |C|`.
+//! # Spec
 //!
-//! Only contexts near the query's are related: those within two relations
-//! of one, and those they are joins of ([`Space::relevant`]).
+//! - **Input**: every quantity (`|C|`, `ndv(K | C)`, `min(k | C)`,
+//!   `max(k | C)`, canonical) with the Z3 terms known to equal it: the
+//!   query's operator variables for the rows they name, and a variable of
+//!   its own for each fact's quantity that no operator has.
+//! - **Output**: ground Z3 assertions over those terms, each tagged with
+//!   its rule ([`Grounded::axioms`](crate::Grounded::axioms) counts them).
+//!   No quantifiers: Rust decides which contexts relate, Z3 does the
+//!   arithmetic.
+//! - **Guarantees**: each axiom holds for any data, so it is asserted
+//!   untracked, and only the facts' claims can be rejected. The tests on
+//!   contexts are conservative: missing a relation loses an axiom, never
+//!   adds a wrong one.
+//! - **Not done**: selectivities and match shares get no axioms (the store
+//!   claims only quantities); contexts outside the relevant set are not
+//!   related.
+//!
+//! # Relevant contexts
+//!
+//! Only contexts near the query's are related. Starting from the contexts
+//! of the query's operators, add each context two contexts relate to (one
+//! is ⊆ or has fewer rows than the other, or both are SPJs with the same
+//! inputs and conditions) among those over the same base tables, twice;
+//! then each context any of these [joins](#relations-between-contexts).
+//!
+//! # Relations between contexts
+//!
+//! Each test holds up to renaming the instances of one table among
+//! themselves (`t@1`, `t@2`).
+//!
+//! - `A ⊆ B`: `A`'s rows are among `B`'s. `A = B`; or `B` is an outer join
+//!   and `A ⊆` its inner join; or both have the same tables and atoms, `A`
+//!   has all of `B`'s predicates, and for each condition of `B` a stricter
+//!   one: a semi join against fewer rows, an anti join against more.
+//! - `fewer(A, B)`: `|A| ≤ |B|`. `A ⊆ B`; or both are left joins on the same
+//!   condition with inputs pairwise `⊆`; or `A` is a left or full join and
+//!   `B` a full join on the same condition, inputs pairwise `⊆` either way.
+//! - `D` joins `C`: both SPJs, `D` with more inputs, and all of `C`'s
+//!   tables, atoms, conditions and predicates.
+//!
+//! # Axioms
+//!
+//! ## `same rows`
+//!
+//! - **Claim**: `t = t'` for any two terms of one quantity. And for `A ⊆ B`:
+//!   `|A| = |B| ⇒` each key quantity of `A` equals `B`'s of the same keys.
+//! - **Why**: one quantity has one value; `A ⊆ B` with as many rows makes
+//!   them the same rows.
+//!
+//! ## `ndv within rows`
+//!
+//! - **Claim**: `ndv(K | C) ≤ |C|`.
+//!
+//! ## `subset`
+//!
+//! - **Claim**: for `A ⊆ B`, `A ≠ B`: `|A| ≤ |B|`; `ndv(K | A) ≤ ndv(K' |
+//!   B)` for `K ⊆ K'`; `min(k | A) ≥ min(k | B)`; `max(k | A) ≤ max(k | B)`.
+//! - **Why**: fewer rows have fewer values, within the same range.
+//!
+//! ## `fewer`
+//!
+//! - **Claim**: `|A| ≤ |B|` for `fewer(A, B)` but not `A ⊆ B`.
+//! - **Why**: an outer join emits each preserved row once per partner or
+//!   once padded, so narrowing an input never adds rows. Its rows need not
+//!   be among the other's (a row may lose its partner and be padded), so
+//!   nothing is said of their values.
+//!
+//! ## `failing rows`
+//!
+//! - **Claim**: `|D| − |D ∧ P| ≤ |C| − |C ∧ P|`.
+//! - **When**: `D ⊆ C` as named, `C` an SPJ, `C ∧ P` a relevant SPJ with
+//!   `C`'s inputs and conditions, and `D ∧ P ≠ D`.
+//! - **Why**: `D`'s rows failing `P` are among `C`'s.
+//!
+//! ```text
+//! D = orders ∧ o_status = 'F' ⊆ C = orders, P = {o_price > 100}
+//! ⇒ |D| − |D ∧ P| ≤ |orders| − |orders ∧ P|
+//! ```
+//!
+//! ## `implied`
+//!
+//! - **Claim**: `|C ∧ P| = |C| ⇒ |D ∧ P| = |D|`.
+//! - **When**: `C` an SPJ, `C ∧ P` a relevant SPJ with `C`'s inputs and
+//!   conditions, `D` joins `C` and does not already have all of `P`.
+//! - **Why**: if every row of `C` satisfies `P`, so does every row of `D`,
+//!   which is, on `C`'s inputs, a row of `C`.
+//!
+//! ```text
+//! C = lineitem, P = {l_quantity >= 1}, D = lineitem ⋈ orders
+//! ⇒ |lineitem ∧ P| = |lineitem| ⇒ |D ∧ P| = |D|
+//! ```
+//!
+//! ## `semi and anti`
+//!
+//! - **Claim**: `|K ⋉ O| + |K ▷ O| = |K|`, for `K ⋉ O` an SPJ with a semi
+//!   condition, `K` it without it, and `K ▷ O` it with the anti condition on
+//!   the same `on` and `O` instead.
+//! - **Why**: each row of `K` has a partner or has none.
+//!
+//! ## `fewer keys`
+//!
+//! - **Claim**: `ndv(K | C) ≤ ndv(K' | C)` for `K ⊊ K'`.
+//! - **Why**: fewer keys have no more combinations.
+//!
+//! ## `wider rows`
+//!
+//! - **Claim**: for `D` joining `C`, and keys `K` (or `k`) whose columns are
+//!   all of `C`'s tables: `ndv(K | D) ≤ |C|`; `ndv(K | D) ≤ ndv(K' | C)` for
+//!   `K ⊆ K'`; `min(k | D) ≥ min(k | C)`; `max(k | D) ≤ max(k | C)`.
+//! - **Why**: each row of `D` holds a row of `C`, so `C`'s columns take in
+//!   `D` only values they take in `C`.
+//!
+//! ```text
+//! D = orders ⋈ lineitem on o_orderkey = l_orderkey
+//! ⇒ ndv(o_custkey | D) ≤ ndv(o_custkey | orders) and ≤ |orders|
+//! ```
+//!
+//! ## `disjoint`
+//!
+//! - **Claim**: `|X| + |Y| ≤ |Z|`.
+//! - **When**: `X`, `Y` and `Z` are SPJs with the same inputs and
+//!   conditions; `X` and `Y` compare some expression with literals in
+//!   ranges that do not meet (values of different types are taken to
+//!   meet); `Z`'s predicates are among both's, and no such `Z` has more.
+//! - **Why**: no row satisfies both, so `X`'s and `Y`'s rows are apart
+//!   among `Z`'s.
+//!
+//! ```text
+//! |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
+//! ```
+//!
+//! ## `non-negative`
+//!
+//! - **Claim**: `t ≥ 0` for a fact's own variable on a size or distinct
+//!   count. The query's variables have this among their constraints.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
