@@ -477,7 +477,7 @@ fn analyze_with(
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
     let root = a.visit(plan).card;
-    a.disjoint_partitions();
+    a.disjoint();
     a.named_rows();
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();

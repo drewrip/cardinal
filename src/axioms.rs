@@ -29,9 +29,13 @@
 //! Axioms come in two kinds, by when they are asserted:
 //!
 //! - [On each relation](#axioms-on-each-relation), as the analysis makes
-//!   its variables, in every analysis.
-//! - [Between named rows](#axioms-between-named-rows), over the quantities
-//!   of rows named as contexts (the `Space`), by [`Analysis::with_store`].
+//!   its variables.
+//! - [Between named rows](#axioms-between-named-rows), once every
+//!   operator is visited: over the quantities of the rows its operators
+//!   name, and with facts ([`Analysis::with_store`]) of the rows they name
+//!   too.
+//!
+//! Both are asserted in every analysis.
 //!
 //! [`Analysis::with_store`]: crate::Analysis::with_store
 //!
@@ -89,21 +93,6 @@
 //! - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or of
 //!   a composite UNIQUE constraint's on NOT NULL columns.
 //! - **Why**: each row has its own combination of key values.
-//!
-//! ## `disjoint partitions`
-//!
-//! - **Claim**: for relations made of distinct rows of one stored table
-//!   whose value domains on some column do not meet: their rows together
-//!   are at most the table's. Relations with the same domains form a class
-//!   bounded by one variable, and each set of pairwise disjoint classes
-//!   sums to at most `|T|`.
-//! - **When**: each relation reached the table through operators that
-//!   never repeat a row (filter, projection, sort, limit, distinct, semi
-//!   and anti joins); at most 64 classes per table.
-//!
-//! ```text
-//! σ(age < 18)(users) ∪ σ(age ≥ 65)(users)  ⇒  |σ(age < 18)| + |σ(age ≥ 65)| ≤ |users|
-//! ```
 //!
 //! # Axioms between named rows
 //!
@@ -207,13 +196,19 @@
 //!
 //! ## `disjoint`
 //!
-//! - **Claim**: `|X| + |Y| ≤ |Z|`.
-//! - **When**: `X`, `Y` and `Z` are SPJs with the same inputs and
-//!   conditions; `X` and `Y` compare some expression with literals in
+//! - **Claim**: rows that no row satisfies the conditions of both are apart
+//!   among any rows holding both: `|X| + |Y| ≤ |Z|`. Found two ways:
+//! - **When** (relations): relations made of distinct rows of one stored
+//!   table, reached through operators that never repeat a row (filter,
+//!   projection, sort, limit, distinct, semi and anti joins), whose value
+//!   domains on some column do not meet. `Z` is the table. Relations with
+//!   the same domains form a class bounded by one variable, and each set of
+//!   pairwise disjoint classes sums to at most `|T|`; at most 64 classes per
+//!   table.
+//! - **When** (named rows): `X`, `Y` and `Z` are SPJs with the same inputs
+//!   and conditions; `X` and `Y` compare some expression with literals in
 //!   ranges that do not meet (values of different types are taken to
 //!   meet); `Z`'s predicates are among both's, and no such `Z` has more.
-//! - **Why**: no row satisfies both, so `X`'s and `Y`'s rows are apart
-//!   among `Z`'s.
 //!
 //! ```text
 //! |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
@@ -344,7 +339,7 @@ impl<'a> Analyzer<'a> {
     /// at most the table's rows. Each class of relations with the same domains
     /// gets a variable for the table rows in those domains, bounding all of
     /// its members, and disjoint classes' variables sum to at most the table.
-    pub(crate) fn disjoint_partitions(&mut self) {
+    pub(crate) fn disjoint(&mut self) {
         let origins: Vec<Origin> = self.origins.iter().map(|(_, o)| o.clone()).collect();
         let (classes, cliques) = origin::disjoint_classes(&origins, 64);
         let mut part: HashMap<usize, Int> = HashMap::new();

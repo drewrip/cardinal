@@ -58,8 +58,9 @@
 //!    an exact fact contradicts is recorded in [`FactSet::conflicts`], as is
 //!    a second value for one fact. [`Analysis::with_facts`] substitutes the
 //!    closed set's selectivities into the query's formula.
-//! 3. [`axioms`](crate::axioms) instead relate the facts' rows to the query's rows inside
-//!    Z3 ([`Analysis::with_store`]), taking the facts as observed. Each
+//! 3. [`axioms`](crate::axioms), asserted in every analysis, also relate
+//!    the facts' rows to the query's rows inside Z3
+//!    ([`Analysis::with_store`]), taking the facts as observed. Each
 //!    fact, bound and floor on a quantity becomes a tracked claim on a Z3
 //!    term; the axioms relating the terms are asserted untracked. Claims in
 //!    a contradiction are dropped ([`Grounded::rejected`](crate::Grounded::rejected)),
