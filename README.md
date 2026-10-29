@@ -35,6 +35,9 @@ tables are not counted.
 
 ## Rules
 
+The rustdoc of `cardinal::rules` and `cardinal::axioms` specifies every rule and
+axiom; this is an overview.
+
 Notation: `l` and `r` are the input cardinalities, and `X` is the output cardinality.
 Every relation also gets:
 

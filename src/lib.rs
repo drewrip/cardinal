@@ -1,9 +1,17 @@
 //! Static claims about SQL output cardinality.
 //!
 //! A query is parsed and optimized into a DataFusion `LogicalPlan`, every operator
-//! gets a Z3 integer for its output cardinality, and each operator contributes
-//! constraints relating its output to its inputs. We then ask Z3 whether the root's
-//! cardinality must be at most the sum of all base-table scan cardinalities.
+//! gets a Z3 integer for its output cardinality, and constraints relate them. We
+//! then ask Z3 whether the root's cardinality must be at most the sum of all
+//! base-table scan cardinalities, and for the tightest bounds it can prove.
+//!
+//! The constraints come from three places:
+//!
+//! - [`rules`]: each operator's output given its inputs, one rule per operator.
+//! - [`axioms`]: what holds of any rows whatever made them, on each relation and
+//!   between rows named the same way ([`rows`]), in every analysis.
+//! - [`facts`]: counts read off plans that ran, added as claims
+//!   ([`Analysis::with_store`]) that the axioms relate to the query's rows.
 
 mod analysis;
 pub mod axioms;
