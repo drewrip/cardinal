@@ -17,7 +17,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, Join, LogicalPlan, SkipType};
 use datafusion::logical_expr::utils::conjunction;
 
-use crate::analyzer::{self, Node};
+use crate::analysis::{self, Node};
 use crate::bounds::Search;
 use crate::facts::Ratio;
 use crate::rows::first;
@@ -619,7 +619,7 @@ pub(crate) fn build(
         // A filter re-checking a scan's inexact filters keeps exactly the
         // table's rows satisfying it: its share is of the table's rows, not
         // of the rows the scan happened to let through.
-        if let Some(k) = analyzer::rechecked_scan(nodes, i) {
+        if let Some(k) = analysis::rechecked_scan(nodes, i) {
             let raw = &nodes[k].raw_scan.as_ref().expect("checked").0;
             if let Some((_, table)) = scans.iter().find(|(s, _)| s == raw) {
                 inputs[0] = (raw.clone(), Card::Table(table.clone()));

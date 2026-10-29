@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
-use crate::analyzer::solver_with_timeout;
+use crate::analysis::solver_with_timeout;
 
 /// `num/den · S + add` for some quantity `S`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

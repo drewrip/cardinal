@@ -39,7 +39,8 @@ async fn every_constraint_has_a_source_and_every_node_constraints() {
     let t = a.trace.as_ref().unwrap();
     for c in &t.constraints {
         assert!(c.node.is_none_or(|n| n < t.nodes.len()), "{c:?}");
-        assert!(c.source.contains("analyzer.rs:"), "{c:?}");
+        let sources = ["src/analysis.rs:", "src/keys.rs:", "src/rules/"];
+        assert!(sources.iter().any(|s| c.source.contains(s)), "{c:?}");
         assert!(!c.function.is_empty(), "{c:?}");
         assert!(!c.vars.is_empty(), "{c:?}");
     }

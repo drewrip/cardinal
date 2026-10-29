@@ -24,7 +24,7 @@ use datafusion::logical_expr::Expr;
 use serde::{Deserialize, Serialize};
 use z3::ast::{Bool, Int, Real};
 
-use crate::analyzer::Node;
+use crate::analysis::Node;
 use crate::bounds::{Bounds, Search, SearchStats};
 use crate::rows::contain::{fewer, groups_among, renamed};
 use crate::rows::logical::Logical;

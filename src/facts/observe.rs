@@ -152,7 +152,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, LogicalPlan, Operator};
 use super::state::{Pending, State, Value, Values, join_keys, states, states_hidden, stopped};
 use super::{Fact, FactKind, Origin, Ratio, Term};
 use crate::Options;
-use crate::analyzer::Node;
+use crate::analysis::Node;
 use crate::observed::{Catalog, ObservedPlan, Op, column_key};
 use crate::rows::Context;
 use crate::rows::logical::Logical;

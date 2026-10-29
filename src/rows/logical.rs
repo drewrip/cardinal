@@ -2,7 +2,7 @@
 //!
 //! Facts are read off plans an engine ran; a query to bound is a DataFusion
 //! [`LogicalPlan`]. To look up what is known about an operator, its rows are
-//! named the way [`super::context::state`] names an executed operator's: each
+//! named the way [`crate::facts::states`] names an executed operator's: each
 //! scan is a table instance (`lineitem#4`, by node), predicates are written
 //! over instance columns through every projection and alias, and the rules
 //! for building contexts are the same, so the same rows read the same from
@@ -21,7 +21,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use super::{Context, ExistsKind, Term};
 use crate::facts::{FactKind, Taint};
-use crate::analyzer::{self, Node};
+use crate::analysis::{self, Node};
 use super::first;
 use crate::observed::{base_table, normalize, qualified};
 
@@ -110,7 +110,7 @@ impl Logical {
                     (_, Some(_)) => Err(Taint::EarlyStop),
                     // Filters applied inexactly may let through rows that
                     // fail them, until a filter above checks them.
-                    (Ok(p), None) if analyzer::inexact_filters(scan) => {
+                    (Ok(p), None) if analysis::inexact_filters(scan) => {
                         Err(Taint::Pruned(p.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" and ")))
                     }
                     (Ok(p), None) => Ok(Context::table(&instance).filter(p)),
@@ -159,7 +159,7 @@ impl Logical {
                 let preds = self.terms(split_conjunction_owned(f.predicate.clone()), &|c| self.column(nodes, i, c));
                 // Re-checking a scan's inexact filters, its rows are the
                 // table's satisfying it.
-                let below = match analyzer::rechecked_scan(nodes, i) {
+                let below = match analysis::rechecked_scan(nodes, i) {
                     Some(k) => self.instances[k].as_deref().map(Context::table).ok_or(Taint::Unsupported("TableScan".into())),
                     None => input(0),
                 };

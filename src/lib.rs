@@ -5,14 +5,16 @@
 //! constraints relating its output to its inputs. We then ask Z3 whether the root's
 //! cardinality must be at most the sum of all base-table scan cardinalities.
 
-mod analyzer;
+mod analysis;
 mod bounds;
 mod domain;
+mod keys;
 pub mod facts;
 mod informed;
 pub mod observed;
 mod origin;
 pub mod rows;
+pub mod rules;
 mod selectivity;
 mod simple;
 pub mod trace;
@@ -39,7 +41,7 @@ use datafusion::prelude::SessionContext;
 use z3::SatResult;
 use z3::ast::Int;
 
-use analyzer::{Analyzer, Node, ScanKind};
+use analysis::{Analyzer, Node, ScanKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -327,7 +329,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            max_product: analyzer::DEFAULT_MAX_PRODUCT,
+            max_product: analysis::DEFAULT_MAX_PRODUCT,
             selectivity: false,
             foreign_keys: Vec::new(),
             trace: false,
@@ -495,7 +497,7 @@ fn analyze_with(
 
     // If the incremental core gives up, fall back to the one-shot portfolio.
     let mut result = a.solver.check();
-    let portfolio = analyzer::new_solver();
+    let portfolio = analysis::new_solver();
     let solver = if result == SatResult::Unknown {
         portfolio.from_string(smtlib.as_str());
         result = portfolio.check();

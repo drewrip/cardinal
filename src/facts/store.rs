@@ -30,7 +30,7 @@ use z3::{AstKind, DeclKind, SatResult, Solver};
 
 use super::axioms::{Axiom, Space, over};
 use super::{FactKind, FactSet};
-use crate::analyzer::{Node, new_solver};
+use crate::analysis::{Node, new_solver};
 use crate::bounds::{Bounds, Search, SearchStats};
 use crate::rows::logical::Logical;
 use crate::rows::{Context, Term};
