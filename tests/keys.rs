@@ -189,6 +189,17 @@ async fn first_row_per_partition_is_determined_by_the_partition() {
     assert!(bounds.contains("X <= |loose|"), "{bounds}");
 }
 
+/// A filter leaving a column one value pins it, though not by `=` (an
+/// integer range of one value): with `d`
+/// out of the product, the other three keys' domains multiply to 8.
+#[tokio::test]
+async fn columns_with_one_value_add_no_groups() {
+    let sql = "SELECT a, b, c, d, count(*) FROM loose
+        WHERE a BETWEEN 1 AND 2 AND b BETWEEN 1 AND 2 AND c BETWEEN 1 AND 2 AND d >= 1 AND d < 2
+        GROUP BY a, b, c, d";
+    assert_eq!(formula(sql).await.1, "X <= 8");
+}
+
 /// With no declared key, four group keys are too many to multiply, and the
 /// GROUP BY is bounded by its input alone.
 #[tokio::test]

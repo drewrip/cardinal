@@ -9,7 +9,7 @@ use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 
 use crate::analysis::{Analyzer, ScanKind};
 use crate::rules::{
-    child_column, column_index, determined, equalities, exact_index, key_column, output_indices, pinned, same_positions,
+    child_column, column_index, determined, equalities, exact_index, key_column, output_indices, pinned, same_positions, scan_pinned,
     strip_alias, with_equalities,
 };
 
@@ -41,6 +41,14 @@ impl<'a> Analyzer<'a> {
     pub(crate) fn covers_key(&self, plan: &LogicalPlan, cols: &[Column], nulls: Nulls) -> bool {
         match plan {
             LogicalPlan::TableScan(scan) => {
+                // Columns the scan's filters pin to one value add nothing to
+                // tell its rows apart.
+                let mut cols = cols.to_vec();
+                for c in scan_pinned(scan, plan.schema()) {
+                    if !cols.contains(&c) {
+                        cols.push(c);
+                    }
+                }
                 let schema = scan.source.schema();
                 let Some(indices) = cols
                     .iter()
@@ -82,7 +90,7 @@ impl<'a> Analyzer<'a> {
                     return true;
                 }
                 let mut with = cs.clone();
-                for c in pinned(&f.predicate) {
+                for c in pinned(&f.predicate, f.input.schema()) {
                     if f.input.schema().has_column(&c) && !with.contains(&c) {
                         with.push(c);
                     }
@@ -290,9 +298,15 @@ impl<'a> Analyzer<'a> {
             self.fd_closure(input, &keys)
         };
         match plan {
-            LogicalPlan::TableScan(_) => {
-                let cols: Vec<Column> =
-                    keys.iter().map(|&i| Column::from(plan.schema().qualified_field(i))).collect();
+            // A column the scan's filters pin to one value is the same on
+            // every row.
+            LogicalPlan::TableScan(scan) => {
+                for c in scan_pinned(scan, plan.schema()) {
+                    if let Ok(i) = plan.schema().index_of_column(&c) {
+                        out.insert(i);
+                    }
+                }
+                let cols: Vec<Column> = out.iter().map(|&i| Column::from(plan.schema().qualified_field(i))).collect();
                 if self.covers_key(plan, &cols, Nulls::Equal) {
                     out.extend(0..width);
                 }
@@ -306,7 +320,7 @@ impl<'a> Analyzer<'a> {
             // row, and columns it holds equal agree.
             LogicalPlan::Filter(f) => {
                 let mut keys = keys.to_vec();
-                for c in pinned(&f.predicate) {
+                for c in pinned(&f.predicate, f.input.schema()) {
                     if let Ok(i) = f.input.schema().index_of_column(&c) {
                         keys.push(i);
                     }

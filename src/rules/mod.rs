@@ -135,7 +135,7 @@ use std::collections::BTreeSet;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::Column;
+use datafusion::common::{Column, DFSchema};
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, LogicalPlan, SkipType, TableScan};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
@@ -815,9 +815,12 @@ pub(crate) fn same_positions(plan: &LogicalPlan, child: &LogicalPlan, cols: &[Co
         .collect()
 }
 
-/// Columns `predicate` holds equal to a non-NULL constant on every row it keeps.
-pub(crate) fn pinned(predicate: &Expr) -> Vec<Column> {
-    split_conjunction(predicate)
+/// Columns of `schema` that take one non-NULL value on every row
+/// `predicate` keeps: equal to a non-NULL constant, or with a domain of at
+/// most one value (`= $1`, `IN (7)`, `BETWEEN 5 AND 5`). Not `IS NULL`: a
+/// UNIQUE constraint on a NULL column does not make the rest unique.
+pub(crate) fn pinned(predicate: &Expr, schema: &DFSchema) -> Vec<Column> {
+    let mut out: Vec<Column> = split_conjunction(predicate)
         .into_iter()
         .filter_map(|e| match e {
             Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
@@ -830,7 +833,31 @@ pub(crate) fn pinned(predicate: &Expr) -> Vec<Column> {
             }
             _ => None,
         })
-        .collect()
+        .collect();
+    let mut facts = Facts::default();
+    facts.assume(predicate, schema);
+    for j in 0..schema.fields().len() {
+        let c = Column::from(schema.qualified_field(j));
+        let d = facts.dom(&Expr::Column(c.clone()), schema);
+        if !out.contains(&c) && d.never_null() && d.size().is_some_and(|n| n <= 1) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// [`pinned`], by every filter `scan` applies exactly.
+pub(crate) fn scan_pinned(scan: &TableScan, schema: &DFSchema) -> Vec<Column> {
+    if inexact_filters(scan) {
+        return vec![];
+    }
+    let mut out = vec![];
+    for c in scan.filters.iter().flat_map(|f| pinned(f, schema)) {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Positions of `cols` in `plan`'s output.
