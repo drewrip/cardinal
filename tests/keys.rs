@@ -175,6 +175,20 @@ async fn one_column_determining_the_keys_bounds_the_groups() {
     assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
 }
 
+/// `row_number()` with its partition picks out one row, so on the rows
+/// numbered 1 the partition column determines the rest: the four keys
+/// reduce to `w.a`, which takes at most `|loose|` values.
+#[tokio::test]
+async fn first_row_per_partition_is_determined_by_the_partition() {
+    let sql = "SELECT w.a, w.b, w.c, w.d, count(*) AS n
+        FROM sales s JOIN (SELECT a, b, c, d, row_number() OVER (PARTITION BY a ORDER BY b) AS rn FROM loose) w
+          ON s.dim_id = w.a
+        WHERE w.rn = 1
+        GROUP BY w.a, w.b, w.c, w.d";
+    let bounds = formula(sql).await.1;
+    assert!(bounds.contains("X <= |loose|"), "{bounds}");
+}
+
 /// With no declared key, four group keys are too many to multiply, and the
 /// GROUP BY is bounded by its input alone.
 #[tokio::test]

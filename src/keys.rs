@@ -313,13 +313,38 @@ impl<'a> Analyzer<'a> {
                 }
                 out.extend(with_equalities(keys, &equalities(&f.predicate, &f.input), |k| self.fd_closure(&f.input, k)));
             }
-            // The window's own columns are not determined.
             LogicalPlan::Sort(_)
             | LogicalPlan::Limit(_)
             | LogicalPlan::Repartition(_)
+            | LogicalPlan::Subquery(_)
             | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Window(_)
             | LogicalPlan::Distinct(Distinct::All(_)) => out.extend(same(plan.inputs()[0])),
+            // The window's own columns are not determined, but `row_number()`
+            // and its partition columns pick out one row.
+            LogicalPlan::Window(w) => {
+                out.extend(same(&w.input));
+                let n = w.input.schema().fields().len();
+                let numbered = w.window_expr.iter().enumerate().any(|(i, e)| match strip_alias(e) {
+                    Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
+                        out.contains(&(n + i))
+                            && f.params.partition_by.iter().all(|p| determined(p, &w.input, &out))
+                    }
+                    _ => false,
+                });
+                if numbered {
+                    out.extend(0..width);
+                }
+            }
+            // Selected columns keep their input's dependencies, and rows
+            // agreeing on the ON expressions are one row.
+            LogicalPlan::Distinct(Distinct::On(on)) => {
+                let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&on.input, &on.select_expr[k])).collect();
+                let closed = self.fd_closure(&on.input, &input);
+                out.extend((0..width).filter(|&j| determined(&on.select_expr[j], &on.input, &closed)));
+                if on.on_expr.iter().all(|e| determined(e, &on.input, &closed)) {
+                    out.extend(0..width);
+                }
+            }
             LogicalPlan::Join(join) => {
                 let nl = join.left.schema().fields().len();
                 // A padded side's columns are NULL on unmatched rows, so its
