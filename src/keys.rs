@@ -384,10 +384,37 @@ impl<'a> Analyzer<'a> {
                             closed
                         }));
                     }
-                    JoinType::Left | JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                        out.extend(side(&join.left, keys, 0))
+                    // A padded side's columns are all NULL on its padded rows.
+                    // So its dependencies hold where the determinant has a
+                    // column no matched row leaves NULL: rows agreeing on it
+                    // are all matched or all padded. And on equalities alone
+                    // against a unique key, rows agreeing on the preserved
+                    // side's keys are padded alike or matched to one row.
+                    JoinType::Left | JoinType::Right => {
+                        let ((kept, kept_at, kept_on), (padded, padded_at, padded_on)) = {
+                            let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
+                            let (l, r) = ((&*join.left, 0, lk), (&*join.right, nl, rk));
+                            if join.join_type == JoinType::Left { (l, r) } else { (r, l) }
+                        };
+                        let mut closed = side(kept, keys, kept_at);
+                        let keys_match = join.null_equality == NullEquality::NullEqualsNothing;
+                        let never_null = |i: usize| {
+                            !padded.schema().field(i).is_nullable()
+                                || (keys_match && padded_on.iter().any(|e| column_index(padded, e) == Some(i)))
+                        };
+                        if keys.iter().filter_map(|&k| k.checked_sub(padded_at)).filter(|&k| k < padded.schema().fields().len()).any(never_null) {
+                            closed.extend(side(padded, keys, padded_at));
+                        }
+                        let picked = join.filter.is_none()
+                            && !kept_on.is_empty()
+                            && kept_on.iter().all(|e| exact_index(kept, e).is_some_and(|i| closed.contains(&(kept_at + i))))
+                            && self.key_is_unique(join, padded, &padded_on);
+                        if picked {
+                            closed.extend(padded_at..padded_at + padded.schema().fields().len());
+                        }
+                        out.extend(closed);
                     }
-                    JoinType::Right => out.extend(side(&join.right, keys, nl)),
+                    JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => out.extend(side(&join.left, keys, 0)),
                     // These output the right side's schema (plus a mark column).
                     JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
                         out.extend(side(&join.right, keys, 0))

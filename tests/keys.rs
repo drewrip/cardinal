@@ -142,16 +142,41 @@ async fn dependent_group_keys_keep_a_key() {
     assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
 }
 
-/// The padded side of a LEFT JOIN is NULL on unmatched rows, so its key
-/// determines nothing there: the shipment with no supplier is a group of its
-/// own, beyond the suppliers'.
+/// The padded side of a LEFT JOIN is NULL on unmatched rows. Its key still
+/// determines its columns, since a matched row never has it NULL, but the
+/// shipments with no supplier are a group of their own, beyond the
+/// suppliers'.
 #[tokio::test]
-async fn padded_keys_determine_nothing() {
+async fn padded_keys_add_one_group() {
     let sql = "SELECT s.supplier_id, s.name, s.category, s.country, count(*) AS n
         FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
         GROUP BY s.supplier_id, s.name, s.category, s.country";
     let bounds = formula(sql).await.1;
-    assert!(!bounds.contains("X <= |suppliers|"), "{bounds}");
+    assert!(bounds.contains("X <= |suppliers| + 1") && !bounds.contains("X <= |suppliers|;"), "{bounds}");
+}
+
+/// A LEFT JOIN on equalities alone against a unique key: shipments with one
+/// `supplier_id` all match the same supplier, or none, so the left key
+/// determines the supplier's columns, and the four keys reduce to it.
+#[tokio::test]
+async fn preserved_keys_pick_the_padded_row() {
+    let sql = "SELECT sh.supplier_id, s.name, s.category, s.country, count(*) AS n
+        FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
+        WHERE sh.supplier_id BETWEEN 1 AND 3
+        GROUP BY sh.supplier_id, s.name, s.category, s.country";
+    assert_eq!(formula(sql).await.1, "X <= 3");
+}
+
+/// A condition beyond the equalities can match one row with a given key and
+/// pad another, so the key picks out nothing: the grouping stays unbounded
+/// by the key's three values.
+#[tokio::test]
+async fn residual_conditions_pick_nothing() {
+    let sql = "SELECT sh.supplier_id, s.name, s.category, s.country, count(*) AS n
+        FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id AND sh.qty > 4
+        WHERE sh.supplier_id BETWEEN 1 AND 3
+        GROUP BY sh.supplier_id, s.name, s.category, s.country";
+    assert!(!formula(sql).await.1.contains("X <= 3"));
 }
 
 /// A volatile group key takes values no column determines.
