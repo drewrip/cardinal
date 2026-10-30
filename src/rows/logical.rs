@@ -2,7 +2,7 @@
 //!
 //! Facts are read off plans an engine ran; a query to bound is a DataFusion
 //! [`LogicalPlan`]. To look up what is known about an operator, its rows are
-//! named the way [`super::context::state`] names an executed operator's: each
+//! named the way [`crate::facts::states`] names an executed operator's: each
 //! scan is a table instance (`lineitem#4`, by node), predicates are written
 //! over instance columns through every projection and alias, and the rules
 //! for building contexts are the same, so the same rows read the same from
@@ -19,10 +19,10 @@ use datafusion::logical_expr::logical_plan::{Distinct, LogicalPlan};
 use datafusion::logical_expr::utils::split_conjunction_owned;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, ExistsKind, Taint, Term};
-use super::FactKind;
-use crate::analyzer::{self, Node};
-use crate::first;
+use super::{Context, ExistsKind, Term};
+use crate::facts::{FactKind, Taint};
+use crate::analysis::{self, Node};
+use super::first;
 use crate::observed::{base_table, normalize, qualified};
 
 /// Every node's context, and what it is computed from.
@@ -110,7 +110,7 @@ impl Logical {
                     (_, Some(_)) => Err(Taint::EarlyStop),
                     // Filters applied inexactly may let through rows that
                     // fail them, until a filter above checks them.
-                    (Ok(p), None) if analyzer::inexact_filters(scan) => {
+                    (Ok(p), None) if analysis::inexact_filters(scan) => {
                         Err(Taint::Pruned(p.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" and ")))
                     }
                     (Ok(p), None) => Ok(Context::table(&instance).filter(p)),
@@ -159,7 +159,7 @@ impl Logical {
                 let preds = self.terms(split_conjunction_owned(f.predicate.clone()), &|c| self.column(nodes, i, c));
                 // Re-checking a scan's inexact filters, its rows are the
                 // table's satisfying it.
-                let below = match analyzer::rechecked_scan(nodes, i) {
+                let below = match analysis::rechecked_scan(nodes, i) {
                     Some(k) => self.instances[k].as_deref().map(Context::table).ok_or(Taint::Unsupported("TableScan".into())),
                     None => input(0),
                 };
@@ -228,6 +228,22 @@ impl Logical {
                     JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => pass(1),
                     _ => pass(0).into_iter().chain(pass(1)).collect(),
                 };
+                // A padded side's columns are NULL on its padded rows. A
+                // column of a table reads so too, but a literal or computed
+                // value (`true`, `coalesce(x, 0)`) would read as a value it
+                // does not take there.
+                let left = pass(0).len();
+                let (pad_left, pad_right) = match join.join_type {
+                    JoinType::Left => (false, true),
+                    JoinType::Right => (true, false),
+                    JoinType::Full => (true, true),
+                    _ => (false, false),
+                };
+                for (j, e) in lineage.iter_mut().enumerate() {
+                    if (if j < left { pad_left } else { pad_right }) && !matches!(e, Some(Expr::Column(_))) {
+                        *e = None;
+                    }
+                }
                 // On exactly the partition of a side's first rows: the rows
                 // of a semi join with the window's input, whose key columns
                 // read as their partners'.
@@ -244,7 +260,6 @@ impl Logical {
                     None
                 };
                 if let Some(kind) = semi {
-                    let left = pass(0).len();
                     for (j, e) in lineage.iter_mut().enumerate() {
                         let grouped = (kind == JoinType::LeftSemi) == (j >= left);
                         if grouped {

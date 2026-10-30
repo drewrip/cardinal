@@ -220,7 +220,7 @@ footer dd { margin: 0; }
     <h2>Constraints, by plan node</h2>
     <table class="cs">
       <colgroup><col class="id"><col><col class="rule"><col class="src"></colgroup>
-      <thead><tr><th style="padding-left:6px">#</th><th>Constraint</th><th class="rule">Rule (analyzer function)</th><th class="src">Source</th></tr></thead>
+      <thead><tr><th style="padding-left:6px">#</th><th>Constraint</th><th class="rule">Rule (function)</th><th class="src">Source</th></tr></thead>
       <tbody id="list"></tbody>
     </table>
   </div>

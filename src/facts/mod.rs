@@ -6,29 +6,93 @@
 //! `ndv(l_suppkey | lineitem) = 100`. Each holds for one input [`Context`],
 //! and [`derive_facts`] combines what several plans show into everything
 //! that follows from it.
+//!
+//! # Notation
+//!
+//! Every rule and axiom is stated in these terms.
+//!
+//! - `C`, `D`: [`Context`]s, sets of rows named by how they derive from the
+//!   base tables. An *SPJ* ([`Context::Spj`]) is the cross product of its
+//!   tables and atoms, filtered by its predicates and its semi and anti join
+//!   conditions ([`Exists`]); any other operator's rows are
+//!   [`Context::Derived`]. Two SPJs have the *same inputs* if they have the
+//!   same tables and atoms, and the *same inputs and conditions* if their
+//!   conditions match too.
+//! - `C ∧ P`: `C` with the predicates `P` added ([`Context::filter`]).
+//! - `|C|`: how many rows `C` has.
+//! - `s(P | C)`: the share of `C`'s rows satisfying `P`, `|C ∧ P| / |C|`.
+//! - `m(on | K ⋉ O)`: the share of `K`'s rows with a partner in `O` under
+//!   `on`. A semi join keeps `m·|K|` rows, an anti join `(1 − m)·|K|`.
+//! - `ndv(K | C)`: the distinct combinations of keys `K` in `C`'s rows,
+//!   NULL counting as a value. `unique(K | C)`: `ndv(K | C) = |C|`.
+//! - `min(k | C)`, `max(k | C)`: the least and greatest non-NULL value of
+//!   `k` in `C`'s rows, as an integer.
+//!
+//! These are [`FactKind`]s. A *fact* gives one its exact value, a *bound* an
+//! upper limit and a *floor* a lower one ([`FactSet`] keeps all three). A
+//! *quantity* is a kind among `|C|`, `ndv`, `min` and `max`: what the store
+//! hands to Z3.
+//!
+//! # Pipeline
+//!
+//! Three sets of rules turn executed plans into constraints on a query:
+//!
+//! ```text
+//!  ObservedPlan ─[observe]─▶ FactSet ─[derive]─▶ closed FactSet ─▶ Analysis::with_facts
+//!                              facts   = v
+//!                              bounds  ≤ v
+//!                              floors  ≥ v
+//!                              unobserved
+//!                                │
+//!                                └─[axioms]─▶ Analysis::with_store ─▶ Grounded
+//! ```
+//!
+//! 1. [`observe`] reads each operator of one executed plan
+//!    ([`FactSet::observe`], and [`FactSet::observe_translated`] for the
+//!    rows only a query names). Out come facts, bounds, floors, and the kinds
+//!    of operators whose rows were not counted ([`FactSet::unobserved`]),
+//!    which a query can count ([`FactKind::counted`]).
+//! 2. [`derive`](mod@derive) combines exact facts across plans until nothing new follows
+//!    ([`FactSet::close`]): a size from one plan over a size from another is
+//!    a selectivity. Bounds and floors are carried along unchanged; one that
+//!    an exact fact contradicts is recorded in [`FactSet::conflicts`], as is
+//!    a second value for one fact. [`Analysis::with_facts`] substitutes the
+//!    closed set's selectivities into the query's formula.
+//! 3. [`axioms`](crate::axioms), asserted in every analysis, also relate
+//!    the facts' rows to the query's rows inside Z3
+//!    ([`Analysis::with_store`]), taking the facts as observed. Each
+//!    fact, bound and floor on a quantity becomes a tracked claim on a Z3
+//!    term; the axioms relating the terms are asserted untracked. Claims in
+//!    a contradiction are dropped ([`Grounded::rejected`](crate::Grounded::rejected)),
+//!    and the rest join the query's constraints for the bounds search.
+//!
+//! Each fact records the rule it came from ([`Origin`]), and
+//! [`Grounded::axioms`](crate::Grounded::axioms) counts axioms by rule: the
+//! name is the heading of its spec in [`observe`], [`derive`](mod@derive) or [`axioms`](crate::axioms).
+//!
+//! [`Analysis::with_facts`]: crate::Analysis::with_facts
+//! [`Analysis::with_store`]: crate::Analysis::with_store
 
-mod canonical;
-pub(crate) mod contain;
-mod context;
-mod derive;
-pub(crate) mod logical;
-mod rewrite;
-mod rules;
+pub mod derive;
+pub mod observe;
 mod sql;
-mod serialize;
+mod state;
+pub(crate) mod store;
 
-pub use context::{Context, Exists, ExistsKind, Pending, State, Taint, Term, Value, states};
-pub use rules::{FactRule, Observation, RULES};
+pub use crate::rows::{Context, Exists, ExistsKind, Term};
+pub use state::{Pending, State, Taint, Value, states};
+pub use observe::{FactRule, Observation, RULES};
 pub use sql::{CountDialect, Counts};
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::observed::ObservedPlan;
-use context::join;
+use crate::Options;
+use crate::observed::{Catalog, ObservedPlan};
+use crate::rows::join;
 
 /// A non-negative rational, in lowest terms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -243,20 +307,20 @@ pub struct Conflict {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactSet {
-    #[serde(serialize_with = "serialize::values", deserialize_with = "facts")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "facts")]
     facts: BTreeMap<FactKind, Fact>,
     /// The least upper bound seen on each size, distinct count or greatest
     /// value: the rows of an operator that may have let through more than
     /// its context's, or the values a runtime filter let through.
-    #[serde(serialize_with = "serialize::values", deserialize_with = "bounds")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "bounds")]
     bounds: BTreeMap<FactKind, Fact>,
     /// The greatest lower bound seen on each size, distinct count or least
     /// value: the rows of an operator that may have kept fewer than its
     /// context's, or the values a runtime filter let through.
-    #[serde(serialize_with = "serialize::values", deserialize_with = "floors")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "floors")]
     floors: BTreeMap<FactKind, Fact>,
     /// What each aggregate value the facts read is, by name.
-    #[serde(serialize_with = "serialize::values", deserialize_with = "values")]
+    #[serde(serialize_with = "serialize_values", deserialize_with = "values")]
     values: BTreeMap<String, Value>,
     /// The facts of operators whose rows were not counted.
     unobserved: BTreeSet<FactKind>,
@@ -334,7 +398,7 @@ impl FactSet {
     /// Adds every fact and bound the rules read off `plan`, and notes the
     /// facts it could not give a value (see [`FactSet::unobserved`]).
     pub fn observe(&mut self, plan: &ObservedPlan) {
-        let observed = rules::observe(plan);
+        let observed = observe::observe(plan);
         for fact in observed.facts {
             self.insert(fact);
         }
@@ -348,6 +412,20 @@ impl FactSet {
             self.insert_value(value);
         }
         self.unobserved.extend(observed.unobserved);
+    }
+
+    /// Adds the facts `plan`'s counts give the rows of its operators as a
+    /// query names them, once translated with `catalog` (see
+    /// [rule `translated`](observe#translated)): rows the rules may not name. A plan that does not
+    /// translate adds none.
+    pub fn observe_translated(&mut self, catalog: &Catalog, plan: &ObservedPlan, options: &Options) {
+        for (fact, floor) in observe::observe_translated(catalog, plan, options) {
+            if floor {
+                self.insert_floor(fact);
+            } else {
+                self.insert(fact);
+            }
+        }
     }
 
     /// The facts the observed plans have and did not count, that nothing
@@ -500,4 +578,9 @@ pub fn derive_facts(plans: &[ObservedPlan]) -> FactSet {
     }
     set.close();
     set
+}
+
+/// A map's values, written as a list.
+fn serialize_values<K, V: Serialize, S: Serializer>(m: &BTreeMap<K, V>, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(m.values())
 }

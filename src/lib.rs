@@ -1,24 +1,36 @@
 //! Static claims about SQL output cardinality.
 //!
 //! A query is parsed and optimized into a DataFusion `LogicalPlan`, every operator
-//! gets a Z3 integer for its output cardinality, and each operator contributes
-//! constraints relating its output to its inputs. We then ask Z3 whether the root's
-//! cardinality must be at most the sum of all base-table scan cardinalities.
+//! gets a Z3 integer for its output cardinality, and constraints relate them. We
+//! then ask Z3 whether the root's cardinality must be at most the sum of all
+//! base-table scan cardinalities, and for the tightest bounds it can prove.
+//!
+//! The constraints come from three places:
+//!
+//! - [`rules`]: each operator's output given its inputs, one rule per operator.
+//! - [`axioms`]: what holds of any rows whatever made them, on each relation and
+//!   between rows named the same way ([`rows`]), in every analysis.
+//! - [`facts`]: counts read off plans that ran, added as claims
+//!   ([`Analysis::with_store`]) that the axioms relate to the query's rows.
 
-mod analyzer;
+mod analysis;
+pub mod axioms;
 mod bounds;
 mod domain;
-mod first;
+mod keys;
 pub mod facts;
 mod informed;
 pub mod observed;
 mod origin;
+pub mod rows;
+pub mod rules;
 mod selectivity;
 mod simple;
 pub mod trace;
 mod validate;
 
-pub use bounds::{Bounds, Linear, TableBound};
+pub use bounds::{Bounds, Linear, SearchStats, TableBound};
+pub use facts::store::{Grounded, SolverSize, Timings};
 pub use informed::{FactMode, FactReport, Informed, Matched, MatchedReport};
 pub use selectivity::{Card, Interval, Kind, Selectivity, SelectivityCheck, SelectivityReport};
 pub use simple::{Simple, SimpleKind, SimpleSelectivity};
@@ -38,7 +50,7 @@ use datafusion::prelude::SessionContext;
 use z3::SatResult;
 use z3::ast::Int;
 
-use analyzer::{Analyzer, Node, ScanKind};
+use analysis::{Analyzer, Node, ScanKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -196,6 +208,15 @@ impl Analysis {
         informed::inform(self, facts, mode)
     }
 
+    /// This analysis with every fact, bound and floor `facts` stores among
+    /// its constraints, as a claim on the quantity of the rows it is about,
+    /// related to the query's by axioms. Z3 derives what
+    /// follows. Facts that contradict each other or the constraints are
+    /// rejected. Pass facts as observed, not closed.
+    pub fn with_store(&self, facts: &facts::FactSet) -> Result<Grounded> {
+        facts::store::with_store(self, facts)
+    }
+
     /// The fact each selectivity of [`Analysis::selectivity`]'s `required`
     /// is looked up as, canonically named, by selectivity name; or why it is
     /// none (a term that did not resolve, a limit, ...).
@@ -317,7 +338,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            max_product: analyzer::DEFAULT_MAX_PRODUCT,
+            max_product: analysis::DEFAULT_MAX_PRODUCT,
             selectivity: false,
             foreign_keys: Vec::new(),
             trace: false,
@@ -447,6 +468,16 @@ fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str)
     ScanKind::Base { key, display }
 }
 
+/// The analyzer's nodes for `plan`, and each base-table scan as (scan
+/// variable, table name), as [`analyze_observed`] builds them.
+pub(crate) fn nodes(plan: &LogicalPlan, options: &Options) -> (Vec<Node>, Vec<(String, String)>) {
+    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
+    let mut a = Analyzer::new(&resolve, options.max_product, &options.foreign_keys, false).with_ranges(plan);
+    a.visit(plan);
+    let scans = a.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
+    (a.nodes, scans)
+}
+
 fn analyze_with(
     plan: &LogicalPlan,
     resolve: &dyn Fn(&TableScan) -> ScanKind,
@@ -454,7 +485,8 @@ fn analyze_with(
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
     let root = a.visit(plan).card;
-    a.assert_partitions();
+    a.disjoint();
+    a.named_rows();
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();
     let assertions = a.solver.get_assertions().len();
@@ -475,7 +507,7 @@ fn analyze_with(
 
     // If the incremental core gives up, fall back to the one-shot portfolio.
     let mut result = a.solver.check();
-    let portfolio = analyzer::new_solver();
+    let portfolio = analysis::new_solver();
     let solver = if result == SatResult::Unknown {
         portfolio.from_string(smtlib.as_str());
         result = portfolio.check();

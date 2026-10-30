@@ -10,10 +10,11 @@
 //! Each test is conservative: `false` loses a bound, `true` must hold for any
 //! data.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::canonical::{MAX_ORDERS, each_order};
-use super::context::{Context, Exists, ExistsKind};
+use super::{Context, Exists, ExistsKind};
+use crate::facts::FactKind;
 use super::rewrite::Spj;
 
 /// True if `a`'s rows are among `b`'s, as many times or fewer: `a` is `b`
@@ -132,6 +133,40 @@ pub(crate) fn renamed(a: &Context, b: &Context, test: impl Fn(&Context, &Context
     found
 }
 
+/// [`renamed`] for whole facts: true if `test(a, b)` holds with `a`'s
+/// instances of each table renamed among themselves some way, its keys
+/// with its contexts.
+pub(crate) fn renamed_kind(a: &FactKind, b: &FactKind, test: impl Fn(&FactKind, &FactKind) -> bool) -> bool {
+    if test(a, b) {
+        return true;
+    }
+    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    let instances = a.instances();
+    for t in &instances {
+        if let Some((table, _)) = t.split_once('@') {
+            groups.entry(table).or_default().push(t);
+        }
+    }
+    let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
+    let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
+    if groups.is_empty() || orders.is_none_or(|n| n > MAX_ORDERS) {
+        return false;
+    }
+    let mut found = false;
+    each_order(&groups, 0, &mut vec![], &mut |order| {
+        if found {
+            return;
+        }
+        let names: HashMap<String, String> = groups
+            .iter()
+            .zip(order)
+            .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.to_string(), t.to_string())))
+            .collect();
+        found = test(&a.rename(&names), b);
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -140,7 +175,7 @@ mod tests {
     use datafusion::prelude::{col, lit};
 
     use super::*;
-    use crate::facts::context::{Term, terms};
+    use crate::rows::{Term, terms};
 
     fn t(name: &str) -> Context {
         Context::table(name)

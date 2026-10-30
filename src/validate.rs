@@ -18,7 +18,7 @@ use datafusion::prelude::SessionContext;
 use z3::SatResult;
 use z3::ast::Int;
 
-use crate::analyzer::{Node, new_solver};
+use crate::analysis::{Node, new_solver};
 use crate::selectivity::auxiliary_joins;
 use crate::{Error, Result, Validation};
 

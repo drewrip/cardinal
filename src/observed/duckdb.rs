@@ -219,12 +219,15 @@ impl Builder<'_> {
                 }
             })
             .collect();
+        // The distinct reports its rows once for each DELIM_SCAN reading them.
+        let index = strings(info, "Delim Index").into_iter().next().unwrap_or_default();
+        let scans = delim_scans(join, &index).max(1);
         let g = ONode {
             op: Op::Aggregate {
                 keys: keys.iter().map(|k| exact(&k.lineage)).collect(),
                 values: vec![],
             },
-            rows: self.rows(distinct, "delim distinct")?,
+            rows: self.rows(distinct, "delim distinct")? / scans,
             counted: self.counted,
             children: vec![copy],
             columns: keys.clone(),
@@ -243,7 +246,6 @@ impl Builder<'_> {
             .and_then(|c| c.get(position))
             .filter(|c| operator(c) == Some(scan))
             .map_or(std::ptr::null(), |c| c as *const Value);
-        let index = strings(info, "Delim Index").into_iter().next().unwrap_or_default();
         self.delims.push(Delim { index, data, input: a, keys: g });
         let j = self.node(join);
         self.delims.pop();
@@ -304,7 +306,10 @@ impl Builder<'_> {
                 let (columns, ordered) = self.projection(&strings(info, "Projections"), &self.nodes[*c]);
                 (Op::Project, columns, ordered)
             }
-            ("HASH_GROUP_BY" | "PERFECT_HASH_GROUP_BY", [c]) if info.get("Grouping Sets").is_none() => {
+            // A profile does not print grouping sets, but the query does.
+            ("HASH_GROUP_BY" | "PERFECT_HASH_GROUP_BY", [c])
+                if info.get("Grouping Sets").is_none() && !self.text.as_ref().is_some_and(|t| t.grouping_sets()) =>
+            {
                 self.aggregate(info, &self.nodes[*c])
             }
             ("UNGROUPED_AGGREGATE", [c]) => self.aggregate(info, &self.nodes[*c]),
@@ -896,6 +901,14 @@ fn mark_filter(text: &str) -> Option<bool> {
 /// aggregate's value read where it is not one.
 fn aggregates(e: &Expr) -> bool {
     e.exists(|x| Ok(matches!(x, Expr::AggregateFunction(_)))).unwrap_or(true)
+}
+
+/// The `DELIM_SCAN`s under `v` reading delim join `index`'s keys.
+fn delim_scans(v: &Value, index: &str) -> u64 {
+    let info = v.get("extra_info").unwrap_or(&Value::Null);
+    let own = operator(v) == Some("DELIM_SCAN") && strings(info, "Delim Index").first().map(String::as_str) == Some(index);
+    let below: u64 = v.get("children").and_then(Value::as_array).map_or(0, |c| c.iter().map(|c| delim_scans(c, index)).sum());
+    u64::from(own) + below
 }
 
 /// An operator's type: `operator_type` in a profile, `name` in a plain plan.

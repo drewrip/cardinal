@@ -24,10 +24,10 @@ use datafusion::logical_expr::Expr;
 use serde::{Deserialize, Serialize};
 use z3::ast::{Bool, Int, Real};
 
-use crate::analyzer::Node;
-use crate::bounds::{Bounds, Search};
-use crate::facts::contain::{fewer, groups_among, renamed};
-use crate::facts::logical::Logical;
+use crate::analysis::Node;
+use crate::bounds::{Bounds, Search, SearchStats};
+use crate::rows::contain::{fewer, groups_among, renamed};
+use crate::rows::logical::Logical;
 use crate::facts::{Context, Fact, FactKind, FactSet, Ratio, Term};
 use crate::selectivity::{Card, Interval, Kind, Selectivity, SelectivityReport};
 use crate::trace::{self, FactClaim, FactInfo, FactRef, Proof, Trace};
@@ -138,6 +138,22 @@ impl Informed {
     pub fn range(&self) -> Result<(u64, Option<u64>)> {
         let search = self.search()?;
         Ok((search.lower(), search.constant()))
+    }
+
+    /// [`Informed::bounds`], and how its solver checks went.
+    #[doc(hidden)]
+    pub fn bounds_with_stats(&self) -> Result<(Bounds, SearchStats)> {
+        let search = self.search()?;
+        let bounds = crate::prove_bounds(&search, &self.scans, &self.tables);
+        Ok((bounds, search.stats()))
+    }
+
+    /// [`Informed::range`], and how its solver checks went.
+    #[doc(hidden)]
+    pub fn range_with_stats(&self) -> Result<((u64, Option<u64>), SearchStats)> {
+        let search = self.search()?;
+        let range = (search.lower(), search.constant());
+        Ok((range, search.stats()))
     }
 
     /// Proves the claims of [`Analysis::explain`] for `bounds` (these

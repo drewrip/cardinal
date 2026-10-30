@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use z3::ast::{Bool, Int};
 use z3::{Params, SatResult, Solver};
 
-use crate::analyzer::{Analyzer, Node};
+use crate::analysis::{Analyzer, Node};
 use crate::bounds::{self, Bounds};
 use crate::facts::Fact;
 use crate::{Error, Result};
@@ -147,8 +147,16 @@ const SHRINK_MS: u32 = 2_000;
 /// Larger cores are reported as Z3 gives them, without shrinking.
 const SHRINK_MAX: usize = 300;
 
-/// The source of the analyzer, to show the lines that made each constraint.
-const ANALYZER: &str = include_str!("analyzer.rs");
+/// The source of every file that asserts constraints, by path, to show the
+/// lines that made each one.
+const SOURCES: &[(&str, &str)] = &[
+    ("analysis.rs", include_str!("analysis.rs")),
+    ("axioms.rs", include_str!("axioms.rs")),
+    ("keys.rs", include_str!("keys.rs")),
+    ("rules/mod.rs", include_str!("rules/mod.rs")),
+    ("rules/aggregate.rs", include_str!("rules/aggregate.rs")),
+    ("rules/join.rs", include_str!("rules/join.rs")),
+];
 
 impl Trace {
     pub(crate) fn build(
@@ -165,7 +173,7 @@ impl Trace {
             .collect();
         let declared = declared(&declarations);
         let nodes = a.nodes.iter().enumerate().map(|(id, n)| node(id, n)).collect();
-        let source: Vec<&str> = ANALYZER.lines().collect();
+        let sources: Vec<(&str, Vec<&str>)> = SOURCES.iter().map(|(p, s)| (*p, s.lines().collect())).collect();
         let constraints = a
             .log
             .borrow()
@@ -174,10 +182,11 @@ impl Trace {
             .map(|(id, l)| {
                 let smt = l.expr.to_string();
                 let line = l.at.line() as usize;
-                let (function, code) = if l.at.file().ends_with("analyzer.rs") {
-                    rule(&source, line)
-                } else {
-                    (String::new(), String::new())
+                let file = l.at.file().replace('\\', "/");
+                let (function, code) = match (l.rule, sources.iter().find(|(p, _)| file.ends_with(&format!("src/{p}")))) {
+                    (Some(r), Some((_, source))) => (r.to_string(), rule(source, line).1),
+                    (None, Some((_, source))) => rule(source, line),
+                    _ => (String::new(), String::new()),
                 };
                 let vars = vars(&smt, &declared);
                 Constraint {
@@ -224,6 +233,20 @@ impl Trace {
             });
         }
         trace
+    }
+
+    /// This trace, declaring too every variable `smt` declares that it does
+    /// not: those of the constraints facts added.
+    pub(crate) fn declare(&mut self, smt: &str) {
+        let known: HashSet<String> = declared(&self.declarations).into_iter().map(str::to_string).collect();
+        for l in smt.lines() {
+            if let Some(name) = declared_name(l)
+                && !known.contains(name)
+            {
+                self.declarations.push_str(l);
+                self.declarations.push('\n');
+            }
+        }
     }
 
     /// This trace with only the analyzer's constraints, none from facts.
@@ -380,7 +403,7 @@ fn vars(smt: &str, declared: &HashSet<&str>) -> Vec<String> {
 
 /// `core` with each tracker dropped that the proof does not need, so that
 /// dropping any one left leaves the claim unproven.
-fn shrink(solver: &Solver, core: Vec<Bool>) -> Vec<Bool> {
+pub(crate) fn shrink(solver: &Solver, core: Vec<Bool>) -> Vec<Bool> {
     if core.len() > SHRINK_MAX {
         return core;
     }

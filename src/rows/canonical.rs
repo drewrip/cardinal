@@ -9,20 +9,41 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::{Context, Exists, ExistsKind, FactKind, Term, rewrite};
+use super::{Context, Exists, ExistsKind, Term, rewrite};
+use crate::facts::FactKind;
 use crate::observed::base_table;
 
 /// More orders than this are not tried: instances are then numbered as they
 /// first appear, which is deterministic but may keep equal facts apart.
 pub(crate) const MAX_ORDERS: usize = 5040;
 
+/// The rows the last fact canonicalized was over, renamed under each order
+/// of its instances, for the next fact over the same rows to reuse:
+/// renaming rows is the costly part, and the facts of one operator's
+/// columns are all over its rows.
+#[derive(Default)]
+pub(crate) struct Renamed {
+    over: Option<Context>,
+    groups: Vec<Vec<String>>,
+    contexts: Vec<Context>,
+}
+
 impl FactKind {
     /// This fact with its table instances canonically renamed.
     pub fn canonical(&self) -> FactKind {
+        self.canonical_in(&mut Renamed::default())
+    }
+
+    /// [`FactKind::canonical`], reusing `renamed`'s renamings of the rows
+    /// when this fact is over the same rows, with the same instances, as the
+    /// last one it saw.
+    pub(crate) fn canonical_in(&self, renamed: &mut Renamed) -> FactKind {
         // Lookups no term reads taken out, and decorrelated first: what they
         // take out is no instance to name.
-        let unpadded = self.unpadded();
-        let this = unpadded.as_ref().unwrap_or(self);
+        let ungrouped = self.ungrouped();
+        let this = ungrouped.as_ref().unwrap_or(self);
+        let unpadded = this.unpadded();
+        let this = unpadded.as_ref().unwrap_or(this);
         let decorrelated = this.decorrelated();
         let this = decorrelated.as_ref().unwrap_or(this);
         let instances = this.instances();
@@ -36,15 +57,58 @@ impl FactKind {
             let names = groups.iter().map(|(_, g)| g.clone()).collect::<Vec<_>>();
             return this.rename(&labels(&groups, &names));
         }
+        let over = this.over_only();
+        let names: Vec<Vec<String>> = groups.iter().map(|(_, g)| g.iter().map(|i| i.to_string()).collect()).collect();
+        let reuse = over.is_some() && renamed.over.as_ref() == over && renamed.groups == names;
+        if !reuse {
+            *renamed = Renamed { over: over.cloned(), groups: names, contexts: vec![] };
+        }
         let mut best: Option<FactKind> = None;
         let mut choice = vec![];
+        let mut k = 0;
         each_order(&groups, 0, &mut choice, &mut |order| {
-            let candidate = this.rename(&labels(&groups, order));
+            let names = labels(&groups, order);
+            let candidate = match over {
+                Some(o) => {
+                    if !reuse {
+                        renamed.contexts.push(o.rename(&|r| names.get(r).cloned()));
+                    }
+                    this.around(&names, renamed.contexts[k].clone())
+                }
+                None => this.rename(&names),
+            };
+            k += 1;
             if best.as_ref().is_none_or(|b| candidate < *b) {
                 best = Some(candidate);
             }
         });
         best.unwrap_or_else(|| this.clone())
+    }
+
+    /// A distinct count, min or max of keys over a GROUP BY on them and
+    /// more, as over the GROUP BY's input: a group is kept for each
+    /// combination of its keys the input has, so the keys take the input's
+    /// values. Repeated for GROUP BYs of GROUP BYs. `None` if it is none.
+    fn ungrouped(&self) -> Option<FactKind> {
+        let input = |keys: &BTreeSet<Term>, over: &Context| match over {
+            Context::Derived { op, args, inputs } if op == "group" && keys.iter().all(|k| args.contains(k)) => {
+                Some(inputs[0].clone())
+            }
+            _ => None,
+        };
+        let mut this = self.clone();
+        loop {
+            let next = match &this {
+                FactKind::Distinct { keys, over } => input(keys, over).map(|o| FactKind::Distinct { keys: keys.clone(), over: o }),
+                FactKind::Min { key, over } => input(&[key.clone()].into(), over).map(|o| FactKind::Min { key: key.clone(), over: o }),
+                FactKind::Max { key, over } => input(&[key.clone()].into(), over).map(|o| FactKind::Max { key: key.clone(), over: o }),
+                _ => None,
+            };
+            match next {
+                Some(n) => this = n,
+                None => return (this != *self).then_some(this),
+            }
+        }
     }
 
     /// This fact with its left joins that only look up groups nothing
@@ -126,11 +190,13 @@ impl FactKind {
     /// contexts as [`rewrite`] builds them, a selectivity's predicates as its
     /// rows with them write them, and keys and conditions with columns
     /// written as the least column equal to them.
-    fn rename(&self, names: &HashMap<String, String>) -> FactKind {
+    pub(crate) fn rename(&self, names: &HashMap<String, String>) -> FactKind {
         let f = |r: &str| names.get(r).cloned();
         let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
+        if let Some(over) = self.over_only() {
+            return self.around(names, over.rename(&f));
+        }
         match self {
-            FactKind::Cardinality(c) => FactKind::Cardinality(c.rename(&f)),
             FactKind::Selectivity { pred, over } => {
                 let (pred, over) = (terms(pred), over.rename(&f));
                 let delta = rewrite::delta(&over, &pred);
@@ -141,27 +207,48 @@ impl FactKind {
                 let on = rewrite::on(&other, &rewrite::on(&kept, &terms(on)));
                 FactKind::Match { on, kept, other }
             }
-            FactKind::Distinct { keys, over } => {
-                let over = over.rename(&f);
-                FactKind::Distinct { keys: rewrite::keys(&over, &terms(keys)), over }
-            }
-            FactKind::Unique { keys, over } => {
-                let over = over.rename(&f);
-                FactKind::Unique { keys: rewrite::keys(&over, &terms(keys)), over }
-            }
-            FactKind::Min { key, over } | FactKind::Max { key, over } => {
-                let over = over.rename(&f);
+            FactKind::Cardinality(_)
+            | FactKind::Distinct { .. }
+            | FactKind::Unique { .. }
+            | FactKind::Min { .. }
+            | FactKind::Max { .. } => unreachable!("over one context"),
+        }
+    }
+
+    /// The one context a size, distinct count, uniqueness, least or
+    /// greatest value is over; `None` for a share.
+    fn over_only(&self) -> Option<&Context> {
+        match self {
+            FactKind::Cardinality(over)
+            | FactKind::Distinct { over, .. }
+            | FactKind::Unique { over, .. }
+            | FactKind::Min { over, .. }
+            | FactKind::Max { over, .. } => Some(over),
+            FactKind::Selectivity { .. } | FactKind::Match { .. } => None,
+        }
+    }
+
+    /// This fact, over one context, renamed by `names` given its context
+    /// renamed so already, `over`.
+    fn around(&self, names: &HashMap<String, String>, over: Context) -> FactKind {
+        let f = |r: &str| names.get(r).cloned();
+        let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
+        match self {
+            FactKind::Distinct { keys, .. } => FactKind::Distinct { keys: rewrite::keys(&over, &terms(keys)), over },
+            FactKind::Unique { keys, .. } => FactKind::Unique { keys: rewrite::keys(&over, &terms(keys)), over },
+            FactKind::Min { key, .. } | FactKind::Max { key, .. } => {
                 let key = rewrite::keys(&over, &[key.rename(&f)].into()).into_iter().next().unwrap_or_else(|| key.rename(&f));
                 match self {
                     FactKind::Min { .. } => FactKind::Min { key, over },
                     _ => FactKind::Max { key, over },
                 }
             }
+            _ => FactKind::Cardinality(over),
         }
     }
 
     /// Every table instance named, in order of first appearance.
-    fn instances(&self) -> Vec<String> {
+    pub(crate) fn instances(&self) -> Vec<String> {
         let mut out = vec![];
         let terms = |ts: &mut dyn Iterator<Item = &Term>, out: &mut Vec<String>| {
             for t in ts {
@@ -291,4 +378,24 @@ fn permutations<'a>(items: &[&'a String]) -> Vec<Vec<&'a String>> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::prelude::col;
+
+    use super::*;
+    use crate::rows::terms;
+
+    #[test]
+    fn keys_over_a_group_on_more_keys_are_over_its_input() {
+        let part = Context::table("part");
+        let keys = terms([col("part.p_brand"), col("part.p_size")]);
+        let more = Context::Derived { op: "group".into(), args: terms([col("part.p_brand"), col("part.p_size"), col("part.p_type")]).into_iter().collect(), inputs: vec![part.clone()] };
+        let grouped = FactKind::Distinct { keys: keys.clone(), over: more.clone() };
+        assert_eq!(grouped.canonical(), FactKind::Distinct { keys: keys.clone(), over: part.clone() });
+        // Keys the group does not have stay over it.
+        let other = FactKind::Distinct { keys: terms([col("part.p_name")]), over: more };
+        assert_eq!(other.canonical(), other);
+    }
 }

@@ -1,26 +1,173 @@
-//! Rules reading facts off one operator of an executed plan.
+//! Reading facts off the operators of an executed plan.
 //!
-//! Each rule looks at an operator, its rows and its inputs' rows, and the
-//! [`State`]s of all three, and emits the facts the counts establish. Rules
-//! only read clean states: a count that may be short says nothing. An
-//! operator whose rows an engine did not count still has the rows its state
-//! says: its facts are named, without a value, for a query to count.
+//! Stage 1 of the [pipeline](super#pipeline); notation as in
+//! [the module](super#notation).
+//!
+//! # Spec
+//!
+//! - **Input**: one [`ObservedPlan`], each operator's [`State`]
+//!   ([`super::states`]), and whether the engine counted its rows.
+//! - **Output**: per operator, canonical facts, bounds and floors, each
+//!   with [`Origin::Observed`] naming the plan,
+//!   operator and rule. Where an exact rule applies but a count it needs
+//!   is missing, the fact's kind without a value
+//!   ([`FactSet::unobserved`](super::FactSet::unobserved)).
+//! - **Guarantees**: an exact fact reads only [`State::Clean`] rows, whose
+//!   count is exactly its context's. A [`State::Pending`] operator gives at
+//!   most a bound ([`State::upper`]) or a floor ([`State::lower`]). A
+//!   [`State::Tainted`] one (stopped early, unresolved, self-join, ...)
+//!   gives nothing.
+//! - **Not done**: nothing is combined across operators or plans; that is
+//!   [`super::derive`]. Outer joins give no selectivity.
+//!
+//! The exact rules implement [`FactRule`] and are listed in [`RULES`]; the
+//! bound and floor rules run after them on every operator.
+//!
+//! # Exact rules
+//!
+//! ## `cardinality`
+//!
+//! - **Claim**: `|C| = rows`. For a GROUP BY on keys `K` over input `I`,
+//!   whose rows are its groups, `ndv(K | I) = rows` instead.
+//! - **When**: the operator is clean with context `C`; not an aggregate
+//!   without GROUP BY.
+//! - **Why**: a clean operator outputs exactly `C`'s rows.
+//!
+//! ## `filter selectivity`
+//!
+//! - **Claim**: `s(P | I) = rows / input rows`.
+//! - **When**: a filter, clean along with its input `I`; `P` is its
+//!   predicate's conjuncts, less those already among `I`'s predicates
+//!   (DuckDB re-checks some), and is not empty. No fact if the input had no
+//!   rows.
+//! - **Why**: the filter outputs exactly `I ∧ P`.
+//!
+//! ## `join selectivity`
+//!
+//! - **Claim**: inner join on `on` of `L` and `R`: `s(on | L × R) = rows /
+//!   (|L| · |R|)`. Semi join keeping `K` against `O`: `m(on | K ⋉ O) =
+//!   rows / |K|`; anti join: `m = (|K| − rows) / |K|`.
+//! - **When**: the join and both inputs are clean, `on` resolves and, for
+//!   an inner join, is not empty and the inputs share no table instance.
+//!   An inner join on exactly the keys one side keeps only its first row
+//!   per value of has a semi join's rows, and also gives its `m`.
+//! - **Why**: an inner join outputs `(L × R) ∧ on`; a semi join the rows
+//!   of `K` with a partner, an anti join the rest.
+//!
+//! ## `distinct count`
+//!
+//! - **Claim**: `ndv(K | I) = rows`.
+//! - **When**: a GROUP BY or DISTINCT on non-empty keys `K` that resolve,
+//!   clean along with its input `I`. Its input's rows need not be counted.
+//! - **Why**: it outputs one row per distinct combination of `K` in `I`.
+//!
+//! # Bound and floor rules
+//!
+//! ## `upper bound`
+//!
+//! - **Claim**: `|U| ≤ rows`, a bound. Over a GROUP BY on `K` whose input
+//!   is pending: `ndv(K | U) ≤ rows`, with `U` its input's.
+//! - **When**: the operator's (or the GROUP BY's input's) rows are pending
+//!   and [`State::upper`] gives `U`: every pending filter is a pushed filter
+//!   that resolved, or a runtime filter that still holds every row
+//!   satisfying it. `U` is the context with those runtime filters'
+//!   predicates.
+//! - **Why**: a pushed (optional) filter may let extra rows through, and a
+//!   runtime filter drops only rows failing its predicate, so the rows hold
+//!   all of `U`'s.
+//!
+//! ## `lower bound`
+//!
+//! - **Claim**: `|C| ≥ rows`, a floor.
+//! - **When**: the operator is pending, and [`State::lower`] gives `C`:
+//!   every pending filter is a runtime filter, and each operator since kept
+//!   a subset of its input.
+//! - **Why**: a runtime filter only drops rows (those without a partner),
+//!   so the rows are among `C`'s.
+//!
+//! ## `build keys`
+//!
+//! - **Claim**: on `ndv(x | B)`, for the build side `B` of the join that
+//!   pushed runtime filters on column `y` into a scan, joined on `y = x`:
+//!   an IN list of `n` literals (or `y = k`, `n = 1`) gives the bound
+//!   `≤ n + 1` and, if `n > 1`, the floor `≥ n`; a range `a ≤ y ≤ b` of
+//!   integers gives the bound `≤ b − a + 2`.
+//! - **When**: exactly one join on `y` is above the scan, with the scan on
+//!   its probe side; it is an inner, left semi or right join with a clean
+//!   build side, and `y = x` is its only condition reading `y`. Every
+//!   operator above the scan has one parent, and none is a UNION or a join
+//!   whose condition did not resolve (any could also have pushed a filter
+//!   on `y`). Each filter form occurs once on `y`.
+//! - **Why**: the filters are built from every non-NULL build key; one
+//!   more value allows for NULL.
+//!
+//! ```text
+//! lineitem scan, runtime filter l_suppkey IN (3, 7, 9)
+//!   from: lineitem ⋈ σ(s_nation = 'X')(supplier) on l_suppkey = s_suppkey
+//! ⇒ 3 ≤ ndv(s_suppkey | supplier ∧ s_nation = 'X') ≤ 4
+//! ```
+//!
+//! ## `join domain`
+//!
+//! - **Claim**: for each column `y` with runtime filters pending on a side
+//!   of this join, over its context `C`: `min(y | C) ≥ lo` (floor),
+//!   `max(y | C) ≤ hi` (bound) and `ndv(y | C) ≤ n` (bound). `lo` and `hi`
+//!   are the tightest ends the filters admit (`> k` admits from `k + 1`,
+//!   `< k` up to `k − 1`), and `n` the fewest values one lists (`y = k`,
+//!   an IN list, or an `OR` of such).
+//! - **When**: an inner join (both sides), left semi (left side) or right
+//!   semi (right side), clean. `lo` and `hi` only if non-negative integers;
+//!   `n` only if this join has an equality on `y`, which drops NULL.
+//! - **Why**: each filter admits every key of the join that built it, at
+//!   or below this one, so every value of `y` here satisfies every filter,
+//!   whether or not the scan applied it.
+//!
+//! ```text
+//! orders scan, runtime filters o_custkey >= 5, o_custkey <= 90
+//!   enforced by C = orders ⋈ customer on o_custkey = c_custkey
+//! ⇒ min(o_custkey | C) ≥ 5, max(o_custkey | C) ≤ 90
+//! ```
+//!
+//! ## `translated`
+//!
+//! Run by [`FactSet::observe_translated`](super::FactSet::observe_translated),
+//! on the plan translated into a logical plan and named as a query's
+//! operators are, which names rows these rules cannot (a theta join, a
+//! GROUP BY on an expression).
+//!
+//! - **Claim**: `|C| = rows` for each operator's translated context `C`
+//!   (`ndv(K | I) = rows` for a GROUP BY), as a fact, or as a floor `≥`.
+//! - **When**: the plan translates, the operator was counted and did not
+//!   stop early. A fact if no runtime or optional filter pruned at or below
+//!   it (the translation leaves both out), or its state is clean; a floor
+//!   if only runtime filters did ([`State::lower`]); nothing otherwise.
+//! - **Why**: as `cardinality` and `lower bound`.
+
+use std::collections::{BTreeSet, HashMap};
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::JoinType;
-use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+use datafusion::logical_expr::{BinaryExpr, Expr, LogicalPlan, Operator};
 
-use super::context::{Context, Pending, State, Value, Values, join_keys, states_hidden, stopped};
+use super::state::{Pending, State, Value, Values, join_keys, states, states_hidden, stopped};
 use super::{Fact, FactKind, Origin, Ratio, Term};
-use crate::observed::{ObservedPlan, Op, column_key};
+use crate::Options;
+use crate::analysis::Node;
+use crate::observed::{Catalog, ObservedPlan, Op, column_key};
+use crate::rows::Context;
+use crate::rows::logical::Logical;
 
+/// A rule reading exact facts off one operator.
 pub trait FactRule: Sync {
+    /// The rule's name, as recorded in each fact's
+    /// [`Origin::Observed`].
     fn name(&self) -> &'static str;
     /// The facts operator `node` shows: each with its value, or without
     /// where the operator has the fact's rows and they were not counted.
     fn apply(&self, obs: &Observation, node: usize, out: &mut Vec<(FactKind, Option<Ratio>)>);
 }
 
+/// The exact rules, in the order they run on each operator.
 pub static RULES: &[&dyn FactRule] = &[&Cardinality, &FilterSelectivity, &JoinSelectivity, &DistinctCount];
 
 /// An executed plan, with every operator's state.
@@ -353,11 +500,13 @@ fn share(num: Option<u64>, den: Option<u64>) -> Option<Option<Ratio>> {
     }
 }
 
-/// `|ctx| = rows` for any operator whose rows have a context: base-table
-/// sizes from unfiltered scans, filtered sizes from scans with pushed-down
-/// predicates, and the sizes of joins. A GROUP BY's rows are its keys'
-/// distinct values over its input, as a filter on its keys above it reads
-/// once it goes below ([`DistinctCount`] reads the GROUP BY itself).
+/// `|C| = rows` for a clean operator. Spec: [`cardinality`](self#cardinality).
+///
+/// Gives base-table sizes from unfiltered scans, filtered sizes from scans
+/// with pushed-down predicates, and the sizes of joins. Rows named as a
+/// GROUP BY's, as a filter on its keys above it reads once it goes below,
+/// are its keys' distinct values over its input ([`DistinctCount`] reads
+/// the GROUP BY itself).
 pub struct Cardinality;
 
 impl FactRule for Cardinality {
@@ -379,8 +528,8 @@ impl FactRule for Cardinality {
     }
 }
 
-/// `s(p | input) = rows / input rows` for a filter on `p`. Conjuncts the
-/// input already satisfies (DuckDB re-checks some) are left out.
+/// `s(P | I) = rows / |I|` for a filter. Spec:
+/// [`filter selectivity`](self#filter-selectivity).
 pub struct FilterSelectivity;
 
 impl FactRule for FilterSelectivity {
@@ -402,9 +551,8 @@ impl FactRule for FilterSelectivity {
     }
 }
 
-/// For an inner join, `s(on | left × right) = rows / (left rows · right
-/// rows)`. For a semi or anti join, the share `m` of the kept side's rows
-/// with a partner.
+/// `s(on | L × R)` for an inner join, `m(on | K ⋉ O)` for a semi or anti
+/// join. Spec: [`join selectivity`](self#join-selectivity).
 pub struct JoinSelectivity;
 
 impl FactRule for JoinSelectivity {
@@ -453,7 +601,8 @@ impl FactRule for JoinSelectivity {
     }
 }
 
-/// `ndv(keys | input) = rows` for a GROUP BY or DISTINCT.
+/// `ndv(K | I) = rows` for a GROUP BY or DISTINCT. Spec:
+/// [`distinct count`](self#distinct-count).
 pub struct DistinctCount;
 
 impl FactRule for DistinctCount {
@@ -471,4 +620,86 @@ impl FactRule for DistinctCount {
             out.push((FactKind::Distinct { keys, over: input.clone() }, rows(obs, node).map(Ratio::int)));
         }
     }
+}
+
+// The `translated` rule: facts read off an observed plan's logical form.
+//
+// The rules above name an executed operator's rows as the plan ran them
+// (`states`). Some rows they cannot name, a query names
+// all the same: a theta join, a GROUP BY on an expression. So each plan is
+// also translated as it ran ([`Catalog::to_logical`]), its operators named
+// as a query's are ([`Logical`]), and each operator's count is a fact on
+// the rows it names:
+//
+// - exactly, if nothing at or below it was pruned by a runtime or optional
+//   filter, which the translation leaves out, or if its rows are clean
+//   ([`State::Clean`]);
+// - at least (a floor), if only runtime filters pruned below it, keeping a
+//   subset ([`State::lower`]);
+// - not at all otherwise, or if it was not counted, or may have stopped
+//   early.
+
+/// Each fact `plan`'s counts give its translation's rows, and whether it is
+/// a floor. None if the plan does not translate.
+pub(crate) fn observe_translated(catalog: &Catalog, plan: &ObservedPlan, options: &Options) -> Vec<(Fact, bool)> {
+    if !plan.counted {
+        return vec![];
+    }
+    let Ok((root, built)) = catalog.to_logical_mapped(plan) else { return vec![] };
+    let (nodes, scans) = crate::nodes(&root, options);
+    let logical = Logical::new(&nodes, &scans);
+    let mut out = vec![];
+    for (m, j, floor) in counts(plan, &nodes, &built) {
+        let kind = match &logical.contexts[m] {
+            Ok(Context::Derived { op, args, inputs }) if op == "group" => {
+                FactKind::Distinct { keys: args.iter().cloned().collect(), over: inputs[0].clone() }
+            }
+            Ok(Context::Derived { op, .. }) if op == "aggregate" => continue,
+            Ok(ctx) => FactKind::Cardinality(ctx.clone()),
+            Err(_) => continue,
+        };
+        let origin = Origin::Observed { query: plan.name.clone(), node: j, rule: "translated".into() };
+        let fact = Fact { kind: kind.canonical(), value: Ratio::int(plan.nodes[j].rows), origins: vec![origin] };
+        out.push((fact, floor));
+    }
+    out
+}
+
+/// Each analyzer node of `nodes` an operator of `plan` became, by `built`
+/// (each operator and the subplans it became), with the operator and
+/// whether its count is only a floor for the node's rows.
+fn counts(plan: &ObservedPlan, nodes: &[Node], built: &[(usize, LogicalPlan)]) -> Vec<(usize, usize, bool)> {
+    let states = states(plan);
+    let stopped = stopped(plan);
+    // Whether a runtime or optional filter pruned at or below each operator:
+    // the translation leaves both out.
+    let mut pruned = vec![false; plan.nodes.len()];
+    for (j, n) in plan.nodes.iter().enumerate() {
+        let own = match &n.op {
+            Op::Scan { runtime_filters, filters, .. } => !runtime_filters.is_empty() || filters.iter().any(|f| f.optional),
+            _ => false,
+        };
+        pruned[j] = own || n.children.iter().any(|&c| pruned[c]);
+    }
+    let mut by_plan: HashMap<&LogicalPlan, Vec<usize>> = HashMap::new();
+    for (j, p) in built {
+        by_plan.entry(p).or_default().push(*j);
+    }
+    let mut out = vec![];
+    let mut done = BTreeSet::new();
+    for (m, node) in nodes.iter().enumerate() {
+        for &j in by_plan.get(&node.plan).into_iter().flatten() {
+            if !plan.nodes[j].counted || stopped[j] || !done.insert((m, j)) {
+                continue;
+            }
+            let floor = match &states[j] {
+                _ if !pruned[j] => false,
+                State::Clean(_) => false,
+                s if s.lower().is_some() => true,
+                _ => continue,
+            };
+            out.push((m, j, floor));
+        }
+    }
+    out
 }

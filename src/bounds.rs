@@ -5,13 +5,15 @@
 //! non-negative fraction and `d` a constant. The smallest `c` is found first, then the smallest `d` for it. A
 //! bound is reported only when Z3 proves it; an undecided check never yields one.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
-use crate::analyzer::solver_with_timeout;
+use crate::analysis::solver_with_timeout;
 
 /// `num/den · S + add` for some quantity `S`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,9 +110,38 @@ const MAX_COEFF: u64 = 8;
 /// Per-check timeout: bounds are best-effort, so give up quickly.
 const TIMEOUT_MS: u32 = 1_000;
 
+/// How a bounds search's solver checks came out, and how long they took.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchStats {
+    /// Checks that found a model: a claim refuted, or a claim added.
+    pub sat: u32,
+    /// Checks that found none: a claim proven, or contradicted.
+    pub unsat: u32,
+    /// Checks that gave up, mostly at the timeout.
+    pub unknown: u32,
+    pub time: Duration,
+}
+
+impl SearchStats {
+    pub fn checks(&self) -> u32 {
+        self.sat + self.unsat + self.unknown
+    }
+}
+
+impl std::ops::AddAssign for SearchStats {
+    fn add_assign(&mut self, o: SearchStats) {
+        self.sat += o.sat;
+        self.unsat += o.unsat;
+        self.unknown += o.unknown;
+        self.time += o.time;
+    }
+}
+
 pub(crate) struct Search {
     solver: Solver,
     output: Int,
+    stats: Cell<SearchStats>,
 }
 
 impl Search {
@@ -123,16 +154,37 @@ impl Search {
             Search {
                 solver,
                 output: Int::new_const(root),
+                stats: Cell::default(),
             },
             parsed,
         )
+    }
+
+    /// The checks so far.
+    pub(crate) fn stats(&self) -> SearchStats {
+        self.stats.get()
+    }
+
+    /// Checks the solver, counting the outcome.
+    fn check(&self) -> SatResult {
+        let start = Instant::now();
+        let result = self.solver.check();
+        let mut stats = self.stats.get();
+        stats.time += start.elapsed();
+        match result {
+            SatResult::Sat => stats.sat += 1,
+            SatResult::Unsat => stats.unsat += 1,
+            SatResult::Unknown => stats.unknown += 1,
+        }
+        self.stats.set(stats);
+        result
     }
 
     /// True if the constraints entail `claim`.
     fn proves(&self, claim: Bool) -> bool {
         self.solver.push();
         self.solver.assert(claim.not());
-        let unsat = self.solver.check() == SatResult::Unsat;
+        let unsat = self.check() == SatResult::Unsat;
         self.solver.pop(1);
         unsat
     }
@@ -190,7 +242,7 @@ impl Search {
     pub(crate) fn assume(&self, claim: &Bool) -> Option<bool> {
         self.solver.push();
         self.solver.assert(claim);
-        match self.solver.check() {
+        match self.check() {
             SatResult::Sat => Some(true),
             result => {
                 self.solver.pop(1);

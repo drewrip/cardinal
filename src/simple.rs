@@ -41,11 +41,12 @@ use std::fmt;
 use datafusion::common::{JoinType, NullEquality};
 use datafusion::logical_expr::logical_plan::LogicalPlan;
 
-use crate::analyzer::Node;
-use crate::facts::logical::Logical;
+use crate::analysis::Node;
+use crate::rows::logical::Logical;
 use crate::facts::{Context, FactKind, Term};
 use crate::informed::kinds_in;
-use crate::{first, Analysis, Error, Result};
+use crate::rows::first;
+use crate::{Analysis, Error, Result};
 
 /// What a simple selectivity is a share of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

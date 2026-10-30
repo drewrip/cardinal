@@ -66,7 +66,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::context::{Context, Exists, ExistsKind, Term};
+use super::{Context, Exists, ExistsKind, Term};
 use crate::observed::requalify;
 
 /// An SPJ being built. [`Spj::build`] gives it in normal form.
@@ -462,7 +462,7 @@ mod tests {
     use datafusion::prelude::{col, lit};
 
     use super::*;
-    use crate::facts::context::terms;
+    use crate::rows::terms;
 
     fn t(name: &str) -> Context {
         Context::table(name)
