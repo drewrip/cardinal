@@ -472,16 +472,24 @@ impl<'a> Analyzer<'a> {
             }
         }
         self.range_within_domain(plan, rel);
-        // A unique set of columns has a distinct combination on every row.
-        // Columns with few possible values count as constants, which keeps
-        // the product linear where possible.
-        'keys: for key in &rel.rows.keys {
+        // A unique set of columns has a distinct combination on every row,
+        // as do the columns of it that determine the rest. Columns with few
+        // possible values count as constants, which keeps the product linear
+        // where possible.
+        for key in &rel.rows.keys {
+            let positions: Option<Vec<usize>> = key
+                .iter()
+                .map(|e| match e {
+                    Expr::Column(c) => schema.index_of_column(c).ok(),
+                    _ => None,
+                })
+                .collect();
+            let Some(positions) = positions else { continue };
+            let sizes: Vec<Option<u128>> = positions.iter().map(|&i| rel.facts.dom(&key_col(plan, i), schema).size()).collect();
             let mut constant: u128 = 1;
             let mut factors: Vec<&Int> = vec![];
-            for e in key {
-                let Expr::Column(c) = e else { continue 'keys };
-                let Ok(i) = schema.index_of_column(c) else { continue 'keys };
-                match rel.facts.dom(e, schema).size() {
+            for i in self.determining(plan, &positions, &sizes) {
+                match rel.facts.dom(&key_col(plan, i), schema).size() {
                     Some(k) => constant = constant.saturating_mul(k),
                     None => factors.push(&rel.ndv[i]),
                 }
@@ -512,6 +520,11 @@ impl<'a> Analyzer<'a> {
             }
         }
     }
+}
+
+/// Output column `i` of `plan`, as an expression.
+fn key_col(plan: &LogicalPlan, i: usize) -> Expr {
+    Expr::Column(Column::from(plan.schema().qualified_field(i)))
 }
 
 /// Integers, and dates as days: the columns with min and max variables.

@@ -95,6 +95,20 @@ impl<'a> Analyzer<'a> {
                         with.push(c);
                     }
                 }
+                // With NULLs equal, so do the columns `cols` determine, as
+                // those the filter holds equal to them. Not with NULLs
+                // distinct: a determined column may be NULL, and a UNIQUE
+                // constraint on it then says nothing.
+                if nulls == Nulls::Equal
+                    && let Some(ix) = output_indices(plan, cols)
+                {
+                    for i in self.fd_closure(plan, &ix) {
+                        let c = Column::from(f.input.schema().qualified_field(i));
+                        if !with.contains(&c) {
+                            with.push(c);
+                        }
+                    }
+                }
                 with.len() > cs.len() && self.covers_key(&f.input, &with, nulls)
             }
             // `row_number()` numbers each partition's rows 1, 2, ...: it is unique
@@ -441,14 +455,55 @@ impl<'a> Analyzer<'a> {
         out
     }
 
+    /// True if rows of `plan` agreeing on `keys` (output positions) are one
+    /// row: the columns `keys` determine cover a key, there or below,
+    /// through operators whose rows are their input's, columns kept.
+    pub(crate) fn determines_key(&self, plan: &LogicalPlan, keys: &[usize]) -> bool {
+        if keys.is_empty() {
+            return false;
+        }
+        let closed: Vec<Column> =
+            self.fd_closure(plan, keys).into_iter().map(|i| Column::from(plan.schema().qualified_field(i))).collect();
+        if self.covers_key(plan, &closed, Nulls::Equal) {
+            return true;
+        }
+        match plan {
+            LogicalPlan::Projection(p) => {
+                let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&p.input, &p.expr[k])).collect();
+                self.determines_key(&p.input, &input)
+            }
+            LogicalPlan::Filter(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::SubqueryAlias(_) => {
+                let input = plan.inputs()[0];
+                let n = input.schema().fields().len();
+                self.determines_key(input, &keys.iter().copied().filter(|&k| k < n).collect::<Vec<_>>())
+            }
+            _ => false,
+        }
+    }
+
     /// A smallest-by-greedy subset of `plan`'s first `n` output positions
-    /// that determines all of them ([`Self::fd_closure`]).
-    pub(crate) fn determining_keys(&self, plan: &LogicalPlan, n: usize) -> Vec<usize> {
-        let mut keys: Vec<usize> = (0..n).collect();
-        for k in 0..n {
+    /// that determines all of them ([`Self::fd_closure`]). `sizes` holds
+    /// each one's domain size, if finite: those without one are dropped
+    /// first, since a column with few values bounds a product better.
+    pub(crate) fn determining_keys(&self, plan: &LogicalPlan, n: usize, sizes: &[Option<u128>]) -> Vec<usize> {
+        self.determining(plan, &(0..n).collect::<Vec<_>>(), sizes)
+    }
+
+    /// [`Self::determining_keys`] of the output positions `cols`, with
+    /// `sizes` by position in `cols`. The kept positions are in `cols`' order.
+    pub(crate) fn determining(&self, plan: &LogicalPlan, cols: &[usize], sizes: &[Option<u128>]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..cols.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().flatten().unwrap_or(u128::MAX)));
+        let mut keys: Vec<usize> = cols.to_vec();
+        for i in order {
+            let k = cols[i];
             let rest: Vec<usize> = keys.iter().copied().filter(|&j| j != k).collect();
             let closed = self.fd_closure(plan, &rest);
-            if (0..n).all(|j| closed.contains(&j)) {
+            if cols.iter().all(|j| closed.contains(j)) {
                 keys = rest;
             }
         }

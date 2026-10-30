@@ -266,7 +266,8 @@ impl<'a> Analyzer<'a> {
                     self.assert(o.card.le(p));
                 }
                 // Columns the others determine add no distinct rows.
-                let determining = self.determining_keys(input, all.len());
+                let sizes = sizes(input, &l.facts);
+                let determining = self.determining_keys(input, all.len(), &sizes);
                 if determining.len() < all.len() {
                     let factors: Vec<&Int> = determining.iter().map(|&j| &l.ndv[j]).collect();
                     if let Some(p) = product(&factors, self.max_product) {
@@ -287,11 +288,17 @@ impl<'a> Analyzer<'a> {
                 o.facts = computed_facts(plan, &on.select_expr, &on.input, &l.facts);
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
-                let bounds: Option<Vec<Int>> = on
-                    .on_expr
-                    .iter()
-                    .map(|e| expr_bound(e, &on.input, &l, self.max_product))
-                    .collect();
+                // ON expressions the others determine add no rows.
+                let mut on_expr: Vec<&Expr> = on.on_expr.iter().collect();
+                for e in &on.on_expr {
+                    let rest: Vec<&Expr> = on_expr.iter().copied().filter(|x| *x != e).collect();
+                    let cols: Vec<usize> = rest.iter().filter_map(|x| column_index(&on.input, x)).collect();
+                    if determined(e, &on.input, &self.fd_closure(&on.input, &cols)) {
+                        on_expr = rest;
+                    }
+                }
+                let bounds: Option<Vec<Int>> =
+                    on_expr.iter().map(|e| expr_bound(e, &on.input, &l, self.max_product)).collect();
                 if let Some(bounds) = bounds
                     && let Some(p) = product(&bounds.iter().collect::<Vec<_>>(), self.max_product)
                 {
@@ -595,6 +602,11 @@ impl<'a> Analyzer<'a> {
             }
         }
     }
+}
+
+/// The size of each output column's domain in `facts`, if finite.
+pub(crate) fn sizes(plan: &LogicalPlan, facts: &Facts) -> Vec<Option<u128>> {
+    (0..plan.schema().fields().len()).map(|j| facts.dom(&col(plan, j), plan.schema()).size()).collect()
 }
 
 /// `e`, over the output of projection `plan` computing `exprs`, as an

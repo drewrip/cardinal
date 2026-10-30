@@ -225,6 +225,32 @@ async fn columns_with_one_value_add_no_groups() {
     assert_eq!(formula(sql).await.1, "X <= 8");
 }
 
+/// The filter holds `amount` equal to the key `s.id`, which with the join
+/// to `dims`' key determines every column: grouping by `amount` and
+/// `category` leaves one row per group, though the projection below the
+/// GROUP BY drops `s.id`. The GROUP BY's share is resolved.
+#[tokio::test]
+async fn grouping_by_what_determines_a_key_keeps_every_row() {
+    let sql = "SELECT s.amount, d.category, count(*) FROM sales s JOIN dims d ON s.dim_id = d.id
+        WHERE s.amount = s.id GROUP BY s.amount, d.category";
+    let (formula, _) = formula(sql).await;
+    assert_eq!(formula, "s1·s2·|sales|·|dims|");
+}
+
+/// `row_number()` over a partition whose columns depend on `s.dim_id`
+/// (through the join to `dims`' key) is unique with `s.dim_id`,
+/// `s.store_id` and the number alone, whose domains multiply to 6.
+#[tokio::test]
+async fn numbered_partitions_reduce_to_their_determining_columns() {
+    let sql = "SELECT * FROM (
+          SELECT s.id, s.dim_id, d.category, d.id AS did, s.store_id,
+            row_number() OVER (PARTITION BY s.dim_id, d.category, d.id, s.store_id ORDER BY s.id) AS rn
+          FROM sales s JOIN dims d ON s.dim_id = d.id
+          WHERE s.dim_id BETWEEN 1 AND 3 AND s.store_id BETWEEN 1 AND 2) w
+        WHERE rn <= 1";
+    assert_eq!(formula(sql).await.1, "X <= 6");
+}
+
 /// With no declared key, four group keys are too many to multiply, and the
 /// GROUP BY is bounded by its input alone.
 #[tokio::test]
