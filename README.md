@@ -97,6 +97,19 @@ A key stays unique:
 `UNIQUE` constraints are not trusted (DataFusion doesn't enforce them), and
 ROLLUP / CUBE / GROUPING SETS outputs are not keys, since they repeat key values.
 
+**Functional dependencies.** Columns `A` determine columns `B` if rows
+agreeing on `A` (NULLs equal) agree on `B`. A key determines its relation's
+columns; so do `row_number()` with its partition, and a `DISTINCT ON`'s
+expressions. A computed column is determined by the columns it reads, a column a
+filter leaves one non-NULL value (`= 'open'`, `= $1`, `>= 5 AND < 6`) by
+nothing, and columns a filter or inner join holds equal by each other. On a
+left join, the right side's dependencies hold where the determinant has a
+column no matched row leaves NULL, and on equalities alone against a unique
+right key, the left key determines every right column. Products of NDVs over a
+set of columns (GROUP BY, DISTINCT, `DISTINCT ON`, a numbered partition) drop
+the columns the rest determine, and grouping by columns that determine a key
+keeps every row.
+
 **Foreign keys.** DataFusion has none, so they are declared in
 `Options::foreign_keys`: `ForeignKey::new("orders", &["cust"], "customers",
 &["id"])` says every order's `cust` is non-NULL and equals the `id` of exactly

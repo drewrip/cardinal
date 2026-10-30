@@ -81,14 +81,15 @@
 //! ## `DistinctOn`
 //!
 //! - **Claim**: `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv` of the `ON`
-//!   expressions.
+//!   expressions, without those the others determine.
 //!
 //! ## `aggregate`
 //!
 //! - **Claim**: without GROUP BY, `X = 1`. With GROUP BY on keys `K`:
 //!   `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv(K)` (or of the keys that
 //!   determine the rest, or of one column determining every key), each
-//!   key's `ndv` its expression's, and `X = l` if `K` covers a unique key.
+//!   key's `ndv` its expression's, and `X = l` if `K`, or the columns it
+//!   determines, cover a unique key.
 //!   `count` columns sum to at most `l`; `min` and `max` take their
 //!   argument's range. ROLLUP, CUBE and GROUPING SETS: nothing (they may emit
 //!   more rows than they read).
