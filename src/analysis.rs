@@ -9,8 +9,9 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::panic::Location;
+use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::Column;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::datasource::source_as_provider;
@@ -49,10 +50,13 @@ pub(crate) struct Rel {
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
     /// Per output column, the ends of an interval holding each of its
-    /// non-NULL values (empty, `max < min`, if there is none): for
-    /// integer-like columns that a range, a join or a grouping reads.
+    /// non-NULL values (empty, `max < min`, if there is none): for columns
+    /// with a [`Unit`] that a range, a join or a grouping reads.
     pub(crate) min: Vec<Option<Int>>,
     pub(crate) max: Vec<Option<Int>>,
+    /// Per output column, the unit its `min` and `max` count in. Two
+    /// columns' ends compare only in one unit.
+    pub(crate) unit: Vec<Option<Unit>>,
     /// What every row's values satisfy, whatever the data.
     pub(crate) facts: Facts,
     /// Facts that also hold for any subset of the rows.
@@ -359,17 +363,19 @@ impl<'a> Analyzer<'a> {
             })
             .collect();
         let schema = plan.schema();
-        let (mut min, mut max) = (vec![], vec![]);
+        let (mut min, mut max, mut units) = (vec![], vec![], vec![]);
         for (j, t) in fields.iter().enumerate() {
-            let ranged = integer_like(t) && self.ranged.contains(schema.field(j).name());
-            min.push(ranged.then(|| self.range_var(format!("{base}_c{j}_min"))));
-            max.push(ranged.then(|| self.range_var(format!("{base}_c{j}_max"))));
+            let u = unit(t).filter(|_| self.ranged.contains(schema.field(j).name()));
+            min.push(u.is_some().then(|| self.range_var(format!("{base}_c{j}_min"))));
+            max.push(u.is_some().then(|| self.range_var(format!("{base}_c{j}_max"))));
+            units.push(u);
         }
         let rel = Rel {
             card,
             ndv,
             min,
             max,
+            unit: units,
             facts: Facts::default(),
             rows: Rows::default(),
             origin: None,
@@ -568,9 +574,30 @@ pub(crate) fn address(plan: &LogicalPlan) -> usize {
     plan as *const LogicalPlan as usize
 }
 
-/// Integers, and dates as days: the columns with min and max variables.
-pub(crate) fn integer_like(t: &DataType) -> bool {
-    t.is_integer() || *t == DataType::Date32
+/// What a column's values count in, as integers that order as the values
+/// do: the columns with min and max variables. Each is the raw value a
+/// literal of the type keys to ([`domain`]): an integer, days, milliseconds
+/// (Date64), the timestamp's unit, or a decimal's unscaled value at its
+/// scale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unit {
+    Int,
+    Date32,
+    Date64,
+    Time(TimeUnit, Option<Arc<str>>),
+    Decimal(i8),
+}
+
+/// The [`Unit`] of a type's values, if they count in one.
+pub(crate) fn unit(t: &DataType) -> Option<Unit> {
+    Some(match t {
+        t if t.is_integer() => Unit::Int,
+        DataType::Date32 => Unit::Date32,
+        DataType::Date64 => Unit::Date64,
+        DataType::Timestamp(u, tz) => Unit::Time(*u, tz.clone()),
+        DataType::Decimal128(_, s) => Unit::Decimal(*s),
+        _ => return None,
+    })
 }
 
 /// The names of `vars`, by column.

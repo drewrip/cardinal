@@ -216,20 +216,35 @@ fn record(counts: &mut Vec<(String, u64)>, var: &str, ndv_vars: &[String], value
 }
 
 /// The least and greatest non-NULL value of each column with min and max
-/// variables, as integers (dates as days). A column without a value, or
-/// with one that does not fit, leaves them free.
+/// variables, as the raw integers its [`crate::analysis::Unit`] counts in
+/// (days, a timestamp's unit, a decimal's unscaled value). A column without
+/// a value, or with one that does not fit, leaves them free.
 fn ranges(ends: &mut Vec<(usize, String, i64)>, at: usize, batches: &[RecordBatch], mins: &[Option<String>], maxs: &[Option<String>]) {
-    use datafusion::arrow::array::{Array, Int64Array};
+    use datafusion::arrow::array::{Array, AsArray, Int64Array};
     use datafusion::arrow::compute::{CastOptions, cast_with_options, max, min};
-    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::datatypes::{DataType, Decimal128Type};
     let strict = CastOptions { safe: false, ..Default::default() };
     'columns: for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
         let (Some(lo), Some(hi)) = (lo, hi) else { continue };
         let mut seen: Option<(i64, i64)> = None;
         for b in batches {
-            let Ok(column) = cast_with_options(b.column(j), &DataType::Int64, &strict) else { continue 'columns };
-            let Some(column) = column.as_any().downcast_ref::<Int64Array>() else { continue 'columns };
-            if let (Some(a), Some(z)) = (min(column), max(column)) {
+            let column = b.column(j);
+            let ends = if let DataType::Decimal128(..) = column.data_type() {
+                // Casting would rescale; the unscaled values are the raw ones.
+                let column = column.as_primitive::<Decimal128Type>();
+                match (min(column), max(column)) {
+                    (Some(a), Some(z)) => match (i64::try_from(a), i64::try_from(z)) {
+                        (Ok(a), Ok(z)) => Some((a, z)),
+                        _ => continue 'columns,
+                    },
+                    _ => None,
+                }
+            } else {
+                let Ok(column) = cast_with_options(column, &DataType::Int64, &strict) else { continue 'columns };
+                let Some(column) = column.as_any().downcast_ref::<Int64Array>() else { continue 'columns };
+                min(column).zip(max(column))
+            };
+            if let Some((a, z)) = ends {
                 seen = Some(seen.map_or((a, z), |(x, y)| (x.min(a), y.max(z))));
             }
         }

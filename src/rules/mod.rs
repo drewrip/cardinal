@@ -7,9 +7,10 @@
 //!   known of their rows (value domains, keys, the stored table they are
 //!   rows of).
 //! - **Output**: the operator's relation. That is fresh variables (`X`, the
-//!   output cardinality; per column `ndv`, and `min` and `max` for integer
-//!   columns some range or key reads) and Z3 assertions relating them to
-//!   the inputs' (`l`, `r`).
+//!   output cardinality; per column `ndv`, and `min` and `max` for integer,
+//!   date, timestamp and decimal columns some range or key reads, related
+//!   only between columns of one unit and scale) and Z3 assertions relating
+//!   them to the inputs' (`l`, `r`).
 //! - **Guarantees**: every assertion holds for every execution of the
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
@@ -158,7 +159,12 @@ use crate::origin::Origin;
 
 impl<'a> Analyzer<'a> {
     /// Every non-NULL value of `o`'s column `j` is one of `l`'s column `i`.
+    /// Their ends relate only if they count in one unit: a cast of an
+    /// integer to a decimal keeps the value, not the count.
     pub(crate) fn within(&self, o: &Rel, j: usize, l: &Rel, i: usize) {
+        if o.unit[j] != l.unit[i] {
+            return;
+        }
         if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
             self.assert(a.ge(b));
         }
@@ -183,6 +189,9 @@ impl<'a> Analyzer<'a> {
         for conj in split_conjunction(predicate) {
             let Expr::BinaryExpr(BinaryExpr { left, op, right }) = conj else { continue };
             let (Some(a), Some(b)) = (index(left), index(right)) else { continue };
+            if o.unit[a] != o.unit[b] {
+                continue;
+            }
             let lo_hi = |i: usize| (o.min[i].as_ref().unwrap(), o.max[i].as_ref().unwrap());
             // Each `x` is below a `y` (by one, `strict`ly).
             let below = |x: usize, y: usize, strict: bool| {
@@ -398,6 +407,9 @@ impl<'a> Analyzer<'a> {
                 }
                 // Each value is one of some input's.
                 for j in 0..o.min.len() {
+                    if inputs.iter().any(|r| r.unit.get(j) != Some(&o.unit[j])) {
+                        continue;
+                    }
                     let ends = |ends: fn(&Rel) -> &Vec<Option<Int>>| -> Option<Vec<Int>> {
                         inputs.iter().map(|r| ends(r).get(j).cloned().flatten()).collect()
                     };

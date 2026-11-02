@@ -440,7 +440,9 @@ impl<'a> Analyzer<'a> {
                 JoinType::Inner => {
                     self.within(o, ia, r, ib);
                     self.within(o, nl + ib, l, ia);
-                    if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib]) {
+                    if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib])
+                        && o.unit[ia] == o.unit[nl + ib]
+                    {
                         self.assert(a_lo.eq(b_lo));
                         self.assert(a_hi.eq(b_hi));
                     }

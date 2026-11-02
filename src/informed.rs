@@ -24,7 +24,7 @@ use datafusion::logical_expr::Expr;
 use serde::{Deserialize, Serialize};
 use z3::ast::{Bool, Int, Real};
 
-use crate::analysis::Node;
+use crate::analysis::{Node, Unit, unit};
 use crate::bounds::{Bounds, Search, SearchStats};
 use crate::rows::contain::{fewer, groups_among, renamed};
 use crate::rows::logical::Logical;
@@ -901,6 +901,12 @@ impl<'a> Lookup<'a> {
                 }
                 for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
                     let Some(Some(e @ Expr::Column(_))) = self.logical.lineage[i].get(j) else { continue };
+                    // Facts read ends off integer literals: they count as an
+                    // integer column's values do, not a date's or decimal's.
+                    let schema = node.plan.schema();
+                    if j >= schema.fields().len() || unit(schema.field(j).data_type()) != Some(Unit::Int) {
+                        continue;
+                    }
                     let key = Term::new(e.clone());
                     let ends = [
                         (lo, FactKind::Min { key: key.clone(), over: ctx.clone() }, true),
