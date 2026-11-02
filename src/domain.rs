@@ -663,6 +663,24 @@ impl Facts {
         self.add(b, both, schema);
     }
 
+    /// Where `e` takes values in `d`, the values of what it is computed
+    /// from, through each step that is a function of one integer `x`:
+    /// `x ± k`, `k − x`, `x · k` for `k > 0`, and casts that scale an integer
+    /// or decimal up (`x · 10ⁿ`). So `a + 1 < 5` bounds `a`, and
+    /// `CAST(d AS DECIMAL(30, 15)) <= 0.125` bounds `d` at its own scale.
+    /// DataFusion's simplifier unwraps casts it can, but moves no constant
+    /// across a comparison. Arithmetic may wrap: an `x` whose result leaves
+    /// its type is kept, whatever `d`.
+    fn preimages(&self, e: &Expr, d: &Dom, schema: &DFSchema) -> Vec<(Expr, Dom)> {
+        let mut out = vec![];
+        let (mut e, mut d) = (normalize(e, schema), d.clone());
+        while let Some((x, dx)) = preimage(&e, &d, schema) {
+            out.push((x.clone(), dx.clone()));
+            (e, d) = (normalize(&x, schema), dx);
+        }
+        out
+    }
+
     /// Facts that hold on every row where `p` is TRUE, over `self`'s rows.
     fn implied(&self, p: &Expr, schema: &DFSchema) -> Facts {
         let mut out = Facts::default();
@@ -715,7 +733,12 @@ impl Facts {
                         _ => return out,
                     };
                     if let Some(d) = compare(e, op, lit, schema) {
+                        for (x, dx) in self.preimages(e, &d, schema) {
+                            add(&x, dx);
+                        }
                         add(e, d);
+                    } else if let Some((x, d)) = float_compare(e, op, lit, schema) {
+                        add(&x, d);
                     } else if op == Operator::NotEq
                         && literal_fits(e, lit, schema)
                         && let Some(k) = key(lit)
@@ -737,7 +760,11 @@ impl Facts {
                     && let Some(a) = compare(expr, Operator::GtEq, lo, schema)
                     && let Some(b) = compare(expr, Operator::LtEq, hi, schema)
                 {
-                    add(expr, a.intersect(&b));
+                    let d = a.intersect(&b);
+                    for (x, dx) in self.preimages(expr, &d, schema) {
+                        add(&x, dx);
+                    }
+                    add(expr, d);
                 }
             }
             Expr::InList(list) if !list.negated => {
@@ -755,6 +782,9 @@ impl Facts {
                 let d = doms.map_or_else(Dom::non_null, |ds| {
                     ds.iter().fold(Dom::nothing(), |acc, d| acc.union(d))
                 });
+                for (x, dx) in self.preimages(e, &d, schema) {
+                    add(&x, dx);
+                }
                 add(e, d);
             }
             Expr::IsNull(e) => add(e, Dom::null_only()),
@@ -860,6 +890,177 @@ fn compare(e: &Expr, op: Operator, lit: &ScalarValue, schema: &DFSchema) -> Opti
     })
 }
 
+/// One step of [`Facts::preimages`]: `e` as an increasing or decreasing
+/// function of one integer expression `x`, and the values of `x` that give
+/// values in `d`, or that overflow.
+fn preimage(e: &Expr, d: &Dom, schema: &DFSchema) -> Option<(Expr, Dom)> {
+    use Operator::*;
+    let (x, step) = match e {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            let (x, k, k_right) = match (&**left, &**right) {
+                (x, Expr::Literal(v, _)) => (x, v, true),
+                (Expr::Literal(v, _), x) => (x, v, false),
+                _ => return None,
+            };
+            if !k.data_type().is_integer() || !x.get_type(schema).ok()?.is_integer() {
+                return None;
+            }
+            let Some(Key::Int(k)) = key(k) else { return None };
+            match (op, k_right) {
+                (Plus, _) => (x, Step::Add(k)),
+                (Minus, true) => (x, Step::Add(k.checked_neg()?)),
+                (Minus, false) => (x, Step::Sub(k)),
+                (Multiply, _) if k > 0 => (x, Step::Mul(k)),
+                _ => return None,
+            }
+        }
+        // A cast scaling up by a power of ten, keeping every value.
+        Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field }) => {
+            let from = expr.get_type(schema).ok()?;
+            let (s, t) = match (&from, field.data_type()) {
+                (f, to @ DataType::Decimal128(_, t)) if f.is_integer() && crate::rules::injective_cast(f, to) => (0, *t),
+                // Room for every integer digit, at a scale at least as fine.
+                (DataType::Decimal128(p, s), DataType::Decimal128(q, t)) if t >= s && i16::from(*q) - i16::from(*t) >= i16::from(*p) - i16::from(*s) => (*s, *t),
+                _ => return None,
+            };
+            (&**expr, Step::Scale(10i128.checked_pow(u32::try_from(t - s).ok()?)?))
+        }
+        _ => return None,
+    };
+    // `x`'s values are those of the expression under its widening casts.
+    let (xt, et) = (normalize(x, schema).get_type(schema).ok()?, e.get_type(schema).ok()?);
+    let x_range = match &xt {
+        t if t.is_integer() => int_range(t)?,
+        DataType::Decimal128(p, _) => {
+            let m = 10i128.checked_pow(u32::from(*p))? - 1;
+            (-m, m)
+        }
+        _ => return None,
+    };
+    // The values `e`'s type holds: a cast keeps every value by its kind.
+    let e_range = match (&step, &et) {
+        (Step::Scale(_), _) => None,
+        (_, t) => Some(int_range(t)?),
+    };
+    let apply = |v: i128| match step {
+        Step::Add(k) => v.checked_add(k),
+        Step::Sub(k) => k.checked_sub(v),
+        Step::Mul(k) | Step::Scale(k) => v.checked_mul(k),
+    };
+    // Each value of `x` maps to one of `e`, in order (or reversed by `Sub`).
+    let back = |lo: Option<i128>, hi: Option<i128>| -> Option<Dom> {
+        let (lo, hi) = match step {
+            Step::Add(k) => (lo.map(|v| v - k), hi.map(|v| v - k)),
+            Step::Sub(k) => (hi.map(|v| k - v), lo.map(|v| k - v)),
+            Step::Mul(k) | Step::Scale(k) => (lo.map(|v| v.div_euclid(k) + i128::from(v.rem_euclid(k) != 0)), hi.map(|v| v.div_euclid(k))),
+        };
+        Some(Dom::range(lo, hi))
+    };
+    let mut dx = match &d.vals {
+        Vals::Range(lo, hi) => back(*lo, *hi)?,
+        Vals::Set(keys) => Dom::set(
+            keys.iter()
+                .map(|k| match k {
+                    Key::Int(v) => Some(back(Some(*v), Some(*v))?.vals),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .flat_map(|v| match v {
+                    Vals::Set(s) => s,
+                    _ => BTreeSet::new(),
+                }),
+        ),
+        _ => return None,
+    };
+    dx = dx.intersect(&Dom::range(Some(x_range.0), Some(x_range.1)));
+    // Values of `x` whose result leaves `e`'s type wrap around: keep them.
+    if let Some((emin, emax)) = e_range {
+        let wraps = |v: i128| apply(v).is_none_or(|r| r < emin || r > emax);
+        let (lo_wraps, hi_wraps) = (wraps(x_range.0), wraps(x_range.1));
+        if lo_wraps || hi_wraps {
+            // `e` is monotone in `x`, so the values that wrap lie at either
+            // end, around one that maps to 0 (or near it) and does not.
+            let pivot = match step {
+                Step::Add(k) => -k,
+                Step::Sub(k) => k,
+                Step::Mul(_) | Step::Scale(_) => 0,
+            }
+            .clamp(x_range.0, x_range.1);
+            if wraps(pivot) {
+                return None;
+            }
+            if lo_wraps {
+                let safe = first(x_range.0, pivot, |v| !wraps(v))?;
+                dx = dx.union(&Dom::range(Some(x_range.0), Some(safe - 1)));
+            }
+            if hi_wraps {
+                let safe = first_down(x_range.1, pivot, |v| !wraps(v))?;
+                dx = dx.union(&Dom::range(Some(safe + 1), Some(x_range.1)));
+            }
+        }
+    }
+    Some((x.clone(), if d.null { dx.with_null() } else { dx }))
+}
+
+/// A step of [`preimage`]: `x + k`, `k − x`, `x · k` (`k > 0`), or a
+/// cast multiplying the raw value by `k`.
+#[derive(Clone, Copy)]
+enum Step {
+    Add(i128),
+    Sub(i128),
+    Mul(i128),
+    Scale(i128),
+}
+
+/// The least `v` in `lo..=hi` where `ok` holds, which it does from some
+/// point on, and at `hi`.
+fn first(mut lo: i128, mut hi: i128, ok: impl Fn(i128) -> bool) -> Option<i128> {
+    if !ok(hi) {
+        return None;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if ok(mid) { hi = mid } else { lo = mid + 1 }
+    }
+    Some(lo)
+}
+
+/// The greatest `v` in `lo..=hi` where `ok` holds, which it does up to
+/// some point, and at `lo`.
+fn first_down(hi: i128, lo: i128, ok: impl Fn(i128) -> bool) -> Option<i128> {
+    first(-hi, -lo, |v| ok(-v)).map(|v| -v)
+}
+
+/// `x op v` for a cast of an integer `x` to a float that keeps its value,
+/// and a finite float `v`: the integers `x` passing, as `x`'s domain.
+fn float_compare(e: &Expr, op: Operator, lit: &ScalarValue, schema: &DFSchema) -> Option<(Expr, Dom)> {
+    let (Expr::Cast(Cast { expr, field }) | Expr::TryCast(TryCast { expr, field })) = e else { return None };
+    let from = expr.get_type(schema).ok()?;
+    if !from.is_integer() || !field.data_type().is_floating() || !crate::rules::injective_cast(&from, field.data_type()) {
+        return None;
+    }
+    let v = match lit {
+        ScalarValue::Float32(Some(v)) => f64::from(*v),
+        ScalarValue::Float64(Some(v)) => *v,
+        _ => return None,
+    };
+    if !v.is_finite() || v.abs() >= 1e30 {
+        return None;
+    }
+    let (fl, ce) = (v.floor() as i128, v.ceil() as i128);
+    let d = match op {
+        Operator::Eq if fl == ce => Dom::set([Key::Int(fl)]),
+        Operator::Eq => Dom::nothing(),
+        Operator::Lt => Dom::range(None, Some(ce - 1)),
+        Operator::LtEq => Dom::range(None, Some(fl)),
+        Operator::Gt => Dom::range(Some(fl + 1), None),
+        Operator::GtEq => Dom::range(Some(ce), None),
+        _ => return None,
+    };
+    Some((normalize(expr, schema), d))
+}
+
 /// True if a literal compared with `e` is compared as a value of `e`'s type,
 /// so that its key means the same as `e`'s values' keys.
 fn literal_fits(e: &Expr, lit: &ScalarValue, schema: &DFSchema) -> bool {
@@ -957,6 +1158,7 @@ fn normalize(e: &Expr, schema: &DFSchema) -> Expr {
 fn widening(from: &DataType, to: &DataType) -> bool {
     use DataType::*;
     from == to
+        || matches!((from, to), (Decimal128(p, s), Decimal128(q, t)) if s == t && q >= p)
         || matches!(
             (from, to),
             (Int8, Int16 | Int32 | Int64)
@@ -1056,5 +1258,50 @@ mod tests {
         assert_eq!(wide.union(&s).size(), Some(1001));
         assert_eq!(wide.union(&Dom::set([Key::Int(2000)])).size(), Some(2001));
         assert_eq!(Dom::set([Key::Str("a".into())]).union(&wide), Dom::non_null());
+    }
+
+    /// The domain of column `c` after assuming `p` over columns `a`
+    /// (Int64), `i` (Int32), `n` (Int8) and `d` (Decimal(15, 2)).
+    fn assumed(p: Expr, c: &str) -> Dom {
+        use datafusion::arrow::datatypes::{Field, Schema};
+        let fields = [("a", DataType::Int64), ("i", DataType::Int32), ("n", DataType::Int8), ("d", DataType::Decimal128(15, 2))];
+        let schema = Schema::new(fields.map(|(n, t)| Field::new(n, t, true)).to_vec());
+        let schema = DFSchema::try_from_qualified_schema("t", &schema).unwrap();
+        let mut f = Facts::default();
+        f.assume(&p, &schema);
+        f.dom(&datafusion::prelude::col(format!("t.{c}")), &schema)
+    }
+
+    #[test]
+    fn comparisons_bound_what_they_compute_from() {
+        use datafusion::prelude::{cast, col, lit};
+        let dec = |v: i128, p: u8, s: i8| lit(ScalarValue::Decimal128(Some(v), p, s));
+        let ints = |lo: i128, hi: i128| Dom::range(Some(lo), Some(hi));
+        let wide = || cast(col("t.i"), DataType::Int64);
+        // a + 1 < 5, as DataFusion widens it.
+        assert_eq!(assumed((cast(col("t.i"), DataType::Int64) + lit(1i64)).lt(lit(5i64)), "i"), ints(i32::MIN as i128, 3));
+        assert_eq!(assumed((lit(10i64) - col("t.a")).gt_eq(lit(4i64)), "a").int_range().1, Some(6));
+        assert_eq!(assumed((wide() * lit(3i64)).lt_eq(lit(10i64)), "i").int_range().1, Some(3));
+        assert_eq!(assumed((wide() * lit(3i64)).in_list(vec![lit(3i64), lit(4i64), lit(9i64)], false), "i").size(), Some(2));
+        // DataFusion's arithmetic wraps: an Int64 times 3 may wrap anywhere.
+        assert_eq!(assumed((col("t.a") * lit(3i64)).lt_eq(lit(10i64)), "a").int_range().1, Some(i64::MAX as i128));
+        assert_eq!(assumed((wide() + lit(2i64)).between(lit(0i64), lit(10i64)), "i"), ints(-2, 8));
+        // Wrapping keeps every value that may wrap into the range.
+        let wrapped = assumed((col("t.n") + lit(100i8)).lt(lit(0i8)), "n");
+        assert!(ints(28, 127).intersect(&wrapped) == ints(28, 127));
+        // More precision at one scale is the same value.
+        assert_eq!(assumed(cast(col("t.d"), DataType::Decimal128(20, 2)).lt(dec(300, 20, 2)), "d").int_range().1, Some(299));
+        // A decimal compared at a finer scale: d <= 0.125 is d <= 0.12.
+        let finer = cast(col("t.d"), DataType::Decimal128(30, 15));
+        assert_eq!(assumed(finer.clone().lt_eq(dec(125_000_000_000_000, 30, 15)), "d").int_range().1, Some(12));
+        assert_eq!(assumed(finer.clone().gt(dec(125_000_000_000_000, 30, 15)), "d").int_range().0, Some(13));
+        assert!(assumed(finer.eq(dec(125_000_000_000_000, 30, 15)), "d").is_empty());
+        // An integer compared with a float.
+        let float = cast(col("t.i"), DataType::Float64);
+        assert_eq!(assumed(float.clone().lt(lit(2.5f64)), "i").int_range().1, Some(2));
+        assert_eq!(assumed(float.clone().gt_eq(lit(2.5f64)), "i").int_range().0, Some(3));
+        assert_eq!(assumed(float.lt(lit(2.0f64)), "i").int_range().1, Some(1));
+        // Same-scale decimals already count: 0.05 ..= 0.07 is 3 values.
+        assert_eq!(assumed(col("t.d").between(dec(5, 15, 2), dec(7, 15, 2)), "d").size(), Some(3));
     }
 }
