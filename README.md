@@ -837,8 +837,10 @@ selector dims every constraint the chosen proof does not need.
 `validate` evaluates the plan bottom-up, running each operator over its
 children's materialized output. It never runs DML or DDL. It pins every real
 cardinality and NDV onto the constraints and reports the first operator whose
-real counts are unsatisfiable. The benchmark and fuzzer use it, and also check
-every claimed bound against real row counts.
+real counts are unsatisfiable. It also checks each functional dependency a rule
+relied on against its operator's rows, and reports one they break first, with
+the counts that show it. The benchmark and fuzzer use it, and also check every
+claimed bound against real row counts.
 
 With selectivities enabled it also measures each one from the execution: the
 operator's rows over its input's, and for outer and anti joins the counts of

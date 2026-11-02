@@ -133,6 +133,11 @@ pub(crate) struct Analyzer<'a> {
     pub(crate) next_frame: usize,
     /// The node each finished frame became.
     pub(crate) frame_node: HashMap<usize, usize>,
+    /// The node each visited plan became, by its address ([`address`]).
+    pub(crate) node_at: HashMap<usize, usize>,
+    /// Dependencies the rules relied on, by plan address, not yet given to
+    /// their node.
+    pub(crate) relied: RefCell<Vec<(usize, Dependency)>>,
     /// The names of the columns that get min and max variables
     /// ([`ranged_columns`]).
     pub(crate) ranged: BTreeSet<String>,
@@ -174,6 +179,23 @@ pub(crate) struct Node {
     /// The raw scan's, for a base scan with pushed-down filters.
     pub(crate) raw_min_vars: Vec<Option<String>>,
     pub(crate) raw_max_vars: Vec<Option<String>>,
+    /// The functional dependencies the rules relied on among the output
+    /// columns, for [`crate::Analysis::validate`] to check.
+    pub(crate) dependencies: Vec<Dependency>,
+}
+
+/// Rows agreeing on `on` (output positions, NULLs equal) agree on these
+/// columns too, or are one row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Dependency {
+    pub on: Vec<usize>,
+    pub determines: Determines,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Determines {
+    Columns(Vec<usize>),
+    Row,
 }
 
 /// True if `scan`'s provider may return rows that fail its pushed filters:
@@ -282,6 +304,8 @@ impl<'a> Analyzer<'a> {
             owners: Vec::new(),
             next_frame: 0,
             frame_node: HashMap::new(),
+            node_at: HashMap::new(),
+            relied: RefCell::new(Vec::new()),
             ranged: BTreeSet::new(),
             raw_ranges: Default::default(),
         }
@@ -448,7 +472,18 @@ impl<'a> Analyzer<'a> {
             max_vars: range_names(&out.max),
             raw_min_vars,
             raw_max_vars,
+            dependencies: vec![],
         });
+        self.node_at.insert(address(plan), self.nodes.len() - 1);
+        // Those of plans not yet visited wait for them; those of plans never
+        // visited (rewritten copies) are dropped at the end.
+        for (at, d) in std::mem::take(&mut *self.relied.borrow_mut()) {
+            match self.node_at.get(&at) {
+                Some(&id) if !self.nodes[id].dependencies.contains(&d) => self.nodes[id].dependencies.push(d),
+                Some(_) => {}
+                None => self.relied.borrow_mut().push((at, d)),
+            }
+        }
         self.owners.pop();
         self.frame_node.insert(frame, self.nodes.len() - 1);
         self.frontier.push(self.nodes.len() - 1);
@@ -525,6 +560,12 @@ impl<'a> Analyzer<'a> {
 /// Output column `i` of `plan`, as an expression.
 fn key_col(plan: &LogicalPlan, i: usize) -> Expr {
     Expr::Column(Column::from(plan.schema().qualified_field(i)))
+}
+
+/// The address of a plan node, which identifies it while the plan is
+/// borrowed.
+pub(crate) fn address(plan: &LogicalPlan) -> usize {
+    plan as *const LogicalPlan as usize
 }
 
 /// Integers, and dates as days: the columns with min and max variables.

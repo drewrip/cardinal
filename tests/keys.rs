@@ -290,3 +290,19 @@ async fn observed_plans_see_declared_keys() {
     assert_ne!(bounds(false).await, "X <= |facts|");
 }
 
+
+/// Validation checks each dependency the rules relied on against the rows:
+/// data breaking a declared key breaks the grouping's reduction to it.
+#[tokio::test]
+async fn validation_checks_the_dependencies_relied_on() {
+    let ctx = SessionContext::new();
+    for sql in ["CREATE TABLE dup (id INT NOT NULL PRIMARY KEY, x INT)", "INSERT INTO dup VALUES (1, 1), (1, 2), (2, 3)"] {
+        ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    }
+    let sql = "SELECT id, x FROM dup GROUP BY id, x";
+    let a = analyze_sql_with(&ctx, sql, Options::default()).await.unwrap();
+    let v = a.validate(&ctx).await.unwrap();
+    assert!(v.violation.as_ref().is_some_and(|op| op.contains("determine")), "{:?}", v.violation);
+    // Data keeping the key, every dependency holds.
+    analyze(&sql.replace("dup", "dims").replace(", x", ", category"), vec![]).await;
+}

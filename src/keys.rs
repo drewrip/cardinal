@@ -7,7 +7,7 @@ use datafusion::common::{Column, Constraint, JoinType, NullEquality};
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 
-use crate::analysis::{Analyzer, ScanKind};
+use crate::analysis::{Analyzer, Dependency, Determines, ScanKind, address};
 use crate::rules::{
     child_column, column_index, determined, equalities, exact_index, key_column, output_indices, pinned, same_positions, scan_pinned,
     strip_alias, with_equalities,
@@ -464,9 +464,15 @@ impl<'a> Analyzer<'a> {
         }
         let closed: Vec<Column> =
             self.fd_closure(plan, keys).into_iter().map(|i| Column::from(plan.schema().qualified_field(i))).collect();
-        if self.covers_key(plan, &closed, Nulls::Equal) {
-            return true;
+        let determines = self.covers_key(plan, &closed, Nulls::Equal) || self.determines_key_below(plan, keys);
+        if determines {
+            self.rely(plan, Dependency { on: keys.to_vec(), determines: Determines::Row });
         }
+        determines
+    }
+
+    /// [`Self::determines_key`] of the columns `keys` are of `plan`'s input.
+    fn determines_key_below(&self, plan: &LogicalPlan, keys: &[usize]) -> bool {
         match plan {
             LogicalPlan::Projection(p) => {
                 let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&p.input, &p.expr[k])).collect();
@@ -507,7 +513,15 @@ impl<'a> Analyzer<'a> {
                 keys = rest;
             }
         }
+        if keys.len() < cols.len() {
+            self.rely(plan, Dependency { on: keys.clone(), determines: Determines::Columns(cols.to_vec()) });
+        }
         keys
+    }
+
+    /// Notes that a rule relied on `d` holding in `plan`'s rows.
+    fn rely(&self, plan: &LogicalPlan, d: Dependency) {
+        self.relied.borrow_mut().push((address(plan), d));
     }
 }
 
