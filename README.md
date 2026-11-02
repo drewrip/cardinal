@@ -1,16 +1,20 @@
 # cardinal
 
-Statically proves claims about a SQL query's output cardinality, with no data.
+Proves bounds on a SQL query's output cardinality, with no data, or with facts
+read off plans that ran.
 
 Requires Z3 (`brew install z3`; paths in `.cargo/config.toml`).
 
 ## Usage
 
 ```rust
-let a = cardinal::analyze_sql(&ctx, sql).await?;
-a.verdict;                // Reduces | MightGrow(counterexample) | Unknown
-a.bounds()?;              // e.g. "X <= |nation|; X <= 1/2·Σ"
+let a = cardinal::analyze_sql(&ctx, sql, Options::default()).await?;
+a.bounds()?;              // e.g. "X <= 25" or "3 <= X <= 25"
 a.validate(&ctx).await?;  // check the constraints against real data
+
+// With facts from profiled plans; one `Facts` serves many analyses:
+let facts = cardinal::Facts::new(fact_set);
+a.with_facts(&facts)?.bounds()?;
 
 // As DuckDB or PostgreSQL planned it, from EXPLAIN (FORMAT JSON) output:
 let a = cardinal::analyze_duckdb(&catalog, &explain_json, Some(sql), options)?;

@@ -1,6 +1,5 @@
 //! A dump as text: the plan tree with each node's constraints under it, then
-//! each proof and the constraints it needs, and with facts, which were used
-//! and which not.
+//! each proof and the constraints it needs, and with facts, which were used.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -34,14 +33,13 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     let mut out = String::new();
     let w = &mut out;
     let _ = writeln!(w, "Query:   {}", dump.query.trim());
-    let _ = writeln!(w, "Verdict: {}", dump.verdict);
     if let Some(b) = &dump.bounds {
         let _ = writeln!(w, "Bounds:  {b}");
     }
     if let Some(f) = facts {
         let n = t.constraints.iter().filter(|c| c.fact.is_some()).count();
         let _ = writeln!(w, "With facts: {}", f.bounds.as_deref().unwrap_or("not computed"));
-        let _ = writeln!(w, "Facts:   {}, {n} fact constraints, X = {}", f.mode, f.report.output);
+        let _ = writeln!(w, "Facts:   {n} fact constraints");
     }
     let _ = writeln!(w, "Root:    {}   ({} nodes, {} constraints)", t.root, t.nodes.len(), t.constraints.len());
 
@@ -128,13 +126,7 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
         let _ = writeln!(w, "  (--proof NAME shows one proof's constraints)");
     }
     if let Some(f) = facts {
-        facts_sections(w, f);
-    }
-    if let Some(ce) = &dump.counterexample {
-        let _ = writeln!(w, "\nCounterexample:");
-        for (k, v) in ce {
-            let _ = writeln!(w, "  {k:<28} {v}");
-        }
+        facts_sections(w, t, f);
     }
     Ok(out)
 }
@@ -147,12 +139,16 @@ fn needs(p: &Proof) -> String {
     }
 }
 
-/// Which facts were used, which not and why, and which conflict.
-fn facts_sections(w: &mut String, f: &FactsDump) {
-    let r = &f.report;
-    let _ = writeln!(w, "\nFacts used:");
-    for m in &r.matched {
-        let from: Vec<String> = m
+/// Which facts were used, and which conflict.
+fn facts_sections(w: &mut String, t: &Trace, f: &FactsDump) {
+    let _ = writeln!(w, "\nFacts used (marked ◆ in the tree):");
+    let used: Vec<&Constraint> = t.constraints.iter().filter(|c| c.fact.is_some()).collect();
+    if used.is_empty() {
+        let _ = writeln!(w, "  (none)");
+    }
+    for c in used {
+        let info = c.fact.as_ref().unwrap();
+        let from: Vec<String> = info
             .facts
             .iter()
             .map(|x| match x.origins.is_empty() {
@@ -160,25 +156,7 @@ fn facts_sections(w: &mut String, f: &FactsDump) {
                 false => format!("{} [{}]", x.text, x.origins.join(", ")),
             })
             .collect();
-        let _ = writeln!(w, "  {:<6} = {:<12} from {}", m.name, m.value, from.join(", "));
-    }
-    let counts = [("pinned", r.pinned.len()), ("capped", r.capped.len()), ("ndv", r.pinned_ndv.len()), ("ranges", r.ranges.len()), ("floors", r.floors.len())];
-    let counts: Vec<String> = counts.iter().filter(|(_, n)| *n > 0).map(|(k, n)| format!("{n} {k}")).collect();
-    if !counts.is_empty() {
-        let _ = writeln!(w, "  row counts: {} (marked ◆ in the tree)", counts.join(", "));
-    }
-    let _ = writeln!(w, "\nFacts not used:");
-    if r.rejected.is_empty() && r.unchecked.is_empty() && r.unmatched.is_empty() {
-        let _ = writeln!(w, "  (none)");
-    }
-    for (s, why) in &r.rejected {
-        let _ = writeln!(w, "  rejected   {s}: {why}");
-    }
-    for s in &r.unchecked {
-        let _ = writeln!(w, "  unchecked  {s}: not decided in time");
-    }
-    for (s, why) in &r.unmatched {
-        let _ = writeln!(w, "  unmatched  {s}: {why}");
+        let _ = writeln!(w, "  {:<12} {:<28} {:<14} from {}", info.source, readable(t, &c.vars.join(", ")), info.value, from.join(", "));
     }
     if !f.conflicts.is_empty() {
         let _ = writeln!(w, "\nConflicts (left out):");
@@ -217,7 +195,7 @@ fn tree(
     let label = n.label.lines().next().unwrap_or("");
     let constraints: Vec<&Constraint> = t.of_node(id).filter(|c| shown(c)).collect();
     let count = if brief { format!("  ({} constraints)", constraints.len()) } else { String::new() };
-    let _ = writeln!(w, "{prefix}{branch}{mark}[{id}] {label}   {}{}{count}", n.var, values(n, facts));
+    let _ = writeln!(w, "{prefix}{branch}{mark}[{id}] {label}   {}{}{count}", n.var, values(n, t, facts.is_some()));
     let child_prefix = if prefix.is_empty() {
         "   ".to_string()
     } else {
@@ -235,14 +213,20 @@ fn tree(
 }
 
 /// The row counts facts pin or cap node `n`'s variables to, e.g.
-/// `  = 6001215`.
-fn values(n: &cardinal::TraceNode, facts: Option<&FactsDump>) -> String {
-    let Some(f) = facts else { return String::new() };
+/// `  op3_Scan_lineitem = 6001215`, if `facts` are shown.
+fn values(n: &cardinal::TraceNode, t: &Trace, facts: bool) -> String {
+    if !facts {
+        return String::new();
+    }
     let vars: Vec<&str> = std::iter::once(n.var.as_str()).chain(n.raw_var.as_deref()).collect();
     let mut out = String::new();
-    for (list, op) in [(&f.report.pinned, "="), (&f.report.capped, "<=")] {
-        for (v, k) in list.iter().filter(|(v, _)| vars.contains(&v.as_str())) {
-            let _ = write!(out, "  {v} {op} {k}");
+    for c in t.of_node(n.id) {
+        if let Some(f) = &c.fact
+            && matches!(f.source.as_str(), "pinned rows" | "row cap")
+            && let [v] = &c.vars[..]
+            && vars.contains(&v.as_str())
+        {
+            let _ = write!(out, "  {v} {}", f.value);
         }
     }
     out

@@ -10,15 +10,13 @@
 //! query is then analyzed by DataFusion, over empty tables of the same schema
 //! with the DAG's views defined as views (so that a view reads, as DuckDB's
 //! plans do, its definition over the stored tables), and bounded without
-//! facts, with the TABLE models' facts as selectivities only (`Ratios`), and
-//! with their row counts and bounds too (`Pinned`). Each must hold the view's
-//! true row count, and no fact may be rejected.
+//! facts and with the TABLE models'. Both must hold the view's true row
+//! count.
 //!
 //! `CARDINAL_DAG_BENCH` is the checkout (default `~/dag-bench`),
 //! `CARDINAL_DAG_ONLY` a substring of the projects to run, and
-//! `CARDINAL_DAG_SHOW` (any value) prints every fact and bound, and
-//! `CARDINAL_DAG_FORMULAS` each view's selectivity formula, and the formula
-//! with the facts put in. `CARDINAL_DAG_PLANNER` is how views are planned:
+//! `CARDINAL_DAG_SHOW` (any value) prints every fact and bound.
+//! `CARDINAL_DAG_PLANNER` is how views are planned:
 //! `datafusion` (the default), `duckdb` (DuckDB's `EXPLAIN (FORMAT JSON)` of
 //! the view's query, analyzed as DuckDB planned it), or `both`. Every
 //! model's query is read with the VIEW models it reads inlined.
@@ -51,7 +49,7 @@ use std::sync::Arc;
 
 use cardinal::facts::{Fact, FactKind, FactSet, Ratio};
 use cardinal::observed::Catalog;
-use cardinal::{FactMode, ForeignKey, Options};
+use cardinal::{Bounds, Facts, ForeignKey, Options};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::common::{Constraint, Constraints};
 use datafusion::datasource::MemTable;
@@ -349,28 +347,6 @@ async fn context(dag: &Dag) -> (SessionContext, Vec<String>, Vec<ForeignKey>) {
     (ctx, undefined, foreign)
 }
 
-/// What `kind` is, if it is simple to estimate from the stored tables: the
-/// share of one table's rows a filter keeps (`filter`), of a join of two
-/// tables (`join`), of one table's rows with a partner in another (`semi
-/// join`), or a distinct count over one table (`ndv`). Each table may be
-/// filtered on its own columns.
-fn simple(kind: &FactKind) -> Option<&'static str> {
-    use cardinal::facts::{Context, Term};
-    let reads = |t: &Term| t.expr.column_refs().iter().filter_map(|c| c.relation.as_ref().map(|r| r.table().to_string())).collect::<BTreeSet<_>>();
-    let table = |c: &Context| matches!(c, Context::Spj { tables, atoms, exists, .. } if tables.len() == 1 && atoms.is_empty() && exists.is_empty());
-    match kind {
-        FactKind::Selectivity { pred, over: Context::Spj { tables, atoms, preds, exists } }
-            if tables.len() == 2 && atoms.is_empty() && exists.is_empty() && preds.iter().all(|p| reads(p).len() <= 1) =>
-        {
-            pred.iter().any(|p| reads(p).len() == 2).then_some("join")
-        }
-        FactKind::Selectivity { pred, over } if table(over) && pred.iter().all(|p| reads(p).len() <= 1) => Some("filter"),
-        FactKind::Match { kept, other, .. } if table(kept) && table(other) => Some("semi join"),
-        FactKind::Distinct { over, .. } if table(over) => Some("ndv"),
-        _ => None,
-    }
-}
-
 fn agrees(kind: &FactKind, value: Ratio, n: u64, of: Option<u64>) -> bool {
     match (kind, of) {
         (FactKind::Unique { .. }, Some(of)) => n == of,
@@ -529,34 +505,6 @@ fn dump(
     println!("  wrote {path}");
 }
 
-fn range(r: (u64, Option<u64>)) -> String {
-    match r.1 {
-        Some(hi) => format!("{}..={hi}", r.0),
-        None => format!("{}..", r.0),
-    }
-}
-
-fn holds(r: (u64, Option<u64>), truth: u64) -> bool {
-    r.0 <= truth && r.1.is_none_or(|hi| truth <= hi)
-}
-
-/// What an unmatched selectivity needed, by kind.
-fn miss(why: &str) -> &'static str {
-    let Some(fact) = why.strip_prefix("no fact for ") else {
-        return if why.starts_with("unresolved") { "terms that did not resolve" } else { "other" };
-    };
-    let over = fact.rsplit_once(" | ").map(|(_, o)| o).unwrap_or(fact);
-    let joined = over.contains(" × ") || over.contains("join");
-    match (fact.split('(').next().unwrap_or(""), joined) {
-        ("s", false) => "a filter's share of one table",
-        ("s", true) => "a share over joined rows",
-        ("m", _) => "a semi or anti join's match share",
-        ("ndv", false) => "distinct values of one table",
-        ("ndv", true) => "distinct values over joined rows",
-        _ => "a row count",
-    }
-}
-
 #[derive(Default, Clone)]
 struct Summary {
     tables: usize,
@@ -566,9 +514,6 @@ struct Summary {
     counted: usize,
     views: usize,
     bounded: usize,
-    required: usize,
-    matched: usize,
-    capped: usize,
     tighter: usize,
     exact: usize,
 }
@@ -615,7 +560,7 @@ async fn table_facts_bound_views() {
         let inlined = |m: &Model| inline(&m.sql, &views).unwrap_or_else(|| m.sql.clone());
 
         // The TABLE models' facts.
-        let mut facts = FactSet::default();
+        let mut set = FactSet::default();
         let mut table_rows: HashMap<String, u64> = HashMap::new();
         for m in dag.models.iter().filter(|m| m.table) {
             let mut ok = false;
@@ -628,7 +573,7 @@ async fn table_facts_bound_views() {
                         if p.nodes[p.root].counted {
                             table_rows.insert(m.name.clone(), p.nodes[p.root].rows);
                         }
-                        facts.observe(&p);
+                        set.observe(&p);
                         ok = true;
                     }
                     Err(e) if *variant == variants[0] => println!("  table {} not profiled: {}", m.name, e.lines().next().unwrap_or_default()),
@@ -637,8 +582,8 @@ async fn table_facts_bound_views() {
             }
             s.profiled += usize::from(ok);
         }
-        facts.close();
-        for c in &facts.conflicts {
+        let facts = Facts::new(set);
+        for c in &facts.set().conflicts {
             failures.push(format!("{}: conflict: {} = {} vs {}", dag.name, c.kind, c.values.0, c.values.1));
         }
         if std::env::var("CARDINAL_DAG_SHOW").is_ok() {
@@ -656,16 +601,16 @@ async fn table_facts_bound_views() {
                 q.dedup();
                 q.join(", ")
             };
-            for f in facts.iter() {
+            for f in facts.set().iter() {
                 println!("  fact  {f}    [{}]", from(f));
             }
-            for b in facts.bounds() {
+            for b in facts.set().bounds() {
                 println!("  bound {} <= {}    [{}]", b.kind, b.value, from(b));
             }
         }
-        let (wrong, counted, uncountable, slow) = check(&dag.engine, &catalog, &facts);
+        let (wrong, counted, uncountable, slow) = check(&dag.engine, &catalog, facts.set());
         failures.extend(wrong.into_iter().map(|w| format!("{}: {w}", dag.name)));
-        (s.facts, s.bounds, s.counted) = (facts.len(), facts.bounds().count(), counted);
+        (s.facts, s.bounds, s.counted) = (facts.set().len(), facts.set().bounds().count(), counted);
         println!(
             "  {} of {} tables profiled: {} facts and {} bounds; {counted} counted true, {uncountable} not countable, {slow} too slow to count",
             s.profiled,
@@ -679,10 +624,9 @@ async fn table_facts_bound_views() {
         let mut dumped: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
         for &planner in &planners {
             let mut s = base.clone();
-            let mut misses: BTreeMap<&str, usize> = BTreeMap::new();
             let mut skipped = vec![];
             println!("  planned by {planner}:");
-            println!("  {:<34} {:>10} {:>8} {:>6}  {:<16} {:<16} {:<16}", "view", "rows", "matched", "capped", "no facts", "ratios", "pinned");
+            println!("  {:<34} {:>10}  {:<20} {:<20}", "view", "rows", "no facts", "facts");
             for m in dag.models.iter().filter(|m| !m.table) {
                 // PostgreSQL may have only the tables: the views inlined.
                 let run = if postgres { inlined(m) } else { m.sql.clone() };
@@ -698,7 +642,7 @@ async fn table_facts_bound_views() {
                         continue;
                     }
                 };
-                let options = Options { selectivity: true, foreign_keys: foreign_keys.clone(), ..Default::default() };
+                let options = Options { foreign_keys: foreign_keys.clone(), ..Default::default() };
                 let analyzed = match planner {
                     // The view's query with the views it reads inlined, as
                     // the engine plans it: so its text says what the plan reads.
@@ -709,99 +653,32 @@ async fn table_facts_bound_views() {
                             let plan = dag.engine.read_plan(&catalog, &m.name, &j, &sql)?;
                             cardinal::analyze_observed(&catalog, &plan, options).map_err(|e| e.to_string())
                         }),
-                    _ => cardinal::analyze_sql_with(&ctx, &m.sql, options).await.map_err(|e| e.to_string()),
+                    _ => cardinal::analyze_sql(&ctx, &m.sql, options).await.map_err(|e| e.to_string()),
                 };
                 let a = match analyzed {
-                    Ok(a) if a.selectivity.is_some() => a,
-                    Ok(_) => {
-                        skipped.push(format!("{}: no selectivity formula", m.name));
-                        continue;
-                    }
+                    Ok(a) => a,
                     Err(e) => {
                         skipped.push(format!("{}: not analyzed: {}", m.name, e.lines().next().unwrap_or_default()));
                         continue;
                     }
                 };
-                let (Ok(none), Ok(ratios), Ok(pinned)) = (
-                    a.with_facts(&FactSet::default(), FactMode::Pinned),
-                    a.with_facts(&facts, FactMode::Ratios),
-                    a.with_facts(&facts, FactMode::Pinned),
-                ) else {
-                    skipped.push(format!("{}: facts not applied", m.name));
+                let (Ok(plain), Ok(with)) = (a.bounds(), a.with_facts(&facts).and_then(|a| a.bounds())) else {
+                    skipped.push(format!("{}: no bounds proven", m.name));
                     continue;
                 };
-                let (Ok(r0), Ok(r1), Ok(r2)) = (none.range(), ratios.range(), pinned.range()) else {
-                    skipped.push(format!("{}: no range proven", m.name));
-                    continue;
-                };
-                if std::env::var("CARDINAL_DAG_FORMULAS").is_ok() {
-                    println!("  ---- {} ({truth} rows)", m.name);
-                    for line in a.selectivity.as_ref().unwrap().to_string().lines() {
-                        println!("    {line}");
-                    }
-                    for line in a.plan.lines() {
-                        println!("    | {line}");
-                    }
-                    println!("    ratios: X = {}", ratios.output);
-                    for (sel, why) in &ratios.unmatched {
-                        println!("      {sel}: {why}");
-                    }
-                    println!("    pinned: X = {}", pinned.output);
-                    println!("      pinned sizes {:?}; capped {:?}; unchecked {:?}; rejected {:?}", pinned.pinned, pinned.capped, pinned.unchecked, pinned.rejected);
-                }
                 s.bounded += 1;
-                let required = &a.selectivity.as_ref().unwrap().required;
-                let got = required.iter().filter(|r| ratios.matched.iter().any(|x| x.name == r.name)).count();
-                s.required += required.len();
-                s.matched += got;
-                s.capped += pinned.capped.len();
-                s.tighter += usize::from(r2.1.is_some_and(|hi| r0.1.is_none_or(|h0| hi < h0)));
-                s.exact += usize::from(r2.1 == Some(truth) && r0.1 != Some(truth));
-                for (_, why) in &ratios.unmatched {
-                    *misses.entry(miss(why)).or_default() += 1;
-                }
-                for (mode, i) in [("ratios", &ratios), ("pinned", &pinned)] {
-                    if !i.rejected.is_empty() {
-                        failures.push(format!("{}/{} {planner} {mode}: rejected {:?}", dag.name, m.name, i.rejected));
+                s.tighter += usize::from(with.upper.is_some_and(|hi| plain.upper.is_none_or(|h| hi < h)));
+                s.exact += usize::from(with.upper == Some(truth) && plain.upper != Some(truth));
+                for (which, b) in [("no facts", plain), ("facts", with)] {
+                    if !b.holds(truth) {
+                        failures.push(format!("{}/{} {planner} {which}: {b} does not hold {truth}", dag.name, m.name));
                     }
                 }
-                for (mode, r) in [("no facts", r0), ("ratios", r1), ("pinned", r2)] {
-                    if !holds(r, truth) {
-                        failures.push(format!("{}/{} {planner} {mode}: {} does not hold {truth}", dag.name, m.name, range(r)));
-                    }
-                }
-                println!(
-                    "  {:<34} {truth:>10} {:>8} {:>6}  {:<16} {:<16} {:<16}",
-                    m.name,
-                    format!("{got}/{}", required.len()),
-                    pinned.capped.len(),
-                    range(r0),
-                    range(r1),
-                    range(r2)
-                );
-                let hi = |r: (u64, Option<u64>)| serde_json::json!({ "lo": r.0, "hi": r.1 });
+                println!("  {:<34} {truth:>10}  {:<20} {:<20}", m.name, plain.to_string(), with.to_string());
+                let range = |b: Bounds| serde_json::json!({ "lo": b.lower, "hi": b.upper });
                 let entry = dumped.entry(m.name.clone()).or_default();
                 entry.insert("rows".into(), truth.into());
-                entry.insert(
-                    planner.into(),
-                    serde_json::json!({
-                        "none": hi(r0),
-                        "ratios": hi(r1),
-                        "pinned": hi(r2),
-                        "required": required.len(),
-                        "matched": ratios.matched.iter().map(|x| serde_json::json!({ "sel": x.name, "value": x.value.to_string(), "facts": x.facts })).collect::<Vec<_>>(),
-                        "pinned_sizes": pinned.pinned.len(),
-                        "unmatched": ratios.unmatched.iter().map(|(n, why)| serde_json::json!({ "sel": n, "why": why })).collect::<Vec<_>>(),
-                        "output": a.selectivity.as_ref().unwrap().output.to_string(),
-                        "terms": a.selectivity_facts().iter().map(|(n, k)| {
-                            let value = ratios.matched.iter().find(|x| x.name == *n).map(|x| x.value.to_string());
-                            match k {
-                                Ok(k) => serde_json::json!({ "sel": n, "fact": k.to_string(), "simple": simple(k), "value": value }),
-                                Err(why) => serde_json::json!({ "sel": n, "fact": Value::Null, "why": why, "simple": Value::Null, "value": value }),
-                            }
-                        }).collect::<Vec<_>>(),
-                    }),
-                );
+                entry.insert(planner.into(), serde_json::json!({ "none": range(plain), "facts": range(with) }));
             }
             for u in &undefined {
                 println!("  view not defined in DataFusion: {u}");
@@ -809,31 +686,23 @@ async fn table_facts_bound_views() {
             for k in &skipped {
                 println!("  skipped {k}");
             }
-            if !misses.is_empty() {
-                let mut misses: Vec<(&str, usize)> = misses.into_iter().collect();
-                misses.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-                let text: Vec<String> = misses.iter().map(|(w, n)| format!("{n} {w}")).collect();
-                println!("  unmatched: {}", text.join("; "));
-            }
             println!();
             summaries.push((format!("{}/{planner}", dag.name), s));
         }
         if let Ok(path) = std::env::var("CARDINAL_DAG_DUMP") {
-            dump(&path, &dag, &facts, &table_rows, &dumped);
+            dump(&path, &dag, facts.set(), &table_rows, &dumped);
         }
     }
 
-    println!("{:<22} {:>6} {:>6} {:>12} {:>7} {:>7} {:>9} {:>7} {:>8} {:>6}", "dag", "tables", "views", "facts/bounds", "checked", "bounded", "matched", "capped", "tighter", "exact");
+    println!("{:<22} {:>6} {:>6} {:>12} {:>7} {:>7} {:>8} {:>6}", "dag", "tables", "views", "facts/bounds", "checked", "bounded", "tighter", "exact");
     for (name, s) in &summaries {
         println!(
-            "{name:<22} {:>6} {:>6} {:>12} {:>7} {:>7} {:>9} {:>7} {:>8} {:>6}",
+            "{name:<22} {:>6} {:>6} {:>12} {:>7} {:>7} {:>8} {:>6}",
             format!("{}/{}", s.profiled, s.tables),
             s.views,
             format!("{}/{}", s.facts, s.bounds),
             s.counted,
             s.bounded,
-            format!("{}/{}", s.matched, s.required),
-            s.capped,
             s.tighter,
             s.exact
         );

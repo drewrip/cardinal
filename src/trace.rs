@@ -15,7 +15,7 @@ use z3::ast::{Bool, Int};
 use z3::{Params, SatResult, Solver};
 
 use crate::analysis::{Analyzer, Node};
-use crate::bounds::{self, Bounds};
+use crate::bounds::Bounds;
 use crate::facts::Fact;
 use crate::{Error, Result};
 
@@ -72,7 +72,7 @@ pub struct Constraint {
     pub code: String,
     /// The variables the constraint mentions.
     pub vars: Vec<String>,
-    /// For a constraint a fact gave ([`crate::Informed::trace`]): which, and
+    /// For a constraint a fact gave ([`crate::Analysis::with_facts`]): which, and
     /// what it says. `None` for the analyzer's own.
     #[serde(default)]
     pub fact: Option<FactInfo>,
@@ -81,8 +81,8 @@ pub struct Constraint {
 /// What a fact constraint asserts, and the facts it is read from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactInfo {
-    /// What kind of claim it is: `selectivity`, `pinned rows`, `pinned ndv`,
-    /// `ndv cap`, `row cap` or `floor`.
+    /// What kind of claim it is: `pinned rows`, `pinned ndv`, `ndv cap`,
+    /// `range floor`, `range cap`, `row cap` or `floor`.
     pub source: String,
     /// The facts it is read from.
     pub facts: Vec<FactRef>,
@@ -93,8 +93,7 @@ pub struct FactInfo {
 /// One fact, by its text, and where it was read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactRef {
-    /// The fact without its value, e.g. `|lineitem|`, or how a value was
-    /// found without one, e.g. `implied by its input`.
+    /// The fact without its value, e.g. `|lineitem|`.
     pub text: String,
     /// Each of the fact's [`crate::facts::Origin`]s, as text.
     pub origins: Vec<String>,
@@ -106,7 +105,7 @@ impl FactRef {
     }
 }
 
-/// A claim a fact gave, as [`crate::informed`] asserts it.
+/// A claim a fact gave, as [`crate::Analysis::with_facts`] asserts it.
 pub(crate) struct FactClaim {
     pub claim: Bool,
     /// The plan node whose variable it holds.
@@ -119,9 +118,9 @@ pub(crate) struct FactClaim {
 /// The outcome of proving one claim from the constraints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
-    /// A short key for the claim, e.g. `sum` or `table:orders`.
+    /// A short key for the claim: `lower` or `upper`.
     pub name: String,
-    /// The claim, e.g. `X <= 1/2·Σ`.
+    /// The claim, e.g. `X <= 25`.
     pub claim: String,
     /// The claim in SMT-LIB.
     pub smt: String,
@@ -235,20 +234,6 @@ impl Trace {
         trace
     }
 
-    /// This trace, declaring too every variable `smt` declares that it does
-    /// not: those of the constraints facts added.
-    pub(crate) fn declare(&mut self, smt: &str) {
-        let known: HashSet<String> = declared(&self.declarations).into_iter().map(str::to_string).collect();
-        for l in smt.lines() {
-            if let Some(name) = declared_name(l)
-                && !known.contains(name)
-            {
-                self.declarations.push_str(l);
-                self.declarations.push('\n');
-            }
-        }
-    }
-
     /// This trace with only the analyzer's constraints, none from facts.
     pub fn without_facts(&self) -> Trace {
         let mut trace = self.clone();
@@ -345,42 +330,15 @@ impl Trace {
 }
 
 /// The claims [`crate::Analysis::explain`] proves, as (key, display text,
-/// formula): the verdict's `X <= Σ` and each of `bounds`, for root variable
-/// `root`, scan variables `scans` and tables as (name, symbol) `tables`.
-pub(crate) fn claims(
-    root: &str,
-    scans: &[String],
-    tables: &[(String, String)],
-    bounds: Option<&Bounds>,
-) -> Vec<(String, String, String)> {
+/// formula): each side of `bounds`, for root variable `root`.
+pub(crate) fn claims(root: &str, bounds: &Bounds) -> Vec<(String, String, String)> {
     let x = Int::new_const(root);
-    let sum = if scans.is_empty() {
-        Int::from_i64(0)
-    } else {
-        let scans: Vec<Int> = scans.iter().map(|s| Int::new_const(s.as_str())).collect();
-        Int::add(&scans)
-    };
-    let mut claims = vec![("verdict".to_string(), "X <= Σ".to_string(), x.le(&sum).to_string())];
-    if let Some(b) = bounds {
-        if let Some(n) = b.constant {
-            claims.push(("constant".into(), format!("X <= {n}"), x.le(Int::from_u64(n)).to_string()));
-        }
-        // A bound with no term of its quantity is the constant bound again.
-        if let Some(s) = b.sum.as_ref().filter(|s| s.num > 0) {
-            let (lhs, rhs) = bounds::sides(&x, &sum, s);
-            claims.push(("sum".into(), format!("X <= {}", s.render("Σ")), lhs.le(rhs).to_string()));
-        }
-        for t in b.tables.iter().filter(|t| t.bound.num > 0) {
-            let Some((_, symbol)) = tables.iter().find(|(name, _)| *name == t.table) else {
-                continue;
-            };
-            let (lhs, rhs) = bounds::sides(&x, &Int::new_const(symbol.as_str()), &t.bound);
-            let shown = t.bound.render(&format!("|{}|", t.table));
-            claims.push((format!("table:{}", t.table), format!("X <= {shown}"), lhs.le(&rhs).to_string()));
-            if t.exact {
-                claims.push((format!("exact:{}", t.table), format!("X >= {shown}"), lhs.ge(&rhs).to_string()));
-            }
-        }
+    let mut claims = vec![];
+    if bounds.lower > 0 {
+        claims.push(("lower".into(), format!("X >= {}", bounds.lower), x.ge(Int::from_u64(bounds.lower)).to_string()));
+    }
+    if let Some(n) = bounds.upper {
+        claims.push(("upper".into(), format!("X <= {n}"), x.le(Int::from_u64(n)).to_string()));
     }
     claims
 }

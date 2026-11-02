@@ -1,12 +1,12 @@
-//! Test suite of simple to complex queries, each checked against the claim
-//! `O_root <= Σ scans`. Tables may be empty. `MightGrow` queries also check the
-//! structure of the counterexample.
+//! Test suite of simple to complex queries, each checked with its tables held
+//! to sizes ([`SIZES`]): whether it provably outputs at most the rows it
+//! scans (`X <= Σ`), or may output more. Tables may be empty.
 
 mod common;
 
 use std::sync::Arc;
 
-use cardinal::{Analysis, Counterexample, Verdict, analyze_sql};
+use cardinal::{Analysis, Bounds, analyze_sql};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -58,34 +58,53 @@ fn setup() -> SessionContext {
 }
 
 async fn run(sql: &str) -> Analysis {
-    let a = analyze_sql(&setup(), sql).await.unwrap();
-    println!("== {sql}\n{}\n{}\n{:?}\n", a.plan, a.smtlib, a.verdict);
+    let a = analyze_sql(&setup(), sql, Default::default()).await.unwrap();
+    println!("== {sql}\n{}\n{}\n", a.plan, a.constraints());
     a
 }
 
-/// Asserts the verdict is `Reduces`.
+/// The shop's tables' sizes, all different; any other table has 100 rows.
+const SIZES: &[(&str, u64)] = &[("users", 100), ("orders", 300), ("products", 50), ("order_items", 1000)];
+
+fn size(table: &str) -> u64 {
+    SIZES.iter().find(|(t, _)| *t == table).map_or(100, |(_, n)| *n)
+}
+
+/// `a`'s bounds with its tables held to their [`size`]s, and the rows its
+/// scans read.
+fn sized(a: &Analysis) -> (Bounds, u64) {
+    let sizes: Vec<(&str, u64)> = a.scans.iter().map(|(_, t)| (t.as_str(), size(t))).collect();
+    let b = common::sized(a, &sizes);
+    let read = sizes.iter().map(|(_, n)| n).sum();
+    println!("with {sizes:?}: {b}, reading {read}");
+    (b, read)
+}
+
+/// Asserts that `a` outputs at most the rows it reads.
+fn assert_reduces(a: &Analysis) -> Bounds {
+    let (b, read) = sized(a);
+    assert!(b.upper.is_some_and(|hi| hi <= read), "expected at most {read} rows, got {b}");
+    b
+}
+
+/// Asserts that `sql` outputs at most the rows it reads.
 async fn reduces(sql: &str) -> Analysis {
     let a = run(sql).await;
-    assert_eq!(a.verdict, Verdict::Reduces, "expected Reduces for {sql}");
+    assert_reduces(&a);
     a
 }
 
-/// Asserts the verdict is `MightGrow` and returns the counterexample model.
-async fn might_grow(sql: &str) -> (Analysis, Counterexample) {
+/// Asserts that `sql` may output more rows than it reads, and returns its
+/// bounds with its tables held to their sizes.
+async fn might_grow(sql: &str) -> (Analysis, Bounds) {
     let a = run(sql).await;
-    match a.verdict.clone() {
-        Verdict::MightGrow(m) => {
-            // Sanity-check the counterexample actually violates the claim.
-            let total: i64 = a.scans.iter().map(|(s, _)| m.var(s)).sum();
-            assert!(m.var(&a.root) > total, "model does not refute the claim");
-            (a, m)
-        }
-        v => panic!("expected MightGrow for {sql}, got {v:?}"),
-    }
+    let (b, read) = sized(&a);
+    assert!(b.upper.is_none_or(|hi| hi > read), "expected more than {read} rows, got {b}");
+    (a, b)
 }
 
 fn has_op(a: &Analysis, kind: &str) -> bool {
-    a.smtlib.contains(kind)
+    a.constraints().contains(kind)
 }
 
 #[tokio::test]
@@ -108,10 +127,9 @@ async fn filter() {
 
 #[tokio::test]
 async fn scalar_count() {
-    let (a, m) = might_grow("SELECT count(*) FROM users").await;
-    assert_eq!(m.var(&a.root), 1);
-    // 1 > users forces the table to be empty.
-    assert_eq!(m.table("users"), 0);
+    // One row whatever the input: more than an empty table has.
+    let a = run("SELECT count(*) FROM users").await;
+    assert_eq!(a.bounds().unwrap(), Bounds { lower: 1, upper: Some(1) });
 }
 
 #[tokio::test]
@@ -138,13 +156,13 @@ async fn distinct() {
 async fn order_by_limit() {
     let a = reduces("SELECT * FROM users ORDER BY age LIMIT 10").await;
     // Exactly min(10, |users|) rows.
-    assert_eq!(a.bounds().unwrap().constant, Some(10));
+    assert_eq!(a.bounds().unwrap().upper, Some(10));
 }
 
 #[tokio::test]
 async fn limit_offset() {
     let a = reduces("SELECT * FROM users LIMIT 5 OFFSET 20").await;
-    assert_eq!(a.bounds().unwrap().constant, Some(5));
+    assert_eq!(a.bounds().unwrap().upper, Some(5));
 }
 
 #[tokio::test]
@@ -186,9 +204,9 @@ async fn non_equijoin() {
 
 #[tokio::test]
 async fn cross_join() {
-    let (a, m) = might_grow("SELECT * FROM users CROSS JOIN products").await;
+    let (a, b) = might_grow("SELECT * FROM users CROSS JOIN products").await;
     assert!(has_op(&a, "InnerCrossJoin"));
-    assert_eq!(m.var(&a.root), m.table("users") * m.table("products"));
+    assert_eq!(b, Bounds { lower: 5000, upper: Some(5000) });
 }
 
 #[tokio::test]
@@ -261,9 +279,9 @@ async fn cte() {
 
 #[tokio::test]
 async fn values() {
-    let (a, m) = might_grow("SELECT * FROM (VALUES (1), (2), (3)) AS t(x)").await;
+    let (a, b) = might_grow("SELECT * FROM (VALUES (1), (2), (3)) AS t(x)").await;
     assert!(a.scans.is_empty());
-    assert_eq!(m.var(&a.root), 3);
+    assert_eq!(b, Bounds { lower: 3, upper: Some(3) });
 }
 
 #[tokio::test]
@@ -297,7 +315,7 @@ async fn qualified_and_bare_names_are_one_table() {
     let a = reduces("SELECT * FROM users a JOIN datafusion.public.users b ON a.id = b.id").await;
     assert_eq!(a.scans.len(), 2);
     assert!(a.scans.iter().all(|(_, t)| t == "users"));
-    assert_eq!(a.smtlib.matches("(declare-fun T").count(), 1);
+    assert_eq!(a.constraints().matches("(declare-fun T").count(), 1);
 }
 
 #[tokio::test]
@@ -329,12 +347,14 @@ async fn table_named_like_an_operator_variable() {
     let mem = MemTable::try_new(schema, vec![vec![]]).unwrap();
     ctx.register_table(TableReference::bare("op1_Filter"), Arc::new(mem))
         .unwrap();
-    let a = analyze_sql(&ctx, r#"SELECT * FROM "op1_Filter" WHERE x > 1"#)
+    let a = analyze_sql(&ctx, r#"SELECT * FROM "op1_Filter" WHERE x > 1"#, Default::default())
         .await
         .unwrap();
-    assert_eq!(a.verdict, Verdict::Reduces);
-    assert!(a.smtlib.contains("(declare-fun T0_op1_Filter () Int)"));
-    assert!(a.smtlib.contains("(declare-fun op1_Filter () Int)"));
+    assert!(a.constraints().contains("(declare-fun T0_op1_Filter () Int)"));
+    assert!(a.constraints().contains("(declare-fun op1_Filter () Int)"));
+    // The table's size holds the table, not the filter of the same name.
+    let b = common::sized(&a, &[("op1_Filter", 5)]);
+    assert_eq!(b, Bounds { lower: 0, upper: Some(5) });
 }
 
 #[tokio::test]
@@ -354,12 +374,13 @@ async fn pushed_down_scan_filters_and_fetch() {
     .unwrap()
     .build()
     .unwrap();
-    let a = cardinal::analyze_plan(&plan);
-    assert_eq!(a.verdict, Verdict::Reduces);
+    let a = cardinal::analyze_plan(&plan, Default::default());
+    assert_reduces(&a);
     assert!(has_op(&a, "ScanFilter"));
     // A scan's fetch is a hint (providers may return more rows), so it must not
     // bound the output. Previously this asserted `root <= 7`.
-    assert!(!a.smtlib.contains(" 7)"));
+    assert!(!a.constraints().contains(" 7)"));
+    assert_eq!(a.bounds().unwrap().upper, None);
     assert_eq!(
         a.scans,
         vec![("op0_Scan_people".to_string(), "people".to_string())]
@@ -390,10 +411,11 @@ async fn validate_catches_a_false_primary_key() {
     let a = analyze_sql(
         &ctx,
         "SELECT * FROM people a JOIN people b ON a.age = b.age",
+        Default::default(),
     )
     .await
     .unwrap();
-    assert_eq!(a.verdict, Verdict::Reduces);
+    assert_reduces(&a);
     let v = a.validate(&ctx).await.unwrap();
     assert_eq!(v.violation.as_deref(), Some("op0_Scan_people_c0"));
     assert_eq!(v.rows["op0_Scan_people"], 3);
@@ -405,9 +427,9 @@ async fn validate_catches_a_false_primary_key() {
 #[tokio::test]
 async fn non_key_equijoin_is_bounded_by_product() {
     // `age` is not a key: the bound is l * r, which exceeds l + r.
-    let (a, m) = might_grow("SELECT * FROM users a JOIN users b ON a.age = b.age").await;
+    let (a, b) = might_grow("SELECT * FROM users a JOIN users b ON a.age = b.age").await;
     assert!(has_op(&a, "InnerEquiJoin"));
-    assert!(m.var(&a.root) > 2 * m.table("users"));
+    assert_eq!(b.upper, Some(100 * 100));
 }
 
 #[tokio::test]
@@ -426,10 +448,11 @@ async fn unique_constraint_matches_once() {
     let a = analyze_sql(
         &ctx,
         "SELECT * FROM accounts a JOIN accounts b ON a.email = b.email",
+        Default::default(),
     )
     .await
     .unwrap();
-    assert_eq!(a.verdict, Verdict::Reduces);
+    assert_reduces(&a);
     assert!(has_op(&a, "InnerKeyJoin"));
 }
 
@@ -501,7 +524,7 @@ async fn key_survives_a_join_on_the_other_sides_key() {
          JOIN order_items oi ON o.id = oi.order_id",
     )
     .await;
-    assert_eq!(a.smtlib.matches("InnerKeyJoin ()").count(), 2);
+    assert_eq!(a.constraints().matches("InnerKeyJoin ()").count(), 2);
     assert!(!has_op(&a, "InnerEquiJoin"));
 }
 
@@ -514,7 +537,7 @@ async fn key_lost_after_a_non_key_join() {
          SELECT * FROM t a JOIN t b ON a.oid = b.oid",
     )
     .await;
-    assert_eq!(a.smtlib.matches("InnerEquiJoin ()").count(), 3);
+    assert_eq!(a.constraints().matches("InnerEquiJoin ()").count(), 3);
     assert!(!has_op(&a, "KeyJoin"));
 }
 
@@ -558,7 +581,7 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 }
 
 fn operators(a: &Analysis) -> usize {
-    common::operator_vars(&a.smtlib)
+    common::operator_vars(a.constraints())
 }
 
 #[tokio::test]
@@ -566,7 +589,7 @@ async fn validate_never_executes_dml() {
     // Previously validating an INSERT inserted the rows.
     let ctx = SessionContext::new();
     data_table(&ctx, "t", &[("x", (0..10).collect())], &[]);
-    let a = analyze_sql(&ctx, "INSERT INTO t VALUES (1), (2)")
+    let a = analyze_sql(&ctx, "INSERT INTO t VALUES (1), (2)", Default::default())
         .await
         .unwrap();
     a.validate(&ctx).await.unwrap();
@@ -582,6 +605,7 @@ async fn validate_is_consistent_under_random() {
     let a = analyze_sql(
         &ctx,
         "SELECT x FROM t WHERE random() < 0.5 UNION ALL SELECT x FROM t WHERE random() < 0.5",
+        Default::default(),
     )
     .await
     .unwrap();
@@ -602,6 +626,7 @@ async fn validation_handles_duplicate_column_names() {
         &ctx,
         "SELECT * FROM (SELECT * FROM (SELECT * FROM t WHERE random() < 0.5) a
                         JOIN t b ON a.x = b.x) j WHERE random() < 0.5",
+        Default::default(),
     )
     .await
     .unwrap();
@@ -617,7 +642,7 @@ async fn scan_fetch_is_not_a_bound() {
     // generate_series ignores the pushed-down fetch=2 and returns 4 rows, which
     // broke the old `scan <= fetch` constraint.
     let ctx = SessionContext::new();
-    let a = analyze_sql(&ctx, "SELECT * FROM generate_series(0, 3) LIMIT 2")
+    let a = analyze_sql(&ctx, "SELECT * FROM generate_series(0, 3) LIMIT 2", Default::default())
         .await
         .unwrap();
     let v = a.validate(&ctx).await.unwrap();
@@ -635,10 +660,11 @@ async fn odd_table_names_round_trip() {
     let a = analyze_sql(
         &ctx,
         r#"SELECT * FROM "we|ird ""x"" (tbl)" a JOIN "we|ird ""x"" (tbl)" b ON a.id = b.id"#,
+        Default::default(),
     )
     .await
     .unwrap();
-    assert_eq!(a.verdict, Verdict::Reduces);
+    assert_reduces(&a);
     assert_eq!(a.scans[0].1, name);
     let v = a.validate(&ctx).await.unwrap();
     assert_eq!(v.violation, None);
@@ -661,12 +687,13 @@ async fn cast_join_key_stays_unique() {
     let a = analyze_sql(
         &ctx,
         "SELECT * FROM orders o JOIN small s ON o.user_id = s.id",
+        Default::default(),
     )
     .await
     .unwrap();
     assert!(a.plan.contains("CAST"), "{}", a.plan);
-    assert!(has_op(&a, "InnerKeyJoin"), "{}", a.smtlib);
-    assert_eq!(a.verdict, Verdict::Reduces);
+    assert!(has_op(&a, "InnerKeyJoin"), "{}", a.constraints());
+    assert_reduces(&a);
 }
 
 #[tokio::test]
@@ -675,36 +702,17 @@ async fn keyed_join_also_bounded_by_product() {
     let a = reduces("SELECT * FROM users u JOIN orders o ON u.id = o.user_id").await;
     assert!(has_op(&a, "InnerKeyJoin"));
     assert!(
-        a.smtlib.contains("(* op1_SubqueryAlias op3_SubqueryAlias)"),
+        a.constraints().contains("(* op1_SubqueryAlias op3_SubqueryAlias)"),
         "{}",
-        a.smtlib
+        a.constraints()
     );
-}
-
-#[tokio::test]
-async fn counterexample_separates_tables_and_vars() {
-    // A table named like an operator variable used to overwrite its value.
-    let ctx = SessionContext::new();
-    data_table(&ctx, "op1_Filter", &[("x", vec![1])], &[]);
-    let a = analyze_sql(
-        &ctx,
-        r#"SELECT count(*) FROM (SELECT * FROM "op1_Filter" WHERE x > 1) t"#,
-    )
-    .await
-    .unwrap();
-    let Verdict::MightGrow(m) = &a.verdict else {
-        panic!("expected MightGrow, got {:?}", a.verdict)
-    };
-    assert!(m.tables.contains_key("op1_Filter"));
-    assert!(m.vars.contains_key("op1_Filter"));
-    assert_eq!(m.var(&a.root), 1);
 }
 
 #[test]
 fn futures_are_send() {
     fn assert_send<T: Send>(_: &T) {}
     let ctx = SessionContext::new();
-    let analyze = analyze_sql(&ctx, "SELECT 1");
+    let analyze = analyze_sql(&ctx, "SELECT 1", Default::default());
     assert_send(&analyze);
     drop(analyze);
     let a = cardinal::analyze_plan(&datafusion::logical_expr::LogicalPlan::EmptyRelation(
@@ -712,7 +720,7 @@ fn futures_are_send() {
             produce_one_row: true,
             schema: Arc::new(datafusion::common::DFSchema::empty()),
         },
-    ));
+    ), Default::default());
     let validate = a.validate(&ctx);
     assert_send(&validate);
 }

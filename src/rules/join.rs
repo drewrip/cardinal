@@ -8,7 +8,6 @@ use z3::ast::Int;
 use super::{child_column, col, column_index, key_column, strip_alias};
 use crate::analysis::{Analyzer, Rel, Rows, ScanKind, int, min};
 use crate::domain::Facts;
-use crate::selectivity::auxiliary_joins;
 
 impl<'a> Analyzer<'a> {
     pub(crate) fn join(&mut self, plan: &LogicalPlan, join: &Join) -> Rel {
@@ -97,7 +96,6 @@ impl<'a> Analyzer<'a> {
         }
         self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
         self.join_overlap(join, &o, &l, &r);
-        self.at_most_once = (ru || fl, lu || fr);
         self.join_ndv(join, &o, &l, &r);
         self.join_ndv_kept(join, &o, &l, &r, (fl, fr));
         self.join_ranges(plan, join, &o, &l, &r);
@@ -148,8 +146,8 @@ impl<'a> Analyzer<'a> {
 
     /// An outer or anti join's rows, in terms of its inner join's rows
     /// (`{o}_inner`) and the rows of each side with a partner (`{o}_left`,
-    /// `{o}_right`): the counts `validate` measures its selectivities with
-    /// (`selectivity::auxiliary_joins`). `inner` bounds the inner join's rows;
+    /// `{o}_right`): the joins of [`auxiliary_joins`], which `validate`
+    /// counts too. `inner` bounds the inner join's rows;
     /// `keys` says whether the right and left keys are unique, and whether a
     /// foreign key goes from the left or the right side to all of the other.
     pub(crate) fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: (bool, bool, bool, bool)) {
@@ -589,4 +587,22 @@ pub(crate) fn join_facts(plan: &LogicalPlan, join: &Join, l: &Facts, r: &Facts) 
         _ => {}
     }
     out
+}
+
+/// The joins whose counts an outer or anti join's rows are stated in terms
+/// of, as (suffix of the count's variable, join type).
+pub(crate) fn auxiliary_joins(join: &Join) -> Vec<(&'static str, JoinType)> {
+    let (inner, left, right) = (
+        ("inner", JoinType::Inner),
+        ("left", JoinType::LeftSemi),
+        ("right", JoinType::RightSemi),
+    );
+    match join.join_type {
+        JoinType::Left => vec![inner, left],
+        JoinType::Right => vec![inner, right],
+        JoinType::Full => vec![inner, left, right],
+        JoinType::LeftAnti if !join.null_aware => vec![left],
+        JoinType::RightAnti => vec![right],
+        _ => vec![],
+    }
 }

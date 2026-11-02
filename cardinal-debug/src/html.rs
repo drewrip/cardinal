@@ -167,7 +167,6 @@ footer dd { margin: 0; }
 <header>
   <h1>cardinal — Z3 constraint trace</h1>
   <table class="kv">
-    <tr><th>Verdict</th><td><span id="verdict" class="status"></span> <span id="verdict-note" class="note"></span></td></tr>
     <tr><th id="bounds-label">Bounds</th><td><code id="bounds"></code></td></tr>
     <tr id="fbounds-row" hidden><th id="fbounds-label">With facts</th><td><code id="fbounds"></code></td></tr>
     <tr id="facts-row" hidden><th>Facts</th><td id="facts-stats"></td></tr>
@@ -175,8 +174,6 @@ footer dd { margin: 0; }
     <tr><th>Query</th><td><pre id="query"></pre></td></tr>
   </table>
   <details><summary>Optimized plan (DataFusion)</summary><pre id="plan"></pre></details>
-  <details id="cxbox" hidden open><summary>Counterexample: values satisfying every constraint with X &gt; Σ</summary>
-    <pre id="cx"></pre></details>
 </header>
 
 <section>
@@ -191,11 +188,9 @@ footer dd { margin: 0; }
 
 <section id="facts" hidden>
   <h2>Facts</h2>
-  <p class="help">What the facts gave: each fact constraint (◆) holds a variable to a value read off a plan that ran. Facts not used were rejected (they contradict the constraints), not decided in time, or not found.</p>
+  <p class="help">What the facts gave: each fact constraint (◆) holds a variable to a value read off a plan that ran. Facts that contradict the constraints, or whose consistency was not decided in time, are left out.</p>
   <h3>Used</h3>
-  <table class="facts"><thead><tr><th>Selectivity</th><th>Value</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
-  <h3>Not used</h3>
-  <table class="facts"><thead><tr><th>Why</th><th>What</th><th>Reason</th></tr></thead><tbody id="facts-unused"></tbody></table>
+  <table class="facts"><thead><tr><th>Kind</th><th>Claim</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
   <div id="conflicts-box" hidden>
     <h3>Conflicts (left out)</h3>
     <table class="facts"><tbody id="conflicts"></tbody></table>
@@ -230,7 +225,6 @@ footer dd { margin: 0; }
   <h2>Notation</h2>
   <dl>
     <dt>X</dt><dd>Rows output by the root operator.</dd>
-    <dt>Σ</dt><dd>Sum of the rows read by every base-table scan.</dd>
     <dt>|t|, T{n}_{t}</dt><dd>Rows in base table t.</dd>
     <dt>op{n}_{Kind}</dt><dd>Rows output by plan node n.</dd>
     <dt>op{n}_{Kind}[col]</dt><dd>Distinct values of column col in node n's output (NULL counts as one).</dd>
@@ -258,34 +252,20 @@ footer dd { margin: 0; }
   // Summary.
   $('query').textContent = dump.query.trim();
   $('plan').textContent = dump.plan;
-  const verdictNote = {
-    Reduces: 'proven: the output never has more rows than the scans read (X <= Σ)',
-    MightGrow: 'not provable: an assignment satisfies every constraint with X > Σ (see counterexample)',
-  };
-  $('verdict').textContent = dump.verdict.split(':')[0];
-  $('verdict').classList.add(dump.verdict === 'Reduces' ? 'good' : dump.verdict === 'MightGrow' ? 'bad' : 'warn');
-  $('verdict-note').textContent = verdictNote[dump.verdict] ?? dump.verdict;
   $('bounds').textContent = dump.bounds ?? 'not computed';
   if (F) {
     $('bounds-label').textContent = 'Without facts';
     $('fbounds-row').hidden = false;
-    $('fbounds-label').textContent = `With facts (${F.mode})`;
+    $('fbounds-label').textContent = 'With facts';
     $('fbounds').textContent = F.bounds ?? 'not computed';
     $('facts-row').hidden = false;
     const k = t.constraints.filter(isFact).length;
-    $('facts-stats').textContent = `${k} fact constraints, ${F.report.matched.length} selectivities matched, ` +
-      `${F.report.rejected.length} rejected · X = ${F.report.output}`;
+    $('facts-stats').textContent = `${k} fact constraints`;
     $('hide-label').hidden = false;
   }
   const partitions = t.constraints.filter(c => c.node === null).length;
   $('stats').textContent = `${t.nodes.length} plan nodes, ${t.constraints.length} constraints` +
     (partitions ? ` (${partitions} over table partitions)` : '') + `, root variable ${t.root}`;
-  if (dump.counterexample) {
-    $('cxbox').hidden = false;
-    const rows = Object.entries(dump.counterexample).map(([k, v]) => [names[k] ?? k, v]);
-    const w = Math.max(...rows.map(([k]) => k.length));
-    $('cx').textContent = rows.map(([k, v]) => k.padEnd(w + 2) + v).join('\n');
-  }
 
   // The node each variable describes.
   const owner = {};
@@ -323,8 +303,11 @@ footer dd { margin: 0; }
     let v = n.var;
     if (F) {
       const mine = [n.var, n.raw_var].filter(x => x);
-      for (const [list, o] of [[F.report.pinned, '='], [F.report.capped, '<=']])
-        for (const [x, k] of list) if (mine.includes(x)) v += `  ${x === n.var ? '' : (names[x] ?? x) + ' '}${o} ${k}`;
+      for (const c of byNode[id] ?? []) {
+        const x = c.vars[0];
+        if (c.fact && ['pinned rows', 'row cap'].includes(c.fact.source) && c.vars.length === 1 && mine.includes(x))
+          v += `  ${x === n.var ? '' : (names[x] ?? x) + ' '}${c.fact.value}`;
+      }
     }
     op.append(el('div', 'v m', v));
     const count = el('span', 'n m');
@@ -449,7 +432,7 @@ footer dd { margin: 0; }
     if (h && h.dataset.node !== undefined) treeNodes[+h.dataset.node].row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 
-  // Facts: used, not used, conflicts.
+  // Facts: used, and conflicts.
   const factRows = [];
   if (F) {
     $('facts').hidden = false;
@@ -459,17 +442,12 @@ footer dd { margin: 0; }
       $(body).append(r);
       factRows.push(r);
     };
-    for (const m of F.report.matched) {
-      const read = m.facts.flatMap(f => f.origins);
-      row('facts-used', [[m.name, 'm'], [m.value, 'm'], [m.facts.map(f => f.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
+    for (const c of t.constraints.filter(isFact)) {
+      const f = c.fact, read = f.facts.flatMap(x => x.origins);
+      const claim = `${c.vars.map(v => names[v] ?? v).join(', ')} ${f.value}`;
+      row('facts-used', [[f.source, 'note'], [claim, 'm'], [f.facts.map(x => x.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
     }
-    const counts = [['pinned', F.report.pinned], ['capped', F.report.capped], ['ndv', F.report.pinned_ndv], ['ranges', F.report.ranges || []], ['floors', F.report.floors]];
-    for (const [k, list] of counts)
-      for (const [v, n] of list) row('facts-used', [[k, 'note'], [`${names[v] ?? v} ${k === 'capped' ? '<=' : k === 'floors' ? '>=' : '='} ${n}`, 'm'], ['row count from a fact (◆ in the constraints)', 'note'], ['', '']]);
-    for (const [s, why] of F.report.rejected) row('facts-unused', [['rejected', 'bad'], [s, 'm'], [why, '']]);
-    for (const s of F.report.unchecked) row('facts-unused', [['unchecked', 'warn'], [s, 'm'], ['not decided in time', '']]);
-    for (const [s, why] of F.report.unmatched) row('facts-unused', [['unmatched', 'note'], [s, 'm'], [why, '']]);
-    if (!$('facts-unused').children.length) row('facts-unused', [['—', 'note'], ['every fact found was used', 'note'], ['', '']]);
+    if (!$('facts-used').children.length) row('facts-used', [['—', 'note'], ['no fact applied', 'note'], ['', ''], ['', '']]);
     if (F.conflicts.length) {
       $('conflicts-box').hidden = false;
       for (const c of F.conflicts) row('conflicts', [[c, 'm']]);

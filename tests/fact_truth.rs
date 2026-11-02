@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use cardinal::facts::{Fact, FactKind, Ratio, derive_facts};
 use cardinal::observed::{Catalog, ObservedPlan};
-use cardinal::{FactMode, Options};
+use cardinal::{Facts, Options};
 use fixtures::{DIR, catalog, context, foreign_keys};
 use live::{Engine, Rng, TIMED_OUT};
 
@@ -437,39 +437,23 @@ async fn truth(engine: Engine) {
     // Bounds with the facts hold each query's true count.
     let ctx = context();
     let mut analyzed = 0;
-    let mut matched = 0;
+    let all = Facts::new(facts.clone());
     let first = format!("/{}", variants[0]);
     for (name, sql, plan) in plans.iter().filter(|(_, _, p)| p.name.ends_with(&first)) {
-        let options = Options { selectivity: true, foreign_keys: foreign_keys(), ..Default::default() };
-        let Ok(a) = cardinal::analyze_sql_with(&ctx, sql, options).await else { continue };
+        let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
+        let Ok(a) = cardinal::analyze_sql(&ctx, sql, options).await else { continue };
         let truth = plan.nodes[plan.root].rows;
         analyzed += 1;
-        for mode in [FactMode::Ratios, FactMode::Pinned] {
-            let i = match a.with_facts(&facts, mode) {
-                Ok(i) => i,
-                Err(e) => {
-                    failures.push(format!("{name} {mode:?}: {e}"));
-                    continue;
-                }
-            };
-            if mode == FactMode::Ratios {
-                matched += i.matched.len();
-            }
-            if !i.rejected.is_empty() {
-                failures.push(format!("{name} {mode:?}: rejected {:?}\n  {sql}", i.rejected));
-            }
-            if mode == FactMode::Pinned
-                && let Ok((lo, hi)) = i.range()
-                && (lo > truth || hi.is_some_and(|hi| hi < truth))
-            {
-                failures.push(format!("{name}: {lo} <= X <= {hi:?}, not {truth}\n  {sql}\n  {i}"));
-            }
+        match a.with_facts(&all).and_then(|a| a.bounds()) {
+            Ok(b) if !b.holds(truth) => failures.push(format!("{name}: {b}, not {truth}\n  {sql}")),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("{name}: {e}")),
         }
     }
     println!(
         "{}: {} queries, {} plans: {observed} facts and {} bounds and {} floors; {exact} facts, {bounded} bounds and {floored} floors counted, {unchecked} not countable; \
          {filled} facts the profiles did not count counted since ({unfilled} not), {} with what follows; \
-         {analyzed} queries bounded, {matched} selectivities matched; {slow} timed out; not countable: {uncountable:?}",
+         {analyzed} queries bounded; {slow} timed out; not countable: {uncountable:?}",
         engine.name(),
         queries.len(),
         plans.len(),

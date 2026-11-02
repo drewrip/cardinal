@@ -4,10 +4,9 @@
 //! queries). Every odd query is profiled, with one thread and with four, and
 //! every fact and bound read off the profiles is checked against its true
 //! count. Each even query is then analyzed by DataFusion, over empty tables
-//! of the same schema, and bounded three ways: without facts, with the odd
-//! queries' facts as selectivities only (`Ratios`), and with their row
-//! counts and bounds too (`Pinned`). Each must hold the query's true row
-//! count, read off its own DuckDB profile, and no fact may be rejected.
+//! of the same schema, and bounded without facts and with the odd queries'.
+//! Both must hold the query's true row count, read off its own DuckDB
+//! profile.
 //!
 //! The same runs in PostgreSQL, over a copy of the data DuckDB generates
 //! (`cardinal_tpcds_sf{N}`, made once through DuckDB's `postgres`
@@ -32,7 +31,7 @@ use std::sync::Arc;
 
 use cardinal::facts::{Fact, FactKind, FactSet, Ratio};
 use cardinal::observed::Catalog;
-use cardinal::{Analysis, FactMode, Informed, Options};
+use cardinal::{Analysis, Facts, Options};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -165,39 +164,6 @@ fn check(engine: &Engine, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, u
     (failures, ok, uncountable, slow)
 }
 
-/// What an unmatched selectivity needed, by kind.
-fn miss(why: &str) -> &'static str {
-    let Some(fact) = why.strip_prefix("no fact for ") else {
-        return match why {
-            w if w.starts_with("unresolved") => "terms that did not resolve",
-            w if w.contains("limit") => "a share of a limit",
-            _ => "other",
-        };
-    };
-    let over = fact.rsplit_once(" | ").map(|(_, o)| o).unwrap_or(fact);
-    let joined = over.contains(" × ") || over.contains("join");
-    match (fact.split('(').next().unwrap_or(""), joined) {
-        ("s", false) => "a filter's share of one table",
-        ("s", true) => "a share over joined rows",
-        ("m", _) => "a semi or anti join's match share",
-        ("ndv", false) => "distinct values of one table",
-        ("ndv", true) => "distinct values over joined rows",
-        _ => "a row count",
-    }
-}
-
-/// `lo..=hi`, `hi` unbounded if none is proven.
-fn range(r: (u64, Option<u64>)) -> String {
-    match r.1 {
-        Some(hi) => format!("{}..={hi}", r.0),
-        None => format!("{}..", r.0),
-    }
-}
-
-fn holds(r: (u64, Option<u64>), truth: u64) -> bool {
-    r.0 <= truth && r.1.is_none_or(|hi| truth <= hi)
-}
-
 #[tokio::test]
 async fn odd_facts_bound_even_queries() {
     if !duckdb_available() {
@@ -246,25 +212,25 @@ async fn bound(engine: Engine, db: &std::path::Path) {
             }
         }
     }
-    let mut facts = FactSet::default();
+    let mut set = FactSet::default();
     for p in &plans {
-        facts.observe(p);
+        set.observe(p);
     }
-    facts.close();
-    for c in &facts.conflicts {
+    let facts = Facts::new(set);
+    for c in &facts.set().conflicts {
         failures.push(format!("conflict: {} = {} vs {}", c.kind, c.values.0, c.values.1));
     }
-    let (wrong, counted, uncountable, slow) = check(&engine, &catalog, &facts);
+    let (wrong, counted, uncountable, slow) = check(&engine, &catalog, facts.set());
     failures.extend(wrong);
     println!(
         "{}: odd queries: {} plans, {} facts and {} bounds; {counted} counted true, {uncountable} not countable, {slow} too slow to count",
         engine.name(),
         plans.len(),
-        facts.len(),
-        facts.bounds().count()
+        facts.set().len(),
+        facts.set().bounds().count()
     );
     if std::env::var("CARDINAL_TPCDS_SHOW").is_ok() {
-        print!("{facts}");
+        print!("{}", facts.set());
     }
     for u in &unprofiled {
         println!("  not profiled: {u}");
@@ -272,10 +238,9 @@ async fn bound(engine: Engine, db: &std::path::Path) {
 
     // Each even query, bounded with them.
     println!();
-    println!("{:<5} {:>9} {:>8} {:>6}  {:<22} {:<22} {:<22} {}", "query", "rows", "matched", "capped", "no facts", "ratios", "pinned", "matches");
-    let (mut analyzed, mut required, mut matched, mut capped, mut tighter, mut exact) = (0, 0, 0, 0, 0, 0);
+    println!("{:<5} {:>9}  {:<24} {}", "query", "rows", "no facts", "facts");
+    let (mut analyzed, mut tighter, mut exact) = (0, 0, 0);
     let mut skipped = vec![];
-    let mut misses: BTreeMap<&str, usize> = BTreeMap::new();
     for (n, sql) in queries.iter().filter(|(n, _)| n % 2 == 0) {
         let truth = match engine.profile(sql, &variants[0]).and_then(|j| engine.read(&catalog, &format!("q{n:02}"), &j, sql)) {
             Ok(p) if !p.nodes[p.root].counted => {
@@ -288,73 +253,31 @@ async fn bound(engine: Engine, db: &std::path::Path) {
                 continue;
             }
         };
-        let options = Options { selectivity: true, ..Default::default() };
-        let a: Analysis = match cardinal::analyze_sql_with(&ctx, sql, options).await {
-            Ok(a) if a.selectivity.is_some() => a,
-            Ok(_) => {
-                skipped.push(format!("q{n:02}: no selectivity formula"));
-                continue;
-            }
+        let a: Analysis = match cardinal::analyze_sql(&ctx, sql, Options::default()).await {
+            Ok(a) => a,
             Err(e) => {
                 skipped.push(format!("q{n:02}: not analyzed: {}", e.to_string().lines().next().unwrap_or_default()));
                 continue;
             }
         };
-        let with = |f: &FactSet, mode| a.with_facts(f, mode);
-        let (Ok(none), Ok(ratios), Ok(pinned)) =
-            (with(&FactSet::default(), FactMode::Pinned), with(&facts, FactMode::Ratios), with(&facts, FactMode::Pinned))
-        else {
-            skipped.push(format!("q{n:02}: facts not applied"));
-            continue;
-        };
-        let ranges: Vec<(u64, Option<u64>)> = [&none, &ratios, &pinned].iter().filter_map(|i: &&Informed| i.range().ok()).collect();
-        let [r0, r1, r2] = ranges[..] else {
-            skipped.push(format!("q{n:02}: no range proven"));
+        let (Ok(plain), Ok(with)) = (a.bounds(), a.with_facts(&facts).and_then(|a| a.bounds())) else {
+            skipped.push(format!("q{n:02}: no bounds proven"));
             continue;
         };
         analyzed += 1;
-        let req = a.selectivity.as_ref().unwrap().required.len();
-        let got = a.selectivity.as_ref().unwrap().required.iter().filter(|s| ratios.matched.iter().any(|m| m.name == s.name)).count();
-        required += req;
-        matched += got;
-        capped += pinned.capped.len();
-        tighter += usize::from(r2.1.is_some_and(|hi| r0.1.is_none_or(|h0| hi < h0)));
-        exact += usize::from(r2.1 == Some(truth) && r0.1 != Some(truth));
-        for (_, why) in &ratios.unmatched {
-            *misses.entry(miss(why)).or_default() += 1;
-        }
-        for (mode, i) in [("ratios", &ratios), ("pinned", &pinned)] {
-            if !i.rejected.is_empty() {
-                failures.push(format!("q{n:02} {mode}: rejected {:?}", i.rejected));
+        tighter += usize::from(with.upper.is_some_and(|hi| plain.upper.is_none_or(|h| hi < h)));
+        exact += usize::from(with.upper == Some(truth) && plain.upper != Some(truth));
+        for (which, b) in [("no facts", plain), ("facts", with)] {
+            if !b.holds(truth) {
+                failures.push(format!("q{n:02} {which}: {b} does not hold {truth}"));
             }
         }
-        for (mode, r) in [("no facts", r0), ("ratios", r1), ("pinned", r2)] {
-            if !holds(r, truth) {
-                failures.push(format!("q{n:02} {mode}: {} does not hold {truth}", range(r)));
-            }
-        }
-        let names: Vec<String> = ratios.matched.iter().map(|m| format!("{}={}", m.name, m.value.to_string().split(' ').next().unwrap())).collect();
-        println!(
-            "q{n:02}   {truth:>9} {:>8} {:>6}  {:<22} {:<22} {:<22} {}",
-            format!("{got}/{req}"),
-            pinned.capped.len(),
-            range(r0),
-            range(r1),
-            range(r2),
-            names.join(" ")
-        );
+        println!("q{n:02}   {truth:>9}  {:<24} {with}", plain.to_string());
     }
     println!();
     println!(
-        "even queries: {analyzed} bounded; {matched} of {required} selectivities matched; {capped} operators capped; \
-         upper bound tighter in {tighter}, made the true count by the facts in {exact}"
+        "even queries: {analyzed} bounded; upper bound tighter in {tighter}, made the true count by the facts in {exact}"
     );
-    println!("unmatched selectivities, by what they needed:");
-    let mut misses: Vec<(&str, usize)> = misses.into_iter().collect();
-    misses.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    for (why, n) in misses {
-        println!("  {n:4}  {why}");
-    }
     for s in &skipped {
         println!("  {s}");
     }

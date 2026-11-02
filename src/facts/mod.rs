@@ -30,21 +30,19 @@
 //!
 //! These are [`FactKind`]s. A *fact* gives one its exact value, a *bound* an
 //! upper limit and a *floor* a lower one ([`FactSet`] keeps all three). A
-//! *quantity* is a kind among `|C|`, `ndv`, `min` and `max`: what the store
-//! hands to Z3.
+//! *quantity* is a kind among `|C|`, `ndv`, `min` and `max`: what a query's
+//! operators have variables for.
 //!
 //! # Pipeline
 //!
-//! Three sets of rules turn executed plans into constraints on a query:
+//! Three steps turn executed plans into constraints on a query:
 //!
 //! ```text
-//!  ObservedPlan ─[observe]─▶ FactSet ─[derive]─▶ closed FactSet ─▶ Analysis::with_facts
-//!                              facts   = v
-//!                              bounds  ≤ v
+//!  ObservedPlan ─[observe]─▶ FactSet ─[derive]─▶ Facts ─[apply]─▶ Analysis::with_facts
+//!                              facts   = v        (closed,
+//!                              bounds  ≤ v         shared)
 //!                              floors  ≥ v
 //!                              unobserved
-//!                                │
-//!                                └─[axioms]─▶ Analysis::with_store ─▶ Grounded
 //! ```
 //!
 //! 1. [`observe`] reads each operator of one executed plan
@@ -54,33 +52,31 @@
 //!    which a query can count ([`FactKind::counted`]).
 //! 2. [`derive`](mod@derive) combines exact facts across plans until nothing new follows
 //!    ([`FactSet::close`]): a size from one plan over a size from another is
-//!    a selectivity. Bounds and floors are carried along unchanged; one that
-//!    an exact fact contradicts is recorded in [`FactSet::conflicts`], as is
-//!    a second value for one fact. [`Analysis::with_facts`] substitutes the
-//!    closed set's selectivities into the query's formula.
-//! 3. [`axioms`](crate::axioms), asserted in every analysis, also relate
-//!    the facts' rows to the query's rows inside Z3
-//!    ([`Analysis::with_store`]), taking the facts as observed. Each
-//!    fact, bound and floor on a quantity becomes a tracked claim on a Z3
-//!    term; the axioms relating the terms are asserted untracked. Claims in
-//!    a contradiction are dropped ([`Grounded::rejected`](crate::Grounded::rejected)),
-//!    and the rest join the query's constraints for the bounds search.
+//!    a selectivity, and a selectivity times a size another size. Bounds and
+//!    floors are carried along unchanged; one that an exact fact contradicts
+//!    is recorded in [`FactSet::conflicts`], as is a second value for one
+//!    fact. [`Facts::new`] closes a set once, for any number of analyses.
+//! 3. [`Analysis::with_facts`] puts each quantity a fact, bound or floor
+//!    gives of an operator's rows, or of rows related to them, among the
+//!    query's constraints as a claim on the operator's variable, where it is
+//!    consistent with them. The [`axioms`](crate::axioms) relate the
+//!    operators' quantities in every analysis, so Z3 carries each claim to
+//!    the rest.
 //!
-//! Each fact records the rule it came from ([`Origin`]), and
-//! [`Grounded::axioms`](crate::Grounded::axioms) counts axioms by rule: the
-//! name is the heading of its spec in [`observe`], [`derive`](mod@derive) or [`axioms`](crate::axioms).
+//! Each fact records the rule it came from ([`Origin`]): the name is the
+//! heading of its spec in [`observe`] or [`derive`](mod@derive).
 //!
 //! [`Analysis::with_facts`]: crate::Analysis::with_facts
-//! [`Analysis::with_store`]: crate::Analysis::with_store
 
+pub(crate) mod apply;
 pub mod derive;
 pub mod observe;
 mod sql;
 mod state;
-pub(crate) mod store;
 
 pub use crate::rows::{Context, Exists, ExistsKind, Term};
 pub use state::{Pending, State, Taint, Value, states};
+pub use apply::Facts;
 pub use observe::{FactRule, Observation, RULES};
 pub use sql::{CountDialect, Counts};
 

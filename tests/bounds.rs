@@ -1,11 +1,12 @@
-//! Bounds relative to the source relations, for queries whose tightest bound is
-//! known. Keys are declared on `users.id`, `orders.id` and `products.id`.
+//! Bounds for queries whose tightest bound is known: of the query alone,
+//! and with its tables held to sizes ([`SIZES`]). Keys are declared on
+//! `users.id`, `orders.id` and `products.id`.
 
 mod common;
 
 use std::sync::Arc;
 
-use cardinal::{Bounds, Linear, analyze_sql};
+use cardinal::{Analysis, Bounds, analyze_sql};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -14,9 +15,16 @@ fn shop() -> SessionContext {
     common::shop_datasets().remove(0).context(true)
 }
 
+/// The shop's tables' sizes, all different, so that a bound shows which
+/// table it comes from.
+const SIZES: &[(&str, u64)] = &[("users", 100), ("orders", 300), ("products", 50), ("order_items", 1000)];
+
+async fn analyze(ctx: &SessionContext, sql: &str) -> Analysis {
+    analyze_sql(ctx, sql, Default::default()).await.unwrap()
+}
+
 async fn bounds_in(ctx: &SessionContext, sql: &str) -> Bounds {
-    let a = analyze_sql(ctx, sql).await.unwrap();
-    let b = a.bounds().unwrap();
+    let b = analyze(ctx, sql).await.bounds().unwrap();
     println!("{sql}\n  {b}");
     b
 }
@@ -25,82 +33,97 @@ async fn bounds(sql: &str) -> Bounds {
     bounds_in(&shop(), sql).await
 }
 
-const fn exactly(num: u64, den: u64) -> Linear {
-    Linear { num, den, add: 0 }
+/// `sql`'s bounds with its tables held to `sizes`.
+async fn sized_in(ctx: &SessionContext, sql: &str, sizes: &[(&str, u64)]) -> Bounds {
+    let b = common::sized(&analyze(ctx, sql).await, sizes);
+    println!("{sql}\n  with {sizes:?}: {b}");
+    b
 }
 
-/// The bound relative to `table`, and whether it is exact.
-fn table(b: &Bounds, table: &str) -> Option<(Linear, bool)> {
-    b.tables
-        .iter()
-        .find(|t| t.table == table)
-        .map(|t| (t.bound, t.exact))
+/// `sql`'s bounds with the shop's tables held to [`SIZES`].
+async fn sized(sql: &str) -> Bounds {
+    sized_in(&shop(), sql, SIZES).await
+}
+
+/// `lo <= X <= hi`.
+fn range(lo: u64, hi: u64) -> Bounds {
+    Bounds { lower: lo, upper: Some(hi) }
+}
+
+/// `X <= hi`.
+fn at_most(hi: u64) -> Bounds {
+    range(0, hi)
+}
+
+/// `X = n`.
+fn exactly(n: u64) -> Bounds {
+    range(n, n)
 }
 
 #[tokio::test]
-async fn self_join_on_key_halves_the_input() {
+async fn self_join_on_key_keeps_at_most_each_row() {
     let b = bounds("SELECT * FROM users a JOIN users b ON a.id = b.id").await;
-    assert_eq!(b.sum, Some(exactly(1, 2)));
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
-    assert_eq!(b.constant, None);
-    assert_eq!(b.to_string(), "X <= |users|; X <= 1/2·Σ");
+    assert_eq!(b.upper, None);
+    let b = sized("SELECT * FROM users a JOIN users b ON a.id = b.id").await;
+    assert_eq!(b, at_most(100));
+    assert_eq!(b.to_string(), "0 <= X <= 100");
 }
 
 #[tokio::test]
-async fn three_way_self_join_on_key_thirds_the_input() {
-    let b = bounds("SELECT * FROM users a JOIN users b ON a.id = b.id JOIN users c ON b.id = c.id")
+async fn three_way_self_join_on_key_keeps_at_most_each_row() {
+    let b = sized("SELECT * FROM users a JOIN users b ON a.id = b.id JOIN users c ON b.id = c.id")
         .await;
-    assert_eq!(b.sum, Some(exactly(1, 3)));
+    assert_eq!(b, at_most(100));
 }
 
 #[tokio::test]
 async fn foreign_key_join_is_bounded_by_the_referencing_table() {
-    let b = bounds("SELECT * FROM orders o JOIN users u ON o.user_id = u.id").await;
-    assert_eq!(table(&b, "orders"), Some((exactly(1, 1), false)));
     // Many orders can share one user, so |users| bounds nothing.
-    assert_eq!(table(&b, "users"), None);
+    let b = sized("SELECT * FROM orders o JOIN users u ON o.user_id = u.id").await;
+    assert_eq!(b, at_most(300));
 }
 
 #[tokio::test]
 async fn left_join_to_a_key_keeps_exactly_every_row() {
-    let b = bounds("SELECT * FROM orders o LEFT JOIN users u ON o.user_id = u.id").await;
-    assert_eq!(table(&b, "orders"), Some((exactly(1, 1), true)));
-    assert_eq!(b.to_string(), "X = |orders|");
+    let b = sized("SELECT * FROM orders o LEFT JOIN users u ON o.user_id = u.id").await;
+    assert_eq!(b, exactly(300));
+    assert_eq!(b.to_string(), "X = 300");
 }
 
 #[tokio::test]
 async fn projection_does_not_reduce() {
-    let b = bounds("SELECT name, age + 1 FROM users").await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), true)));
+    let b = sized("SELECT name, age + 1 FROM users").await;
+    assert_eq!(b, exactly(100));
 }
 
 #[tokio::test]
 async fn union_all_of_a_table_with_itself() {
-    let b = bounds("SELECT id FROM users UNION ALL SELECT id FROM users").await;
-    assert_eq!(table(&b, "users"), Some((exactly(2, 1), true)));
+    let b = sized("SELECT id FROM users UNION ALL SELECT id FROM users").await;
+    assert_eq!(b, exactly(200));
 }
 
 #[tokio::test]
 async fn primary_key_lookup_returns_at_most_one_row() {
     let b = bounds("SELECT * FROM users WHERE id = 5").await;
-    assert_eq!(b.constant, Some(1));
+    assert_eq!(b.upper, Some(1));
     let b = bounds("SELECT * FROM users WHERE id IN (1, 2, 3) AND age > 20").await;
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
 }
 
 #[tokio::test]
 async fn non_key_lookup_is_not_constant() {
     let b = bounds("SELECT * FROM users WHERE age = 5").await;
-    assert_eq!(b.constant, None);
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    assert_eq!(b.upper, None);
+    let b = sized("SELECT * FROM users WHERE age = 5").await;
+    assert_eq!(b, at_most(100));
 }
 
 #[tokio::test]
 async fn limit_is_a_constant_bound() {
     let b = bounds("SELECT * FROM users u JOIN orders o ON u.age < o.amount LIMIT 10").await;
-    assert_eq!(b.constant, Some(10));
+    assert_eq!(b.upper, Some(10));
     let b = bounds("SELECT * FROM users ORDER BY age LIMIT 10 OFFSET 5").await;
-    assert_eq!(b.constant, Some(10));
+    assert_eq!(b.upper, Some(10));
 }
 
 #[tokio::test]
@@ -117,90 +140,87 @@ async fn group_by_boolean_has_at_most_three_groups() {
     .unwrap();
     let b = bounds_in(&ctx, "SELECT active, count(*) FROM flags GROUP BY active").await;
     // true, false, NULL
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
 }
 
 #[tokio::test]
 async fn group_by_a_key_does_not_reduce() {
-    let b = bounds("SELECT id, count(*) FROM users GROUP BY id").await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), true)));
+    let b = sized("SELECT id, count(*) FROM users GROUP BY id").await;
+    assert_eq!(b, exactly(100));
 }
 
 #[tokio::test]
 async fn group_by_a_joined_column_is_bounded_by_its_table() {
     // Joins create no new values: at most one group per user.
-    let b = bounds(
+    let b = sized(
         "SELECT u.id, count(*) FROM users u JOIN orders o ON o.amount > u.age GROUP BY u.id",
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    assert_eq!(b, at_most(100));
 }
 
 #[tokio::test]
 async fn intersect_is_bounded_by_both_sides() {
-    let b = bounds("SELECT id FROM users INTERSECT SELECT user_id FROM orders").await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
-    assert_eq!(table(&b, "orders"), Some((exactly(1, 1), false)));
-    assert_eq!(b.sum, Some(exactly(1, 2)));
+    let sql = "SELECT id FROM users INTERSECT SELECT user_id FROM orders";
+    let b = sized_in(&shop(), sql, &[("users", 100), ("orders", 300)]).await;
+    assert_eq!(b, at_most(100));
+    let b = sized_in(&shop(), sql, &[("users", 300), ("orders", 100)]).await;
+    assert_eq!(b, at_most(100));
 }
 
 #[tokio::test]
 async fn ungrouped_aggregate_is_one_row() {
     let b =
         bounds("SELECT count(*), max(age) FROM users u JOIN orders o ON u.id = o.user_id").await;
-    assert_eq!(b.constant, Some(1));
-    assert_eq!(b.to_string(), "X <= 1");
+    assert_eq!(b, exactly(1));
+    assert_eq!(b.to_string(), "X = 1");
 }
 
 #[tokio::test]
 async fn cross_join_is_unbounded() {
     let b = bounds("SELECT * FROM users CROSS JOIN products").await;
     assert_eq!(b, Bounds::default());
-    assert_eq!(b.to_string(), "unbounded");
+    assert_eq!(b.to_string(), "X >= 0");
+    // A product of the tables' sizes.
+    let b = sized("SELECT * FROM users CROSS JOIN products").await;
+    assert_eq!(b, exactly(5000));
 }
 
 #[tokio::test]
-async fn sum_bound_when_no_single_table_bounds() {
-    // At most |orders| matches plus the unmatched users.
-    let b = bounds("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
-    assert!(b.tables.is_empty());
-    assert_eq!(b.sum, Some(exactly(1, 1)));
-    assert_eq!(b.to_string(), "X <= Σ");
+async fn left_join_keeps_each_row_and_adds_at_most_the_other_side() {
+    // Every user, and at most |orders| matches plus the unmatched users:
+    // with any match, at least one user is matched.
+    let b = sized("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
+    assert_eq!(b, range(100, 399));
 }
 
 #[tokio::test]
 async fn tpch_q5_is_bounded_by_the_nation_table() {
     // Six-way join, grouped by n_name: at most one row per nation.
     let ctx = common::tpch_datasets().remove(0).context(true);
-    let b = bounds_in(&ctx, include_str!("tpch/q05.sql")).await;
-    assert_eq!(table(&b, "nation"), Some((exactly(1, 1), false)));
+    let sizes = [
+        ("nation", 25),
+        ("region", 5),
+        ("customer", 1500),
+        ("orders", 15000),
+        ("lineitem", 60000),
+        ("supplier", 100),
+    ];
+    let b = sized_in(&ctx, include_str!("tpch/q05.sql"), &sizes).await;
+    assert_eq!(b, at_most(25));
 }
 
 #[test]
-fn linear_arithmetic() {
-    let half_plus_one = Linear {
-        num: 1,
-        den: 2,
-        add: 1,
-    };
-    assert!(half_plus_one.holds(6, 10));
-    assert!(!half_plus_one.holds(7, 10));
-    assert_eq!(half_plus_one.render("Σ"), "1/2·Σ + 1");
-    assert_eq!(exactly(3, 1).render("|t|"), "3·|t|");
-    assert_eq!(
-        Linear {
-            num: 0,
-            den: 1,
-            add: 4
-        }
-        .render("Σ"),
-        "4"
-    );
+fn bounds_hold_rows_in_their_range() {
+    assert!(range(2, 5).holds(2) && range(2, 5).holds(5));
+    assert!(!range(2, 5).holds(1) && !range(2, 5).holds(6));
+    assert!(Bounds { lower: 3, upper: None }.holds(u64::MAX));
+    assert_eq!(Bounds { lower: 3, upper: None }.to_string(), "X >= 3");
 }
 
 #[tokio::test]
 async fn product_cap_is_configurable() {
-    use cardinal::{Options, analyze_sql_with};
+    use cardinal::Options;
     let ctx = shop();
     let schema = Arc::new(Schema::new(
         ["a", "b", "c", "d"]
@@ -219,38 +239,39 @@ async fn product_cap_is_configurable() {
                GROUP BY a, b, c, d";
     assert_eq!(Options::default().max_product, 3);
     let b = bounds_in(&ctx, sql).await;
-    assert_eq!(b.constant, None);
-    assert_eq!(table(&b, "wide"), Some((exactly(1, 1), false)));
-    let a = analyze_sql_with(&ctx, sql, Options { max_product: 4, ..Default::default() })
+    assert_eq!(b.upper, None);
+    let b = sized_in(&ctx, sql, &[("wide", 1000)]).await;
+    assert_eq!(b, at_most(1000));
+    let a = analyze_sql(&ctx, sql, Options { max_product: 4, ..Default::default() })
         .await
         .unwrap();
-    assert_eq!(a.bounds().unwrap().constant, Some(16));
+    assert_eq!(a.bounds().unwrap().upper, Some(16));
     // Columns pinned to one value are the same on every row: no key is
     // needed to tell the groups apart, so there is at most one.
     let sql = "SELECT a, b, c, d, count(*) FROM wide
                WHERE a = 1 AND b = 2 AND c = 3 AND d = 4 GROUP BY a, b, c, d";
-    assert_eq!(bounds_in(&ctx, sql).await.constant, Some(1));
+    assert_eq!(bounds_in(&ctx, sql).await.upper, Some(1));
 }
 
 #[tokio::test]
 async fn contradictory_filter_returns_nothing() {
     let b = bounds("SELECT * FROM users WHERE age > 20 AND age < 10").await;
-    assert_eq!(b.constant, Some(0));
+    assert_eq!(b.upper, Some(0));
     // Also across operators: the join key cannot satisfy both sides' filters.
     let b = bounds(
         "SELECT * FROM (SELECT * FROM users WHERE id < 5) u
          JOIN (SELECT * FROM orders WHERE user_id > 10) o ON u.id = o.user_id",
     )
     .await;
-    assert_eq!(b.constant, Some(0));
+    assert_eq!(b.upper, Some(0));
 }
 
 #[tokio::test]
 async fn range_on_a_key_is_a_constant_bound() {
     let b = bounds("SELECT * FROM users WHERE id BETWEEN 1 AND 10").await;
-    assert_eq!(b.constant, Some(10));
+    assert_eq!(b.upper, Some(10));
     let b = bounds("SELECT * FROM users WHERE (id IN (1, 2) OR id >= 7 AND id < 9) AND id <> 2").await;
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
 }
 
 #[tokio::test]
@@ -262,7 +283,7 @@ async fn range_on_a_joined_key_bounds_the_other_side_of_an_equality() {
          WHERE u.id BETWEEN 1 AND 5 GROUP BY o.user_id",
     )
     .await;
-    assert_eq!(b.constant, Some(5));
+    assert_eq!(b.upper, Some(5));
 }
 
 #[tokio::test]
@@ -273,7 +294,7 @@ async fn group_by_case_has_one_group_per_branch() {
     )
     .await;
     // 'old', 'young', NULL
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
 }
 
 #[tokio::test]
@@ -283,7 +304,7 @@ async fn group_by_date_parts() {
     )
     .await;
     // 12 months and NULL.
-    assert_eq!(b.constant, Some(13));
+    assert_eq!(b.upper, Some(13));
     let b = bounds(
         "SELECT date_part('year', d), count(*)
          FROM (SELECT make_date(1990 + age, 1, 1) AS d FROM users)
@@ -291,7 +312,7 @@ async fn group_by_date_parts() {
     )
     .await;
     // 1995, 1996, 1997
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
 }
 
 #[tokio::test]
@@ -299,124 +320,131 @@ async fn tpch_queries_filtered_to_few_groups_are_constant() {
     let ctx = common::tpch_datasets().remove(0).context(true);
     // Two nations each, and two ship years.
     let b = bounds_in(&ctx, include_str!("tpch/q07.sql")).await;
-    assert_eq!(b.constant, Some(8));
+    assert_eq!(b.upper, Some(8));
     // Two order years.
     let b = bounds_in(&ctx, include_str!("tpch/q08.sql")).await;
-    assert_eq!(b.constant, Some(2));
+    assert_eq!(b.upper, Some(2));
     // Seven country codes, from a filter on the grouped expression.
     let b = bounds_in(&ctx, include_str!("tpch/q22.sql")).await;
-    assert_eq!(b.constant, Some(7));
+    assert_eq!(b.upper, Some(7));
 }
 
 #[tokio::test]
 async fn groups_with_several_rows_are_few() {
     // Each surviving group holds at least two of the table's rows.
-    let b = bounds("SELECT name, count(*) FROM users GROUP BY name HAVING count(*) > 1").await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 2), false)));
-    let b = bounds(
+    let b = sized("SELECT name, count(*) FROM users GROUP BY name HAVING count(*) > 1").await;
+    assert_eq!(b, at_most(50));
+    // At most a third of the orders' users, fewer than all users.
+    let b = sized_in(
+        &shop(),
         "SELECT o.user_id FROM orders o JOIN users u ON o.user_id = u.id
          GROUP BY o.user_id HAVING count(o.id) >= 3 ORDER BY 1",
+        &[("users", 1000), ("orders", 300)],
     )
     .await;
-    assert_eq!(table(&b, "orders"), Some((exactly(1, 3), false)));
+    assert_eq!(b, at_most(100));
 }
 
 #[tokio::test]
 async fn disjoint_filters_of_one_table_partition_it() {
     // No user is both under 18 and at least 18.
-    let b = bounds(
+    let b = sized(
         "SELECT id FROM users WHERE age < 18 UNION ALL SELECT id FROM users WHERE age >= 18",
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
-    let b = bounds(
+    assert_eq!(b, at_most(100));
+    let b = sized(
         "SELECT name FROM users WHERE age < 18
          UNION ALL SELECT name FROM users WHERE age BETWEEN 18 AND 64
          UNION ALL SELECT name FROM users WHERE age > 64
          UNION ALL SELECT name FROM users WHERE age IS NULL",
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    assert_eq!(b, at_most(100));
     // Overlapping filters can hold the same rows twice.
-    let b = bounds(
+    let b = sized(
         "SELECT id FROM users WHERE age < 30 UNION ALL SELECT id FROM users WHERE age > 20",
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(2, 1), false)));
+    assert_eq!(b, at_most(200));
 }
 
 #[tokio::test]
 async fn top_n_per_group() {
     // row_number() numbers each partition's rows, so rn <= 3 keeps at most
     // three rows per user.
-    let b = bounds(
+    let b = sized_in(
+        &shop(),
         "SELECT * FROM (SELECT o.user_id, o.amount, row_number() OVER
            (PARTITION BY o.user_id ORDER BY o.amount DESC) AS rn
          FROM orders o JOIN users u ON o.user_id = u.id) WHERE rn <= 3",
+        &[("users", 100), ("orders", 1000)],
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(3, 1), false)));
+    assert_eq!(b, at_most(300));
     // Without a partition, a page of rows.
     let b = bounds(
         "SELECT id FROM (SELECT id, row_number() OVER (ORDER BY age) AS rn FROM users) t
          WHERE t.rn BETWEEN 11 AND 20",
     )
     .await;
-    assert_eq!(b.constant, Some(10));
+    assert_eq!(b.upper, Some(10));
     // rn = 1 keeps one row per user: joined on user_id, it matches each user
     // at most once.
-    let b = bounds(
+    let b = sized_in(
+        &shop(),
         "SELECT u.id, o.amount FROM users u JOIN (SELECT o.user_id, o.amount, row_number() OVER
            (PARTITION BY o.user_id ORDER BY o.amount DESC) AS rn FROM orders o) o
          ON u.id = o.user_id WHERE o.rn = 1",
+        &[("users", 100), ("orders", 1000)],
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    assert_eq!(b, at_most(100));
     // rank() repeats on ties, so it bounds nothing.
     let b = bounds(
         "SELECT id FROM (SELECT id, rank() OVER (ORDER BY age) AS r FROM users) t WHERE t.r = 1",
     )
     .await;
-    assert_eq!(b.constant, None);
+    assert_eq!(b.upper, None);
 }
 
 #[tokio::test]
 async fn left_join_rows_without_a_match() {
     // The anti-join pattern: rows padded with NULL are unmatched users.
-    let b = bounds(
+    let b = sized(
         "SELECT u.* FROM users u LEFT JOIN orders o ON o.user_id = u.id WHERE o.user_id IS NULL",
     )
     .await;
-    assert_eq!(table(&b, "users"), Some((exactly(1, 1), false)));
+    assert_eq!(b, at_most(100));
     // Without a key on either side, the matched rows are the inner join's.
-    let b = bounds(
+    let b = sized(
         "SELECT * FROM order_items i LEFT JOIN orders o ON i.qty = o.user_id
          WHERE o.user_id IS NULL",
     )
     .await;
-    assert_eq!(table(&b, "order_items"), Some((exactly(1, 1), false)));
-    let b = bounds(
+    assert_eq!(b, at_most(1000));
+    let b = sized(
         "SELECT * FROM order_items i FULL JOIN orders o ON i.qty = o.user_id
          WHERE i.qty IS NULL AND o.user_id > 3",
     )
     .await;
-    assert_eq!(table(&b, "orders"), Some((exactly(1, 1), false)));
+    assert_eq!(b, at_most(300));
 }
 
 #[tokio::test]
 async fn parameters_and_scalar_subqueries_are_single_values() {
     let b = bounds("SELECT * FROM users WHERE id = $1").await;
-    assert_eq!(b.constant, Some(1));
+    assert_eq!(b.upper, Some(1));
     let b = bounds("SELECT * FROM users WHERE id IN ($1, $2, 7) AND age > $3").await;
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
     let b = bounds("SELECT * FROM users WHERE id = (SELECT max(user_id) FROM orders)").await;
-    assert_eq!(b.constant, Some(1));
+    assert_eq!(b.upper, Some(1));
     // A correlated subquery takes a value per row.
     let b = bounds(
         "SELECT * FROM users u WHERE id = (SELECT max(o.id) FROM orders o WHERE o.user_id = u.age)",
     )
     .await;
-    assert_eq!(b.constant, None);
+    assert_eq!(b.upper, None);
 }
 
 #[tokio::test]
@@ -426,17 +454,17 @@ async fn buckets_of_a_range() {
     )
     .await;
     // 1, 2, ..., 6
-    assert_eq!(b.constant, Some(6));
+    assert_eq!(b.upper, Some(6));
     let b = bounds("SELECT id % 16, count(*) FROM users WHERE id >= 0 GROUP BY 1").await;
-    assert_eq!(b.constant, Some(16));
+    assert_eq!(b.upper, Some(16));
     // Could be negative: -15..=15, and NULL.
     let b = bounds("SELECT age % 16, count(*) FROM users GROUP BY 1").await;
-    assert_eq!(b.constant, Some(32));
+    assert_eq!(b.upper, Some(32));
     let b = bounds("SELECT age * 2 + 1, count(*) FROM users WHERE age IN (1, 2, 3) GROUP BY 1").await;
-    assert_eq!(b.constant, Some(3));
+    assert_eq!(b.upper, Some(3));
     // May overflow and wrap: no range.
     let b = bounds("SELECT age + 1, count(*) FROM users WHERE age > 5 GROUP BY 1").await;
-    assert_eq!(b.constant, None);
+    assert_eq!(b.upper, None);
 }
 
 #[tokio::test]
@@ -447,7 +475,7 @@ async fn date_trunc_of_a_range() {
          WHERE d >= DATE '2024-01-01' AND d < DATE '2025-01-01' GROUP BY 1",
     )
     .await;
-    assert_eq!(b.constant, Some(12));
+    assert_eq!(b.upper, Some(12));
     let b = bounds(
         "SELECT date_trunc('week', d), count(*)
          FROM (SELECT make_date(2000 + age, 1 + id, 1) AS d FROM users)
@@ -455,7 +483,7 @@ async fn date_trunc_of_a_range() {
     )
     .await;
     // March 2024 meets the weeks of Feb 26, Mar 4, 11, 18, 25.
-    assert_eq!(b.constant, Some(5));
+    assert_eq!(b.upper, Some(5));
 }
 
 #[tokio::test]
@@ -467,7 +495,7 @@ async fn full_join_keeps_rows_with_null_keys() {
     for data in common::shop_datasets() {
         let name = data.name.clone();
         let ctx = data.context(false);
-        let a = analyze_sql(&ctx, sql).await.unwrap();
+        let a = analyze(&ctx, sql).await;
         let v = a.validate(&ctx).await.unwrap();
         assert_eq!(v.violation, None, "{name}");
     }
@@ -499,7 +527,7 @@ async fn a_scalar_subquerys_padded_count_reads_as_its_own_column() {
         let name = data.name.clone();
         let keys = data.unique_keys;
         let ctx = data.context(keys);
-        let a = analyze_sql(&ctx, sql).await.unwrap();
+        let a = analyze(&ctx, sql).await;
         let v = a.validate(&ctx).await.unwrap();
         assert_eq!(v.violation, None, "{name}");
     }
@@ -522,7 +550,7 @@ async fn ranges() -> SessionContext {
 /// `sql`'s bounds over [`ranges`], checked against its data.
 async fn ranged(sql: &str) -> Bounds {
     let ctx = ranges().await;
-    let a = analyze_sql(&ctx, sql).await.unwrap();
+    let a = analyze(&ctx, sql).await;
     assert_eq!(a.validate(&ctx).await.unwrap().violation, None, "{sql}");
     let b = a.bounds().unwrap();
     println!("{sql}\n  {b}");
@@ -535,9 +563,9 @@ async fn ranged(sql: &str) -> Bounds {
 #[tokio::test]
 async fn disjoint_key_ranges_join_to_nothing() {
     let b = ranged("SELECT * FROM t JOIN u ON t.a = u.b WHERE t.a < 5 AND u.b > 10").await;
-    assert_eq!(b.constant, Some(0));
+    assert_eq!(b.upper, Some(0));
     let b = ranged("SELECT * FROM t JOIN u ON t.a = u.b WHERE t.a < t.c AND t.c <= 5 AND u.b > 10").await;
-    assert_eq!(b.constant, Some(0));
+    assert_eq!(b.upper, Some(0));
 }
 
 /// `a < b` puts `a` below `b`'s greatest value: with `1 <= a` and `b <= 3`,
@@ -545,5 +573,5 @@ async fn disjoint_key_ranges_join_to_nothing() {
 #[tokio::test]
 async fn a_column_below_another_takes_fewer_values() {
     let b = ranged("SELECT DISTINCT a FROM t WHERE 1 <= a AND b <= 3 AND a < b").await;
-    assert_eq!(b.constant, Some(2));
+    assert_eq!(b.upper, Some(2));
 }

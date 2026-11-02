@@ -6,7 +6,8 @@ use std::process::Command;
 use cardinal_debug::Dump;
 
 const SCHEMA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tpch.sql");
-const QUERY: &str = "SELECT o_orderkey, c_name FROM orders JOIN customer ON o_custkey = c_custkey WHERE o_totalprice > 100";
+/// At most three orders, each with at most one customer.
+const QUERY: &str = "SELECT o_orderkey, c_name FROM orders JOIN customer ON o_custkey = c_custkey WHERE o_orderkey IN (1, 2, 3)";
 
 fn run(args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_cardinal-debug")).args(args).output().unwrap();
@@ -27,25 +28,24 @@ fn dump_then_view_as_text_and_html() {
     run(&["dump", "--schema", SCHEMA, "--query", QUERY, "--fk", fk, "-o", json.to_str().unwrap(), "--smt2", smt2.to_str().unwrap()]);
 
     let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
-    assert_eq!(dump.verdict, "Reduces");
-    assert_eq!(dump.bounds.as_deref(), Some("X <= |orders|"));
-    let table = dump.proofs.iter().find(|p| p.name == "table:orders").unwrap();
-    assert_eq!(table.status, cardinal::ProofStatus::Proven);
+    assert_eq!(dump.bounds.as_deref(), Some("0 <= X <= 3"));
+    let upper = dump.proofs.iter().find(|p| p.name == "upper").unwrap();
+    assert_eq!(upper.status, cardinal::ProofStatus::Proven);
     let join = dump.trace.nodes.iter().position(|n| n.label.starts_with("Inner Join")).unwrap();
-    assert!(table.core.iter().any(|&c| dump.trace.constraints[c].node == Some(join)));
+    assert!(upper.core.iter().any(|&c| dump.trace.constraints[c].node == Some(join)));
     assert!(std::fs::read_to_string(&smt2).unwrap().contains("(assert "));
 
     let text = run(&["view", json.to_str().unwrap()]);
     assert!(text.contains("Inner Join: orders.o_custkey = customer.c_custkey"), "{text}");
-    assert!(text.contains("table:orders"), "{text}");
-    let proof = run(&["view", json.to_str().unwrap(), "--proof", "table:orders"]);
-    assert!(proof.contains("● [") && proof.contains("Proof table:orders"), "{proof}");
+    assert!(text.contains("upper"), "{text}");
+    let proof = run(&["view", json.to_str().unwrap(), "--proof", "upper"]);
+    assert!(proof.contains("● [") && proof.contains("Proof upper"), "{proof}");
     let node = run(&["view", json.to_str().unwrap(), "--node", "0"]);
     assert!(node.contains("rule: non_negative at src/axioms.rs:"), "{node}");
 
     run(&["view", json.to_str().unwrap(), "--html", html.to_str().unwrap()]);
     let page = std::fs::read_to_string(&html).unwrap();
-    assert!(page.contains("X <= |orders|") && page.contains("Inner Join"));
+    assert!(page.contains("0 <= X <= 3") && page.contains("Inner Join"));
     assert!(!page.contains("__DATA__"));
 }
 
@@ -54,7 +54,7 @@ fn reads_duckdb_plans() {
     let plan = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/duckdb/explain/q03.json");
     let sql = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/tpch/q03.sql");
     let text = run(&["analyze", "--schema", SCHEMA, "--duckdb", plan, "--sql", sql, "--brief", "--no-bounds"]);
-    assert!(text.contains("Verdict:") && text.contains("verdict"), "{text}");
+    assert!(text.contains("Root:") && text.contains("Plan and constraints:"), "{text}");
 }
 
 #[test]
@@ -78,8 +78,8 @@ const Q05_FKS: [&str; 6] = [
     "nation(n_regionkey)->region(r_regionkey)",
 ];
 
-/// `dump` of TPC-H Q5 informed by the other queries' profiles, with `extra`
-/// arguments.
+/// `dump` of TPC-H Q5 with the other queries' profiles' facts, with
+/// `extra` arguments.
 fn dump_q05(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
     let json = temp(name);
     let mut args = vec!["dump", "--schema", SCHEMA, "--sql", Q05, "--profiles-dir", PROFILES, "--except", "q05"];
@@ -95,15 +95,14 @@ fn dump_q05(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
 
 #[test]
 fn facts_from_profiles() {
-    let (json, dump) = dump_q05("q05.json", &["--mode", "pinned"]);
+    let (json, dump) = dump_q05("q05.json", &[]);
     let facts = dump.facts.as_ref().expect("a facts section");
-    assert_eq!(facts.mode, "pinned");
     assert!(facts.explained && !facts.proofs.is_empty());
     assert_eq!(facts.proofs.len(), facts.base_proofs.len());
     let base = dump.trace.constraints.len();
     assert_eq!(facts.trace.constraints[..base], dump.trace.constraints[..]);
     assert!(facts.trace.constraints[base..].iter().all(|c| c.fact.is_some()));
-    assert!(!facts.report.pinned.is_empty(), "{:?}", facts.report);
+    assert!(facts.trace.constraints[base..].iter().any(|c| c.fact.as_ref().unwrap().source == "pinned rows"));
     // Some bound holds only with the facts, and its proof names them.
     let tighter = facts.proofs.iter().zip(&facts.base_proofs).find(|(w, wo)| {
         w.status == cardinal::ProofStatus::Proven && wo.status != cardinal::ProofStatus::Proven
@@ -113,7 +112,7 @@ fn facts_from_profiles() {
 
     let path = json.to_str().unwrap();
     let text = run(&["view", path]);
-    for want in ["With facts: ", "Facts:   pinned", "◆ [", "fact: pinned rows", "Proofs (without facts / with facts)", "Facts used:", "Facts not used:"] {
+    for want in ["With facts: ", "Facts:   ", "◆ [", "fact: pinned rows", "Proofs (without facts / with facts)", "Facts used"] {
         assert!(text.contains(want), "no {want:?} in {text}");
     }
     let proof = run(&["view", path, "--proof", &with.name]);
@@ -131,7 +130,6 @@ fn facts_from_profiles() {
 fn facts_without_explaining() {
     let (_, dump) = dump_q05("q05-quick.json", &["--no-explain"]);
     let facts = dump.facts.expect("a facts section");
-    assert_eq!(facts.mode, "ratios");
     assert!(!facts.explained && facts.proofs.is_empty() && facts.base_proofs.is_empty());
     assert!(facts.bounds.is_some());
 }

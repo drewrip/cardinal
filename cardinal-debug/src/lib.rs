@@ -1,9 +1,9 @@
 //! Dumps what cardinal tells Z3 about a query, and renders it.
 //!
-//! A [`Dump`] holds an analysis's verdict and bounds, its [`Trace`] (every
+//! A [`Dump`] holds an analysis's bounds, its [`Trace`] (every
 //! constraint with the plan node and analyzer line it comes from) and a
-//! [`Proof`] of each bound naming the constraints it needs, and, informed by
-//! facts, the same again with the facts' constraints among them
+//! [`Proof`] of each bound naming the constraints it needs, and, with facts,
+//! the same again with the facts' constraints among them
 //! ([`FactsDump`]). [`ascii`] and [`html`] render one.
 
 pub mod ascii;
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use cardinal::facts::FactSet;
 use cardinal::observed::ObservedPlan;
-use cardinal::{Analysis, FactMode, FactReport, ForeignKey, Options, Proof, Trace, Verdict};
+use cardinal::{Analysis, Facts, ForeignKey, Options, Proof, Trace};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +24,6 @@ pub struct Dump {
     pub query: String,
     /// The optimized plan that was analyzed.
     pub plan: String,
-    /// `Reduces`, `MightGrow` or `Unknown: {reason}`.
-    pub verdict: String,
-    /// For `MightGrow`: values of the tables and variables that satisfy every
-    /// constraint yet output more rows than the scans read.
-    pub counterexample: Option<BTreeMap<String, i64>>,
     /// The proven bounds, if computed.
     pub bounds: Option<String>,
     pub trace: Trace,
@@ -38,16 +33,13 @@ pub struct Dump {
     pub facts: Option<FactsDump>,
 }
 
-/// An analysis informed by facts ([`cardinal::Informed`]).
+/// An analysis with facts ([`cardinal::Analysis::with_facts`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactsDump {
-    /// `ratios` or `pinned`.
-    pub mode: String,
-    /// What the facts gave and left.
-    pub report: FactReport,
     /// The bounds proven with the facts, if computed.
     pub bounds: Option<String>,
-    /// The base constraints, then the facts'.
+    /// The base constraints, then the facts', each saying which facts it is
+    /// read from.
     pub trace: Trace,
     /// The claims of the bounds with facts, proven with the facts' constraints.
     pub proofs: Vec<Proof>,
@@ -59,10 +51,9 @@ pub struct FactsDump {
     pub conflicts: Vec<String>,
 }
 
-/// Facts to inform an analysis with.
+/// Facts to put in an analysis.
 pub struct FactInput {
-    pub facts: FactSet,
-    pub mode: FactMode,
+    pub facts: Facts,
     /// Whether to prove the bounds with facts again, with minimal cores.
     pub explain: bool,
 }
@@ -79,7 +70,7 @@ pub struct Profile {
 
 /// `facts` (or none) with the facts of each of `profiles` added, over the
 /// tables of `ctx`, and closed.
-pub async fn read_facts(ctx: &SessionContext, facts: Option<FactSet>, profiles: &[Profile]) -> Result<FactSet, String> {
+pub async fn read_facts(ctx: &SessionContext, facts: Option<FactSet>, profiles: &[Profile]) -> Result<Facts, String> {
     let mut set = facts.unwrap_or_default();
     if !profiles.is_empty() {
         let catalog = cardinal::observed::Catalog::from_context(ctx).await.map_err(|e| e.to_string())?;
@@ -93,8 +84,7 @@ pub async fn read_facts(ctx: &SessionContext, facts: Option<FactSet>, profiles: 
             set.observe(&plan);
         }
     }
-    set.close();
-    Ok(set)
+    Ok(Facts::new(set))
 }
 
 /// Where the query to analyze comes from.
@@ -136,7 +126,7 @@ pub fn foreign_key(s: &str) -> Result<ForeignKey, String> {
 
 /// Analyzes `source` against `ctx` with `options` (traced), proves bounds
 /// unless `bounds` is false, and explains each; with `facts`, does the same
-/// again informed by them.
+/// again with them.
 pub async fn dump(
     ctx: &SessionContext,
     source: &Source,
@@ -144,10 +134,10 @@ pub async fn dump(
     bounds: bool,
     facts: Option<&FactInput>,
 ) -> Result<Dump, String> {
-    let options = Options { trace: true, selectivity: options.selectivity || facts.is_some(), ..options };
+    let options = Options { trace: true, ..options };
     let err = |e: cardinal::Error| e.to_string();
     let (query, analysis): (String, Analysis) = match source {
-        Source::Sql(sql) => (sql.clone(), cardinal::analyze_sql_with(ctx, sql, options).await.map_err(err)?),
+        Source::Sql(sql) => (sql.clone(), cardinal::analyze_sql(ctx, sql, options).await.map_err(err)?),
         Source::DuckDb { json, sql } | Source::Postgres { json, sql } => {
             let catalog = cardinal::observed::Catalog::from_context(ctx).await.map_err(err)?;
             let a = match source {
@@ -159,15 +149,7 @@ pub async fn dump(
         }
     };
     let proven = if bounds { Some(analysis.bounds().map_err(err)?) } else { None };
-    let proofs = analysis.explain(proven.as_ref()).map_err(err)?;
-    let (verdict, counterexample) = match &analysis.verdict {
-        Verdict::Reduces => ("Reduces".to_string(), None),
-        Verdict::MightGrow(c) => {
-            let values = c.tables.iter().map(|(t, v)| (format!("|{t}|"), *v)).chain(c.vars.clone()).collect();
-            ("MightGrow".to_string(), Some(values))
-        }
-        Verdict::Unknown(reason) => (format!("Unknown: {reason}"), None),
-    };
+    let proofs = explain(&analysis, proven.as_ref())?;
     let facts = match facts {
         Some(f) => Some(inform(&analysis, f, bounds)?),
         None => None,
@@ -175,8 +157,6 @@ pub async fn dump(
     Ok(Dump {
         query,
         plan: analysis.plan.clone(),
-        verdict,
-        counterexample,
         bounds: proven.map(|b| b.to_string()),
         trace: analysis.trace.expect("traced"),
         proofs,
@@ -186,16 +166,17 @@ pub async fn dump(
 
 fn inform(analysis: &Analysis, input: &FactInput, bounds: bool) -> Result<FactsDump, String> {
     let err = |e: cardinal::Error| e.to_string();
-    let informed = analysis.with_facts(&input.facts, input.mode).map_err(err)?;
+    let informed = analysis.with_facts(&input.facts).map_err(err)?;
     let proven = if bounds { Some(informed.bounds().map_err(err)?) } else { None };
     let (proofs, base_proofs) = if input.explain {
-        (informed.explain(proven.as_ref()).map_err(err)?, informed.explain_without_facts(proven.as_ref()).map_err(err)?)
+        (explain(&informed, proven.as_ref())?, explain(analysis, proven.as_ref())?)
     } else {
         (vec![], vec![])
     };
     let origins = |os: &[cardinal::facts::Origin]| os.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", ");
     let conflicts = input
         .facts
+        .set()
         .conflicts
         .iter()
         .map(|c| {
@@ -204,8 +185,6 @@ fn inform(analysis: &Analysis, input: &FactInput, bounds: bool) -> Result<FactsD
         })
         .collect();
     Ok(FactsDump {
-        mode: input.mode.to_string(),
-        report: informed.report(),
         bounds: proven.map(|b| b.to_string()),
         trace: informed.trace.clone().expect("traced"),
         proofs,
@@ -213,6 +192,11 @@ fn inform(analysis: &Analysis, input: &FactInput, bounds: bool) -> Result<FactsD
         explained: input.explain,
         conflicts,
     })
+}
+
+/// `a`'s proofs of `bounds`, none if they were not computed.
+fn explain(a: &Analysis, bounds: Option<&cardinal::Bounds>) -> Result<Vec<Proof>, String> {
+    bounds.map_or(Ok(vec![]), |b| a.explain(b).map_err(|e| e.to_string()))
 }
 
 /// `text` with each NDV variable named by its column, e.g. `op3_Filter_c1`

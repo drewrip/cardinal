@@ -126,8 +126,6 @@ pub(crate) struct Analyzer<'a> {
     pub(crate) max_product: usize,
     /// Declared foreign keys.
     pub(crate) foreign_keys: &'a [ForeignKey],
-    /// The last join visited's [`Node::at_most_once`], for its node to take.
-    pub(crate) at_most_once: (bool, bool),
     /// Whether to log every assertion, for [`crate::trace`].
     pub(crate) trace: bool,
     /// Every assertion, in order, if `trace` is set.
@@ -173,9 +171,6 @@ pub(crate) struct Node {
     /// For a base scan with pushed-down filters: the raw scan's cardinality and
     /// NDV variables, and the scan without filters or fetch.
     pub(crate) raw_scan: Option<(String, Vec<String>, LogicalPlan)>,
-    /// For an equi-join: whether each left row matches at most one right row
-    /// (a unique right key, or a foreign key from the left), and the mirror.
-    pub(crate) at_most_once: (bool, bool),
     /// The min and max variable of each output column that has them
     /// ([`Rel::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
     pub(crate) min_vars: Vec<Option<String>>,
@@ -302,7 +297,6 @@ impl<'a> Analyzer<'a> {
             origins: Vec::new(),
             max_product,
             foreign_keys,
-            at_most_once: (false, false),
             trace,
             log: RefCell::new(Vec::new()),
             owners: Vec::new(),
@@ -455,7 +449,6 @@ impl<'a> Analyzer<'a> {
         self.frontier.truncate(mark);
         self.owners.push(frame);
         let (out, raw_scan) = self.visit_node(plan);
-        let at_most_once = std::mem::take(&mut self.at_most_once);
         let (raw_min_vars, raw_max_vars) = std::mem::take(&mut self.raw_ranges);
         self.apply_domains(plan, &out);
         if let Some(o) = &out.origin
@@ -473,7 +466,6 @@ impl<'a> Analyzer<'a> {
             plan: plan.clone(),
             inputs,
             raw_scan,
-            at_most_once,
             min_vars: range_names(&out.min),
             max_vars: range_names(&out.max),
             raw_min_vars,

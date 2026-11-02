@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cardinal::{FactMode, Options};
+use cardinal::Options;
 use cardinal_debug::{Dump, FactInput, Profile, Source, ascii, context, dump, foreign_key, html, read_facts};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -72,14 +72,14 @@ struct Input {
     /// Most distinct-count factors multiplied in one constraint.
     #[arg(long)]
     max_product: Option<usize>,
-    /// Skip proving bounds: only the verdict is explained.
+    /// Skip proving bounds.
     #[arg(long)]
     no_bounds: bool,
     #[command(flatten)]
     facts: Facts,
 }
 
-/// Facts to inform the analysis with. Any of them adds a facts section.
+/// Facts to put in the analysis. Any of them adds a facts section.
 #[derive(Args)]
 struct Facts {
     /// A fact set, as JSON.
@@ -99,13 +99,10 @@ struct Facts {
     /// The engine whose profiles --profiles-dir holds.
     #[arg(long, value_enum, default_value_t = Engine::Duckdb, requires = "profiles_dir")]
     profiles_format: Engine,
-    /// Skip the profile `NAME.json` of --profiles-dir: inform a query from the
+    /// Skip the profile `NAME.json` of --profiles-dir: bound a query with the
     /// others' profiles only.
     #[arg(long, value_name = "NAME", requires = "profiles_dir")]
     except: Option<String>,
-    /// What facts may stand for: only selectivities, or row counts too.
-    #[arg(long, value_enum, default_value_t = Mode::Ratios)]
-    mode: Mode,
     /// Skip proving the bounds with facts again (and without them).
     #[arg(long)]
     no_explain: bool,
@@ -117,18 +114,12 @@ enum Engine {
     Postgres,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Mode {
-    Ratios,
-    Pinned,
-}
-
 #[derive(Args)]
 struct Output {
     /// Write an HTML page here instead of printing text.
     #[arg(long)]
     html: Option<PathBuf>,
-    /// Only the constraints of this proof (e.g. `verdict`, `sum`, `table:orders`).
+    /// Only the constraints of this proof: `lower` or `upper`.
     #[arg(long)]
     proof: Option<String>,
     /// Only this node's constraints, in full.
@@ -200,10 +191,6 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
     let facts = if facts.is_some() || !profiles.is_empty() {
         Some(FactInput {
             facts: read_facts(&ctx, facts, &profiles).await?,
-            mode: match input.facts.mode {
-                Mode::Ratios => FactMode::Ratios,
-                Mode::Pinned => FactMode::Pinned,
-            },
             explain: !input.facts.no_explain,
         })
     } else {
@@ -245,7 +232,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             if let Some(path) = smt2 {
                 write(&path, &d.trace.to_smt2())?;
             }
-            eprintln!("{}: {} constraints over {} nodes", d.verdict, d.trace.constraints.len(), d.trace.nodes.len());
+            let bounds = d.bounds.as_deref().unwrap_or("no bounds");
+            eprintln!("{bounds}: {} constraints over {} nodes", d.trace.constraints.len(), d.trace.nodes.len());
         }
         Command::View { dump, output } => {
             let d: Dump = serde_json::from_str(&read(&dump)?).map_err(|e| format!("{}: {e}", dump.display()))?;

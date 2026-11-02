@@ -1,11 +1,12 @@
 //! Shared harness: schemas, deterministic data generation and the benchmark
-//! runner that checks each query's verdict and validates it on real data.
+//! runner that checks each query's bounds and validates it on real data.
 
 #![allow(dead_code)]
 
 use std::sync::Arc;
 
-use cardinal::{Analysis, Bounds, Options, Validation, Verdict, analyze_sql_with};
+use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio};
+use cardinal::{Analysis, Bounds, Facts, Validation, analyze_sql};
 use datafusion::arrow::array::{ArrayRef, Date32Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -672,35 +673,16 @@ pub fn tpch_datasets() -> Vec<Dataset> {
 // ---------------------------------------------------------------------------
 // Benchmark runner.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Expect {
-    Reduces,
-    MightGrow,
-    Unknown,
-}
-
 pub struct Case {
     pub name: &'static str,
     pub sql: &'static str,
-    /// Expected verdict when primary keys are declared.
-    pub keys: Expect,
-    /// Expected verdict when no keys are declared.
-    pub no_keys: Expect,
 }
 
-fn verdict_kind(v: &Verdict) -> Expect {
-    match v {
-        Verdict::Reduces => Expect::Reduces,
-        Verdict::MightGrow(_) => Expect::MightGrow,
-        Verdict::Unknown(_) => Expect::Unknown,
-    }
-}
-
-/// Runs every case: analyzes it on each dataset, checks the verdict, validates
-/// the constraints against real execution, and for `Reduces` queries checks the
-/// claim directly (actual output rows <= total rows scanned). Any violated
-/// constraint is a failure. Prints a summary table and panics with every
-/// mismatch at the end.
+/// Runs every case: analyzes it on each dataset, validates the constraints
+/// against real execution, and checks its bounds against the real output:
+/// those of the query alone, and those with every table held to its real
+/// size. Any violated constraint or bound is a failure. Prints a summary
+/// table and panics with every failure at the end.
 ///
 /// With `declare_keys`, only datasets whose keys really are unique are used, so
 /// the declared constraints are true.
@@ -720,40 +702,29 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             .join(", ")
     );
     println!(
-        "{:<34} {:<9} {:<9} {:>7}  {:<24} {:<11} bounds",
-        "query", "verdict", "expected", "pinned", "root rows per dataset", "violations"
+        "{:<34} {:>7}  {:<24} {:<11} {:<20} sized",
+        "query", "pinned", "root rows per dataset", "violations", "bounds"
     );
     for case in cases {
-        let expect = if declare_keys {
-            case.keys
-        } else {
-            case.no_keys
-        };
-        let mut verdict = None;
         let mut violations = vec![];
         let mut nodes = String::new();
         let mut root_rows = vec![];
         let mut bounds: Option<Bounds> = None;
-        let mut formula = None;
+        let mut sized_bounds = vec![];
         for (dname, ctx) in &ctxs {
-            let a = match analyze_sql_with(ctx, case.sql, SELECTIVITY).await {
+            let a = match analyze_sql(ctx, case.sql, Default::default()).await {
                 Ok(a) => a,
                 Err(e) => {
                     failures.push(format!("{}: analysis failed: {e}", case.name));
                     break;
                 }
             };
-            // Bounds depend only on the query; compute them once.
+            // Bounds without facts depend only on the query; compute them once.
             if bounds.is_none() {
                 bounds = Some(a.bounds().unwrap());
             }
-            // Constraints don't depend on data, so the verdict must be stable.
-            let kind = verdict_kind(&a.verdict);
-            if *verdict.get_or_insert(kind) != kind {
-                failures.push(format!("{}: verdict changed on {dname}", case.name));
-            }
             let v = a.validate(ctx).await.unwrap();
-            let declared = operator_vars(&a.smtlib);
+            let declared = operator_vars(a.constraints());
             nodes = format!("{}/{declared}", v.rows.len());
             // Every operator must be checked against real data; only a recursive
             // CTE's recursive branch (which reads its work table) cannot run alone.
@@ -780,32 +751,26 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
                 failures.push(format!("{}: on {dname}, {f}", case.name));
             }
-            for f in check_selectivity(&v) {
-                failures.push(format!("{}: on {dname}, {f}", case.name));
-            }
-            formula = a.selectivity.as_ref().map(|s| s.to_string());
-            if kind == Expect::Reduces {
-                let root = v.rows.get(&a.root).copied();
-                let scanned: Option<u64> =
-                    a.scans.iter().map(|(s, _)| v.rows.get(s).copied()).sum();
-                if let (Some(root), Some(scanned)) = (root, scanned)
-                    && root > scanned
-                    && v.violation.is_none()
+            // The tables' real sizes, as facts.
+            let mut sizes: Vec<(&str, u64)> = vec![];
+            for (scan, table) in &a.scans {
+                if let Some(&n) = v.rows.get(scan)
+                    && !sizes.iter().any(|(t, _)| t == table)
                 {
-                    failures.push(format!(
-                        "{}: verdict Reduces, but {dname} returned {root} rows from {scanned} scanned, \
-                         and validation found no violated constraint",
-                        case.name
-                    ));
+                    sizes.push((table, n));
                 }
             }
+            if v.violation.is_none() {
+                let b = sized(&a, &sizes);
+                for f in check_bounds(&b, &a, &v) {
+                    failures.push(format!("{}: on {dname} with its table sizes, {f}", case.name));
+                }
+                sized_bounds.push(b.to_string());
+            }
         }
-        let Some(verdict) = verdict else { continue };
         println!(
-            "{:<34} {:<9} {:<9} {:>7}  {:<24} {:<11} {}",
+            "{:<34} {:>7}  {:<24} {:<11} {:<20} {}",
             case.name,
-            format!("{verdict:?}"),
-            format!("{expect:?}"),
             nodes,
             root_rows.join("/"),
             if violations.is_empty() {
@@ -813,17 +778,9 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             } else {
                 violations.join(" ")
             },
-            bounds.as_ref().map_or(String::new(), |b| b.to_string())
+            bounds.as_ref().map_or(String::new(), |b| b.to_string()),
+            sized_bounds.join(" / ")
         );
-        if let Some(formula) = formula {
-            println!("    {}", formula.replace('\n', "\n    "));
-        }
-        if verdict != expect {
-            failures.push(format!(
-                "{}: expected {expect:?}, got {verdict:?}",
-                case.name
-            ));
-        }
         if !violations.is_empty() {
             failures.push(format!(
                 "{}: constraints violated by real data: {}",
@@ -835,89 +792,42 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
-/// The variables `smtlib` declares for operators' rows and distinct counts,
+/// The variables `smt` declares for operators' rows and distinct counts,
 /// which validation pins: not the ends of their columns' values
 /// (`op…_c{j}_min`), free where a column has none.
-pub fn operator_vars(smtlib: &str) -> usize {
+pub fn operator_vars(smt: &str) -> usize {
     let range = |name: &str| {
         let Some(rest) = name.strip_suffix("_min").or_else(|| name.strip_suffix("_max")) else { return false };
         rest.rsplit_once("_c").is_some_and(|(_, j)| !j.is_empty() && j.bytes().all(|b| b.is_ascii_digit()))
     };
-    smtlib
+    smt
         .lines()
         .filter_map(|l| l.strip_prefix("(declare-fun ")?.split(' ').next())
         .filter(|name| name.starts_with("op") && !range(name))
         .count()
 }
 
-/// Default options, plus the selectivity formula.
-pub const SELECTIVITY: Options = Options {
-    max_product: 3,
-    selectivity: true,
-    foreign_keys: Vec::new(),
-    trace: false,
-};
-
-/// The formula or selectivity range that one real execution contradicts, if
-/// any. The analysis must have been run with [`SELECTIVITY`].
-pub fn check_selectivity(v: &Validation) -> Vec<String> {
-    // A violated constraint ends validation early, with nothing to measure.
-    if v.violation.is_some() {
-        return vec![];
+/// Facts holding each of `sizes`' tables to its row count.
+pub fn table_sizes(sizes: &[(&str, u64)]) -> Facts {
+    let mut set = FactSet::default();
+    for (table, n) in sizes {
+        let kind = FactKind::Cardinality(Context::table(table));
+        set.insert(Fact { kind, value: Ratio::int(*n), origins: vec![Origin::Counted] });
     }
-    let check = v.selectivity.as_ref().expect("selectivity was enabled");
-    check
-        .violation
-        .iter()
-        .map(|f| format!("selectivity: {f}"))
-        .collect()
+    Facts::new(set)
 }
 
-/// Checks every claimed bound against one real execution: the actual output
-/// rows against the actual table sizes and total rows scanned. This does not go
-/// through the constraints, so it independently tests the claims.
+/// `a`'s bounds with each of `sizes`' tables held to its row count.
+pub fn sized(a: &Analysis, sizes: &[(&str, u64)]) -> Bounds {
+    a.with_facts(&table_sizes(sizes)).unwrap().bounds().unwrap()
+}
+
+/// Checks `b` against one real execution: the actual output rows must be
+/// in its range. This does not go through the constraints, so it
+/// independently tests the claim.
 pub fn check_bounds(b: &Bounds, a: &Analysis, v: &Validation) -> Vec<String> {
-    let mut failures = vec![];
-    let Some(&out) = v.rows.get(&a.root) else {
-        return failures;
-    };
-    if let Some(n) = b.constant
-        && out > n
-    {
-        failures.push(format!("output {out} exceeds constant bound {n}"));
+    match v.rows.get(&a.root) {
+        Some(&out) if !b.holds(out) => vec![format!("output {out} is outside {b}")],
+        _ => vec![],
     }
-    let scanned: Option<u64> = a.scans.iter().map(|(s, _)| v.rows.get(s).copied()).sum();
-    if let (Some(s), Some(scanned)) = (b.sum, scanned)
-        && !s.holds(out, scanned)
-    {
-        failures.push(format!(
-            "output {out} exceeds {} with Σ = {scanned}",
-            s.render("Σ")
-        ));
-    }
-    for t in &b.tables {
-        let size = a
-            .scans
-            .iter()
-            .find(|(_, table)| *table == t.table)
-            .and_then(|(s, _)| v.rows.get(s).copied());
-        let Some(size) = size else { continue };
-        let x = format!("|{}|", t.table);
-        if !t.bound.holds(out, size) {
-            failures.push(format!(
-                "output {out} exceeds {} with {x} = {size}",
-                t.bound.render(&x)
-            ));
-        }
-        let expected = t.bound.num as u128 * size as u128;
-        if t.exact
-            && (t.bound.den as u128 * (out as u128 - t.bound.add.min(out) as u128)) != expected
-        {
-            failures.push(format!(
-                "output {out} is not exactly {} with {x} = {size}",
-                t.bound.render(&x)
-            ));
-        }
-    }
-    failures
 }

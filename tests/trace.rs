@@ -1,7 +1,9 @@
 //! The trace of an analysis: every constraint with its node and source line,
 //! and minimal sets of constraints that prove each bound.
 
-use cardinal::{Analysis, Options, ProofStatus, Trace, analyze_sql_with};
+mod common;
+
+use cardinal::{Analysis, Bounds, Options, Proof, ProofStatus, Trace, analyze_sql};
 use datafusion::prelude::SessionContext;
 
 /// `users(id PRIMARY KEY, age)` and `orders(id PRIMARY KEY, user_id)`,
@@ -19,7 +21,7 @@ async fn shop() -> SessionContext {
 
 async fn traced(sql: &str) -> Analysis {
     let options = Options { trace: true, ..Default::default() };
-    analyze_sql_with(&shop().await, sql, options).await.unwrap()
+    analyze_sql(&shop().await, sql, options).await.unwrap()
 }
 
 fn node_of<'a>(t: &'a Trace, kind: &str) -> usize {
@@ -28,9 +30,9 @@ fn node_of<'a>(t: &'a Trace, kind: &str) -> usize {
 
 #[tokio::test]
 async fn untraced_analysis_has_no_trace() {
-    let a = analyze_sql_with(&shop().await, "SELECT * FROM users", Options::default()).await.unwrap();
+    let a = analyze_sql(&shop().await, "SELECT * FROM users", Options::default()).await.unwrap();
     assert!(a.trace.is_none());
-    assert!(a.explain(None).is_err());
+    assert!(a.explain(&Bounds::default()).is_err());
 }
 
 #[tokio::test]
@@ -67,40 +69,61 @@ async fn trace_round_trips_through_json() {
     assert_eq!(back, t);
 }
 
+/// `sql`, traced, with `users` holding 100 rows and `orders` 300.
+async fn traced_sized(sql: &str) -> Analysis {
+    let a = traced(sql).await;
+    a.with_facts(&common::table_sizes(&[("users", 100), ("orders", 300)])).unwrap()
+}
+
+/// Whether `proof`'s core has a constraint that a fact gave.
+fn uses_a_fact(t: &Trace, proof: &Proof) -> bool {
+    proof.core.iter().any(|&c| t.constraints[c].fact.is_some())
+}
+
 #[tokio::test]
-async fn filter_bound_is_proven_by_the_filter() {
-    let a = traced("SELECT * FROM users WHERE age > 30").await;
+async fn filter_bound_is_proven_by_the_filter_and_the_tables_size() {
+    let a = traced_sized("SELECT * FROM users WHERE age > 30").await;
     let bounds = a.bounds().unwrap();
-    let proofs = a.explain(Some(&bounds)).unwrap();
+    assert_eq!(bounds.upper, Some(100));
+    let proofs = a.explain(&bounds).unwrap();
     let t = a.trace.as_ref().unwrap();
     let filter = node_of(t, "Filter");
-    let verdict = proofs.iter().find(|p| p.name == "verdict").unwrap();
-    assert_eq!(verdict.status, ProofStatus::Proven);
-    assert!(verdict.core.iter().any(|&c| t.constraints[c].node == Some(filter)), "{verdict:?}");
-    let table = proofs.iter().find(|p| p.name == "table:users").unwrap();
-    assert_eq!(table.status, ProofStatus::Proven);
-    assert!(!table.core.is_empty());
+    let upper = proofs.iter().find(|p| p.name == "upper").unwrap();
+    assert_eq!(upper.claim, "X <= 100");
+    assert_eq!(upper.status, ProofStatus::Proven);
+    assert!(upper.core.iter().any(|&c| t.constraints[c].node == Some(filter)), "{upper:?}");
+    assert!(uses_a_fact(t, upper), "{upper:?}");
 }
 
 #[tokio::test]
-async fn self_join_halving_needs_the_key() {
-    let a = traced("SELECT * FROM users a JOIN users b ON a.id = b.id").await;
+async fn self_join_bound_needs_the_join() {
+    let a = traced_sized("SELECT * FROM users a JOIN users b ON a.id = b.id").await;
     let bounds = a.bounds().unwrap();
-    assert_eq!(bounds.to_string(), "X <= |users|; X <= 1/2·Σ");
-    let proofs = a.explain(Some(&bounds)).unwrap();
-    let sum = proofs.iter().find(|p| p.name == "sum").unwrap();
-    assert_eq!(sum.claim, "X <= 1/2·Σ");
-    assert_eq!(sum.status, ProofStatus::Proven);
+    assert_eq!(bounds.upper, Some(100));
+    let proofs = a.explain(&bounds).unwrap();
+    let upper = proofs.iter().find(|p| p.name == "upper").unwrap();
+    assert_eq!(upper.status, ProofStatus::Proven);
     let t = a.trace.as_ref().unwrap();
     let join = node_of(t, "Inner Join");
-    assert!(sum.core.iter().any(|&c| t.constraints[c].node == Some(join)), "{sum:?}");
+    assert!(upper.core.iter().any(|&c| t.constraints[c].node == Some(join)), "{upper:?}");
 }
 
 #[tokio::test]
-async fn cross_join_does_not_reduce() {
+async fn lower_bound_is_proven_too() {
+    let a = traced_sized("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id").await;
+    let bounds = a.bounds().unwrap();
+    assert_eq!(bounds.lower, 100);
+    let proofs = a.explain(&bounds).unwrap();
+    let lower = proofs.iter().find(|p| p.name == "lower").unwrap();
+    assert_eq!(lower.claim, "X >= 100");
+    assert_eq!(lower.status, ProofStatus::Proven);
+    assert!(uses_a_fact(a.trace.as_ref().unwrap(), lower), "{lower:?}");
+}
+
+#[tokio::test]
+async fn unbounded_has_nothing_to_prove() {
     let a = traced("SELECT * FROM users, orders").await;
-    let proofs = a.explain(None).unwrap();
-    assert_eq!(proofs.len(), 1);
-    assert_eq!(proofs[0].status, ProofStatus::Refuted);
-    assert!(proofs[0].core.is_empty());
+    let bounds = a.bounds().unwrap();
+    assert_eq!(bounds.upper, None);
+    assert!(a.explain(&bounds).unwrap().is_empty());
 }

@@ -10,17 +10,12 @@
 //!
 //! - **Input**: the quantities an analysis knows: each relation's rows,
 //!   `ndv`, `min` and `max` variables, the value domains its rules found,
-//!   and the declared keys. With facts ([`Analysis::with_store`]), also
-//!   each fact's quantity (`|C|`, `ndv(K | C)`, `min(k | C)`, `max(k | C)`),
-//!   on the variable of the operator with those rows, or one of its own.
+//!   and the declared keys.
 //! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
-//!   names the function that asserted it, and
-//!   [`Grounded::axioms`](crate::Grounded::axioms) counts those between
-//!   named rows. No quantifiers: Rust decides where an axiom applies, Z3
+//!   names the function that asserted it. No quantifiers: Rust decides where an axiom applies, Z3
 //!   does the arithmetic.
 //! - **Guarantees**: each axiom holds for any data; a schema axiom for any
-//!   data satisfying the declared keys. So axioms are asserted untracked:
-//!   only the facts' claims can be rejected. The tests deciding where an
+//!   data satisfying the declared keys. The tests deciding where an
 //!   axiom applies are conservative: missing a case loses an axiom, never
 //!   adds a wrong one.
 //! - **Not done**: selectivities and match shares get no axioms; contexts
@@ -32,20 +27,16 @@
 //!   its variables.
 //! - [Between named rows](#axioms-between-named-rows), once every
 //!   operator is visited: over the quantities of the rows its operators
-//!   name, and with facts ([`Analysis::with_store`]) of the rows they name
-//!   too.
+//!   name.
 //!
 //! Both are asserted in every analysis.
-//!
-//! [`Analysis::with_store`]: crate::Analysis::with_store
 //!
 //! # Axioms on each relation
 //!
 //! ## `non-negative`
 //!
 //! - **Claim**: `v ≥ 0` for every row count and `ndv`, and each table's
-//!   size; between named rows, for each fact's own variable on a size or
-//!   distinct count.
+//!   size.
 //!
 //! ## `ndv within rows`
 //!
@@ -98,7 +89,7 @@
 //!
 //! These relate the quantities of rows named as [`Context`]s, wherever
 //! terms for them exist: the analysis's variables for the rows its
-//! operators name (`rows::logical`), and the facts' own.
+//! operators name (`rows::logical`).
 //!
 //! ## Relevant contexts
 //!
@@ -369,7 +360,7 @@ impl<'a> Analyzer<'a> {
         let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
         let logical = Logical::new(&self.nodes, &scans);
         let mut space = Space::default();
-        let (_, seeds) = add_nodes(&mut space, &self.nodes, &logical);
+        let seeds = add_nodes(&mut space, &self.nodes, &logical);
         for a in space.axioms(&space.relevant(&seeds)) {
             if a.rule != "ndv within rows" {
                 self.assert_named(a.rule, a.claim);
@@ -379,15 +370,13 @@ impl<'a> Analyzer<'a> {
 }
 
 /// Adds the quantities of `nodes`' rows, named by `logical`, to `space`.
-/// Returns each quantity's first node, and the contexts of the nodes' rows.
-pub(crate) fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> (HashMap<FactKind, usize>, BTreeSet<Context>) {
-    let mut node_of = HashMap::new();
+/// Returns the contexts of the nodes' rows.
+fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<Context> {
     let mut contexts = BTreeSet::new();
     let mut renamings = Renamed::default();
-    let mut add = |space: &mut Space, q: FactKind, var: &str, i: usize, contexts: &mut BTreeSet<Context>| {
+    let mut add = |space: &mut Space, q: FactKind, var: &str, contexts: &mut BTreeSet<Context>| {
         let q = q.canonical_in(&mut renamings);
         contexts.insert(over(&q).clone());
-        node_of.entry(q.clone()).or_insert(i);
         space.add(q, Int::new_const(var));
     };
     for (i, node) in nodes.iter().enumerate() {
@@ -410,45 +399,45 @@ pub(crate) fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) ->
                 && op == "group"
             {
                 let keys = args.iter().cloned().collect();
-                add(space, FactKind::Distinct { keys, over: inputs[0].clone() }, &node.var, i, &mut contexts);
+                add(space, FactKind::Distinct { keys, over: inputs[0].clone() }, &node.var, &mut contexts);
             }
         }
         for (ctx, card, ndvs, mins, maxs) in rows {
-            add(space, FactKind::Cardinality(ctx.clone()), card, i, &mut contexts);
+            add(space, FactKind::Cardinality(ctx.clone()), card, &mut contexts);
             for (j, ndv) in ndvs.iter().enumerate() {
                 if let Some(key) = column(j) {
-                    add(space, FactKind::Distinct { keys: [key].into(), over: ctx.clone() }, ndv, i, &mut contexts);
+                    add(space, FactKind::Distinct { keys: [key].into(), over: ctx.clone() }, ndv, &mut contexts);
                 }
             }
             for (j, (lo, hi)) in mins.iter().zip(maxs).enumerate() {
                 let Some(key) = column(j) else { continue };
                 if let Some(lo) = lo {
-                    add(space, FactKind::Min { key: key.clone(), over: ctx.clone() }, lo, i, &mut contexts);
+                    add(space, FactKind::Min { key: key.clone(), over: ctx.clone() }, lo, &mut contexts);
                 }
                 if let Some(hi) = hi {
-                    add(space, FactKind::Max { key, over: ctx.clone() }, hi, i, &mut contexts);
+                    add(space, FactKind::Max { key, over: ctx.clone() }, hi, &mut contexts);
                 }
             }
         }
     }
-    (node_of, contexts)
+    contexts
 }
 
 /// An assertion every data satisfies, and the rule it is from.
-pub(crate) struct Axiom {
+struct Axiom {
     pub claim: Bool,
     pub rule: &'static str,
 }
 
 /// The terms each quantity equals.
 #[derive(Default)]
-pub(crate) struct Space {
+struct Space {
     terms: BTreeMap<FactKind, Vec<Int>>,
 }
 
 impl Space {
     /// Records that `term` equals quantity `q`, a canonical kind.
-    pub fn add(&mut self, q: FactKind, term: Int) {
+    fn add(&mut self, q: FactKind, term: Int) {
         let terms = self.terms.entry(q).or_default();
         if !terms.contains(&term) {
             terms.push(term);
@@ -456,14 +445,14 @@ impl Space {
     }
 
     /// The term standing for `q`, if any has been added.
-    pub fn term(&self, q: &FactKind) -> Option<&Int> {
+    fn term(&self, q: &FactKind) -> Option<&Int> {
         self.terms.get(q).and_then(|t| t.first())
     }
 
     /// The contexts of `seeds`, those related to one ([`related`]), those
     /// related to one of them, and those any of these is a join of
     /// ([`joins`]).
-    pub fn relevant(&self, seeds: &BTreeSet<Context>) -> BTreeSet<Context> {
+    fn relevant(&self, seeds: &BTreeSet<Context>) -> BTreeSet<Context> {
         let buckets = self.buckets();
         let mut out: BTreeSet<Context> = seeds.clone();
         let mut frontier: Vec<Context> = seeds.iter().cloned().collect();
@@ -487,7 +476,7 @@ impl Space {
     }
 
     /// Every axiom over the quantities of `relevant` contexts.
-    pub fn axioms(&self, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+    fn axioms(&self, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
         let mut out = vec![];
         let card = |c: &Context| self.term(&FactKind::Cardinality(c.clone()));
         // Each relevant context's key quantities.
@@ -569,7 +558,7 @@ impl Space {
 }
 
 /// The rows `q` is a quantity of.
-pub(crate) fn over(q: &FactKind) -> &Context {
+fn over(q: &FactKind) -> &Context {
     match q {
         FactKind::Cardinality(c) => c,
         FactKind::Selectivity { over, .. }

@@ -19,7 +19,7 @@ use z3::SatResult;
 use z3::ast::Int;
 
 use crate::analysis::{Dependency, Determines, Node, new_solver};
-use crate::selectivity::auxiliary_joins;
+use crate::rules::join::auxiliary_joins;
 use crate::{Error, Result, Validation};
 
 /// Evaluates `nodes` bottom-up and returns the actual value of every variable
@@ -33,19 +33,17 @@ use crate::{Error, Result, Validation};
 /// over its original subtree, so a parent sees exactly the rows its children's
 /// counts describe.
 ///
-/// With `auxiliary`, also returns the counts that measure the selectivities of
-/// outer and anti joins (see `selectivity::auxiliary_joins`), by name. And
-/// the first functional dependency a node's rows break, described.
+/// Each outer or anti join's auxiliary joins ([`auxiliary_joins`]) are
+/// counted too, as the analysis names them. Also returns the first
+/// functional dependency a node's rows break, described.
 pub(crate) async fn evaluate(
     nodes: &[Node],
     ctx: &SessionContext,
-    auxiliary: bool,
-) -> (Vec<(String, u64)>, Vec<(usize, String, i64)>, HashMap<String, u64>, Option<String>) {
+) -> (Vec<(String, u64)>, Vec<(usize, String, i64)>, Option<String>) {
     let state = ctx.state();
     let mut broken = None;
     let mut counts = vec![];
     let mut ends = vec![];
-    let mut aux = HashMap::new();
     // For each node, a scan over its materialized output, if it was evaluated.
     let mut outputs: Vec<Option<LogicalPlan>> = Vec::with_capacity(nodes.len());
     // For each node, its measured values (row count, then NDVs), if evaluated.
@@ -80,8 +78,7 @@ pub(crate) async fn evaluate(
         }
         let inputs: Option<Vec<LogicalPlan>> =
             node.inputs.iter().map(|i| outputs[*i].clone()).collect();
-        if auxiliary
-            && let LogicalPlan::Join(join) = &node.plan
+        if let LogicalPlan::Join(join) = &node.plan
             && let Some([left, right]) = inputs.as_deref()
         {
             for (suffix, join_type) in auxiliary_joins(join) {
@@ -98,10 +95,7 @@ pub(crate) async fn evaluate(
                 if let Ok(variant) = variant
                     && let Some(batches) = run(&state, &LogicalPlan::Join(variant)).await
                 {
-                    let n = rows(&batches);
-                    aux.insert(format!("{}#{suffix}", node.var), n);
-                    // The analysis names the same count `{var}_{suffix}`.
-                    counts.push((format!("{}_{suffix}", node.var), n));
+                    counts.push((format!("{}_{suffix}", node.var), rows(&batches)));
                 }
             }
         }
@@ -137,7 +131,7 @@ pub(crate) async fn evaluate(
         measured.push(Some(values));
         outputs.push(materialize(id, &node.plan, batches));
     }
-    (counts, ends, aux, broken)
+    (counts, ends, broken)
 }
 
 /// How `batches` break `d`, if they do: rows agreeing on its columns that
@@ -297,7 +291,6 @@ pub(crate) fn check(
                     rows,
                     violation: Some(var.clone()),
                     undecided,
-                    selectivity: None,
                 });
             }
         }
@@ -306,7 +299,6 @@ pub(crate) fn check(
         rows,
         violation: None,
         undecided,
-        selectivity: None,
     })
 }
 

@@ -4,11 +4,9 @@
 //!
 //! - validation finds no violated constraint, Z3 never gives up, and every
 //!   operator is checked against real data;
-//! - a `Reduces` query really returns at most the rows it scanned;
-//! - a `MightGrow` counterexample really violates the claim;
-//! - every bound from `Analysis::bounds` holds on the real row counts;
-//! - the verdict does not depend on the data;
-//! - declaring keys never loses a proof.
+//! - the bounds from `Analysis::bounds` hold on the real row counts, those
+//!   of the query alone and those with its tables held to their real sizes;
+//! - declaring keys never loosens the query's upper bound.
 //!
 //! `CARDINAL_FUZZ_N` sets the number of queries (default 250),
 //! `CARDINAL_FUZZ_SEED` the seed, and `CARDINAL_FUZZ_TRACE` (any value) prints
@@ -16,8 +14,8 @@
 
 mod common;
 
-use cardinal::{Verdict, analyze_sql_with};
-use common::{Rng, SELECTIVITY, check_bounds, check_selectivity, shop_datasets};
+use cardinal::analyze_sql;
+use common::{Rng, check_bounds, shop_datasets};
 use datafusion::prelude::SessionContext;
 
 /// Generates queries whose output columns are always exactly `c0, c1`.
@@ -327,23 +325,23 @@ fn env(name: &str, default: u64) -> u64 {
 struct Stats {
     queries: usize,
     skipped: usize,
-    proven: [usize; 2],
-    refuted: [usize; 2],
+    /// Queries with an upper bound, with keys and without.
+    bounded: [usize; 2],
     operators: usize,
     executions: usize,
-    /// Queries (per mode) with a constant, table-relative, or fractional bound.
-    bounded: usize,
+    /// Executions whose output the bounds with the tables' sizes hold
+    /// exactly.
+    exact: usize,
 }
 
-/// Checks one query on every context of one mode; returns its verdict, or
-/// `None` if DataFusion cannot plan it.
+/// Checks one query on every context of one mode; returns its upper bound
+/// without facts, or `None` if DataFusion cannot plan it.
 async fn check_mode(
     sql: &str,
     ctxs: &[(String, SessionContext)],
     failures: &mut Vec<String>,
     stats: &mut Stats,
-) -> Option<bool> {
-    let mut proven = None;
+) -> Option<Option<u64>> {
     let mut bounds = None;
     for (dname, ctx) in ctxs {
         // Skip queries DataFusion itself cannot run, e.g. its mark joins on
@@ -354,51 +352,18 @@ async fn check_mode(
         if df.collect().await.is_err() {
             return None;
         }
-        let a = match analyze_sql_with(ctx, sql, SELECTIVITY).await {
+        let a = match analyze_sql(ctx, sql, Default::default()).await {
             Ok(a) => a,
             Err(_) => return None,
         };
-        // Bounds depend only on the query; compute them once per mode.
-        if bounds.is_none() {
-            let b = a.bounds().unwrap();
-            if b.constant.is_some() || !b.tables.is_empty() || b.sum.is_some_and(|s| s.num < s.den)
-            {
-                stats.bounded += 1;
-            }
-            bounds = Some(b);
-        }
-        let is_proven = match &a.verdict {
-            Verdict::Reduces => true,
-            Verdict::MightGrow(m) => {
-                let total: i64 = a.scans.iter().map(|(s, _)| m.var(s)).sum();
-                if m.var(&a.root) <= total {
-                    failures.push(format!("counterexample does not refute the claim: {sql}"));
-                }
-                false
-            }
-            Verdict::Unknown(why) => {
-                failures.push(format!("Unknown ({why}): {sql}"));
-                false
-            }
-        };
-        if *proven.get_or_insert(is_proven) != is_proven {
-            failures.push(format!("verdict changed on {dname}: {sql}"));
-        }
+        // Bounds without facts depend only on the query; compute them once
+        // per mode.
+        let b = *bounds.get_or_insert_with(|| a.bounds().unwrap());
         let v = a.validate(ctx).await.unwrap();
-        for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
-            failures.push(format!(
-                "{dname}: {f}: {sql}\n  bounds: {}",
-                bounds.as_ref().unwrap()
-            ));
+        for f in check_bounds(&b, &a, &v) {
+            failures.push(format!("{dname}: {f}: {sql}"));
         }
-        for f in check_selectivity(&v) {
-            failures.push(format!(
-                "{dname}: {f}: {sql}\n  {}\n{}",
-                a.selectivity.as_ref().unwrap(),
-                a.plan
-            ));
-        }
-        let declared = common::operator_vars(&a.smtlib);
+        let declared = common::operator_vars(a.constraints());
         stats.operators = stats.operators.max(declared);
         stats.executions += 1;
         if let Some(op) = &v.violation {
@@ -414,18 +379,26 @@ async fn check_mode(
                 a.plan
             ));
         }
-        let root = v.rows.get(&a.root).copied();
-        let scanned: Option<u64> = a.scans.iter().map(|(s, _)| v.rows.get(s).copied()).sum();
-        if is_proven
-            && let (Some(root), Some(scanned)) = (root, scanned)
-            && root > scanned
-        {
-            failures.push(format!(
-                "{dname}: verdict Reduces, but returned {root} rows from {scanned} scanned: {sql}"
-            ));
+        // With the tables held to their real sizes.
+        let mut sizes: Vec<(&str, u64)> = vec![];
+        for (scan, table) in &a.scans {
+            if let Some(&n) = v.rows.get(scan)
+                && !sizes.iter().any(|(t, _)| t == table)
+            {
+                sizes.push((table, n));
+            }
+        }
+        if v.violation.is_none() {
+            let sized = common::sized(&a, &sizes);
+            for f in check_bounds(&sized, &a, &v) {
+                failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
+            }
+            if v.rows.get(&a.root).is_some_and(|&n| sized.lower == n && sized.upper == Some(n)) {
+                stats.exact += 1;
+            }
         }
     }
-    proven
+    bounds.map(|b| b.upper)
 }
 
 #[tokio::test]
@@ -468,30 +441,26 @@ async fn fuzz() {
             }
             continue;
         };
-        for (i, p) in [with_keys, without].into_iter().enumerate() {
-            if p {
-                stats.proven[i] += 1;
-            } else {
-                stats.refuted[i] += 1;
-            }
+        for (i, hi) in [with_keys, without].into_iter().enumerate() {
+            stats.bounded[i] += usize::from(hi.is_some());
         }
-        if without && !with_keys {
-            failures.push(format!("declaring keys lost a proof: {sql}"));
+        if let Some(hi) = without
+            && with_keys.is_none_or(|k| k > hi)
+        {
+            failures.push(format!("declaring keys loosened X <= {hi} to {with_keys:?}: {sql}"));
         }
     }
     println!(
-        "fuzz: {} queries (seed {seed}), {} skipped (DataFusion cannot plan or run them); with keys {} reduce / {} \
-         might grow; without keys {} reduce / {} might grow; {} validated executions; largest plan {} \
-         variables; {} bounds computed with a reduction claim",
+        "fuzz: {} queries (seed {seed}), {} skipped (DataFusion cannot plan or run them); {} bounded with keys, \
+         {} without; {} validated executions, {} bounded exactly with their tables' sizes; largest plan {} \
+         variables",
         stats.queries,
         stats.skipped,
-        stats.proven[0],
-        stats.refuted[0],
-        stats.proven[1],
-        stats.refuted[1],
+        stats.bounded[0],
+        stats.bounded[1],
         stats.executions,
+        stats.exact,
         stats.operators,
-        stats.bounded
     );
     for s in &skipped_examples {
         println!("skipped: {s}");

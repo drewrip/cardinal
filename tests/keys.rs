@@ -2,8 +2,10 @@
 //! asks whether columns are unique (joins, GROUP BY, DISTINCT, plans read off
 //! another engine), and a key stays one under a widening cast.
 
+mod common;
+
 use cardinal::observed::Catalog;
-use cardinal::{Analysis, ForeignKey, Options, analyze_duckdb, analyze_sql_with};
+use cardinal::{Analysis, Bounds, ForeignKey, Options, analyze_duckdb, analyze_sql};
 use datafusion::prelude::SessionContext;
 
 /// Data satisfying every declared key. `codes.code` is UNIQUE and holds
@@ -42,73 +44,96 @@ async fn context() -> SessionContext {
 /// `sql` analyzed with `foreign_keys`, checked against the data.
 async fn analyze(sql: &str, foreign_keys: Vec<ForeignKey>) -> Analysis {
     let ctx = context().await;
-    let options = Options { selectivity: true, foreign_keys, ..Default::default() };
-    let a = analyze_sql_with(&ctx, sql, options).await.unwrap();
+    let options = Options { foreign_keys, ..Default::default() };
+    let a = analyze_sql(&ctx, sql, options).await.unwrap();
     let v = a.validate(&ctx).await.unwrap();
     assert_eq!(v.violation, None, "{sql}");
-    assert_eq!(v.selectivity.unwrap().violation, None, "{sql}");
     a
 }
 
-/// The output's formula and bounds, with no foreign keys.
-async fn formula(sql: &str) -> (String, String) {
-    let a = analyze(sql, vec![]).await;
-    let formula = a.selectivity.as_ref().unwrap().output.to_string();
-    let bounds = a.bounds().unwrap().to_string();
-    println!("{sql}\n  X = {formula}; {bounds}");
-    (formula, bounds)
+/// Sizes for the tables, all different (any satisfy the keys), so that a
+/// bound shows which table it comes from.
+const SIZES: &[(&str, u64)] = &[
+    ("dims", 40),
+    ("stores", 20),
+    ("sales", 700),
+    ("codes", 50),
+    ("tags", 30),
+    ("suppliers", 10),
+    ("shipments", 300),
+    ("purchase_orders", 60),
+    ("loose", 100),
+];
+
+/// The output's bounds, with no foreign keys.
+async fn bounds(sql: &str) -> Bounds {
+    let b = analyze(sql, vec![]).await.bounds().unwrap();
+    println!("{sql}\n  {b}");
+    b
+}
+
+/// The output's bounds with the tables held to [`SIZES`], with no foreign
+/// keys.
+async fn sized(sql: &str) -> Bounds {
+    let b = common::sized(&analyze(sql, vec![]).await, SIZES);
+    println!("{sql}\n  with sizes: {b}");
+    b
+}
+
+fn exactly(n: u64) -> Bounds {
+    Bounds { lower: n, upper: Some(n) }
 }
 
 #[tokio::test]
 async fn primary_key_joins_match_once() {
     let sql = "SELECT * FROM sales s JOIN dims d ON s.dim_id = d.id";
-    assert_eq!(formula(sql).await.1, "X <= |sales|");
+    assert_eq!(sized(sql).await.upper, Some(700));
 }
 
 #[tokio::test]
 async fn primary_key_groups_and_distincts_keep_every_row() {
-    assert_eq!(formula("SELECT id, count(*) FROM dims GROUP BY id").await.1, "X = |dims|");
-    assert_eq!(formula("SELECT DISTINCT id, category FROM dims").await.1, "X = |dims|");
+    assert_eq!(sized("SELECT id, count(*) FROM dims GROUP BY id").await, exactly(40));
+    assert_eq!(sized("SELECT DISTINCT id, category FROM dims").await, exactly(40));
 }
 
 #[tokio::test]
 async fn widening_casts_keep_a_key() {
     // `big_dim` is BIGINT, so the INT key is cast up to match it.
     let sql = "SELECT * FROM sales s JOIN dims d ON s.big_dim = d.id";
-    assert_eq!(formula(sql).await.1, "X <= |sales|");
+    assert_eq!(sized(sql).await.upper, Some(700));
     let sql = "SELECT * FROM sales s JOIN dims d ON s.big_dim = CAST(d.id AS BIGINT)";
-    assert_eq!(formula(sql).await.1, "X <= |sales|");
+    assert_eq!(sized(sql).await.upper, Some(700));
 }
 
 #[tokio::test]
 async fn unique_columns_match_once_but_may_repeat_null() {
     // NULL codes never match, so each sale matches at most one code.
     let sql = "SELECT * FROM sales s JOIN codes c ON s.amount = c.code";
-    assert_eq!(formula(sql).await.1, "X <= |sales|");
+    assert_eq!(sized(sql).await.upper, Some(700));
     // But NULL is one group of several rows. (DataFusion drops a DISTINCT on
     // a UNIQUE column, NULLs and all, so DISTINCT can't show the same.)
-    assert_ne!(formula("SELECT code, count(*) FROM codes GROUP BY code").await.1, "X = |codes|");
+    assert_ne!(sized("SELECT code, count(*) FROM codes GROUP BY code").await, exactly(50));
 }
 
 #[tokio::test]
 async fn not_null_unique_columns_are_keys() {
-    assert_eq!(formula("SELECT tag, count(*) FROM tags GROUP BY tag").await.1, "X = |tags|");
-    assert_eq!(formula("SELECT DISTINCT tag FROM tags").await.1, "X = |tags|");
+    assert_eq!(sized("SELECT tag, count(*) FROM tags GROUP BY tag").await, exactly(30));
+    assert_eq!(sized("SELECT DISTINCT tag FROM tags").await, exactly(30));
     let sql = "SELECT * FROM sales s JOIN tags t ON s.dim_id = t.tag";
-    assert_eq!(formula(sql).await.1, "X <= |sales|");
+    assert_eq!(sized(sql).await.upper, Some(700));
 }
 
 /// dee's shape: a View joins a fact table to two dimensions on their keys,
 /// and Tables read it through filters.
 #[tokio::test]
 async fn views_over_keyed_sources() {
-    assert_eq!(formula("SELECT * FROM enriched").await.1, "X <= |sales|");
-    assert_eq!(formula("SELECT * FROM enriched WHERE category = 7").await.1, "X <= |sales|");
+    assert_eq!(sized("SELECT * FROM enriched").await.upper, Some(700));
+    assert_eq!(sized("SELECT * FROM enriched WHERE category = 7").await.upper, Some(700));
     // With foreign keys too, every sale is kept. Sale 7's dim_id is 5, which
     // breaks a key from `sales.dim_id`, so only the stores' is declared.
     let keys = vec![ForeignKey::new("sales", &["store_id"], "stores", &["store_id"])];
     let a = analyze("SELECT s.id, st.region FROM sales s JOIN stores st ON s.store_id = st.store_id", keys).await;
-    assert_eq!(a.bounds().unwrap().to_string(), "X = |sales|");
+    assert_eq!(common::sized(&a, SIZES), exactly(700));
 }
 
 /// "Group by the id and the id's attributes": the shipments per supplier,
@@ -122,8 +147,7 @@ const Q_GROUP: &str = "SELECT sh.supplier_id, upper(s.name) AS name, s.category,
 /// `supplier_id`, which takes at most `|suppliers|` values.
 #[tokio::test]
 async fn keys_determine_their_rows_attributes() {
-    let bounds = formula(Q_GROUP).await.1;
-    assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+    assert_eq!(sized(Q_GROUP).await.upper, Some(10));
 }
 
 /// The GROUP BY's output is unique on `supplier_id` alone, the key its other
@@ -138,8 +162,7 @@ async fn dependent_group_keys_keep_a_key() {
          SELECT perf.supplier_id, perf.n, po.n AS po_n
          FROM perf LEFT JOIN po ON perf.supplier_id = po.supplier_id"
     );
-    let bounds = formula(&sql).await.1;
-    assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+    assert_eq!(sized(&sql).await.upper, Some(10));
 }
 
 /// The padded side of a LEFT JOIN is NULL on unmatched rows. Its key still
@@ -151,8 +174,7 @@ async fn padded_keys_add_one_group() {
     let sql = "SELECT s.supplier_id, s.name, s.category, s.country, count(*) AS n
         FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
         GROUP BY s.supplier_id, s.name, s.category, s.country";
-    let bounds = formula(sql).await.1;
-    assert!(bounds.contains("X <= |suppliers| + 1") && !bounds.contains("X <= |suppliers|;"), "{bounds}");
+    assert_eq!(sized(sql).await.upper, Some(10 + 1));
 }
 
 /// A LEFT JOIN on equalities alone against a unique key: shipments with one
@@ -164,7 +186,7 @@ async fn preserved_keys_pick_the_padded_row() {
         FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
         WHERE sh.supplier_id BETWEEN 1 AND 3
         GROUP BY sh.supplier_id, s.name, s.category, s.country";
-    assert_eq!(formula(sql).await.1, "X <= 3");
+    assert_eq!(bounds(sql).await.upper, Some(3));
 }
 
 /// A condition beyond the equalities can match one row with a given key and
@@ -176,7 +198,7 @@ async fn residual_conditions_pick_nothing() {
         FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id AND sh.qty > 4
         WHERE sh.supplier_id BETWEEN 1 AND 3
         GROUP BY sh.supplier_id, s.name, s.category, s.country";
-    assert!(!formula(sql).await.1.contains("X <= 3"));
+    assert_ne!(bounds(sql).await.upper, Some(3));
 }
 
 /// A volatile group key takes values no column determines.
@@ -185,8 +207,7 @@ async fn volatile_keys_are_not_determined() {
     let sql = "SELECT sh.supplier_id, s.name, s.category, random() < 0.5 AS coin, count(*) AS n
         FROM shipments sh JOIN suppliers s ON sh.supplier_id = s.supplier_id
         GROUP BY sh.supplier_id, s.name, s.category, random() < 0.5";
-    let bounds = formula(sql).await.1;
-    assert!(!bounds.contains("X <= |suppliers|"), "{bounds}");
+    assert!(sized(sql).await.upper.is_none_or(|hi| hi > 10));
 }
 
 /// Group keys that one input column determines take no more combinations
@@ -196,8 +217,7 @@ async fn one_column_determining_the_keys_bounds_the_groups() {
     let sql = "SELECT s.name, s.category, s.country, count(*) AS n
         FROM shipments sh JOIN suppliers s ON sh.supplier_id = s.supplier_id
         GROUP BY s.name, s.category, s.country";
-    let bounds = formula(sql).await.1;
-    assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+    assert_eq!(sized(sql).await.upper, Some(10));
 }
 
 /// `row_number()` with its partition picks out one row, so on the rows
@@ -210,8 +230,7 @@ async fn first_row_per_partition_is_determined_by_the_partition() {
           ON s.dim_id = w.a
         WHERE w.rn = 1
         GROUP BY w.a, w.b, w.c, w.d";
-    let bounds = formula(sql).await.1;
-    assert!(bounds.contains("X <= |loose|"), "{bounds}");
+    assert_eq!(sized(sql).await.upper, Some(100));
 }
 
 /// A filter leaving a column one value pins it, though not by `=` (an
@@ -222,19 +241,7 @@ async fn columns_with_one_value_add_no_groups() {
     let sql = "SELECT a, b, c, d, count(*) FROM loose
         WHERE a BETWEEN 1 AND 2 AND b BETWEEN 1 AND 2 AND c BETWEEN 1 AND 2 AND d >= 1 AND d < 2
         GROUP BY a, b, c, d";
-    assert_eq!(formula(sql).await.1, "X <= 8");
-}
-
-/// The filter holds `amount` equal to the key `s.id`, which with the join
-/// to `dims`' key determines every column: grouping by `amount` and
-/// `category` leaves one row per group, though the projection below the
-/// GROUP BY drops `s.id`. The GROUP BY's share is resolved.
-#[tokio::test]
-async fn grouping_by_what_determines_a_key_keeps_every_row() {
-    let sql = "SELECT s.amount, d.category, count(*) FROM sales s JOIN dims d ON s.dim_id = d.id
-        WHERE s.amount = s.id GROUP BY s.amount, d.category";
-    let (formula, _) = formula(sql).await;
-    assert_eq!(formula, "s1·s2·|sales|·|dims|");
+    assert_eq!(bounds(sql).await.upper, Some(8));
 }
 
 /// `row_number()` over a partition whose columns depend on `s.dim_id`
@@ -248,14 +255,15 @@ async fn numbered_partitions_reduce_to_their_determining_columns() {
           FROM sales s JOIN dims d ON s.dim_id = d.id
           WHERE s.dim_id BETWEEN 1 AND 3 AND s.store_id BETWEEN 1 AND 2) w
         WHERE rn <= 1";
-    assert_eq!(formula(sql).await.1, "X <= 6");
+    assert_eq!(bounds(sql).await.upper, Some(6));
 }
 
 /// With no declared key, four group keys are too many to multiply, and the
 /// GROUP BY is bounded by its input alone.
 #[tokio::test]
 async fn groups_without_keys_keep_their_bound() {
-    assert_eq!(formula("SELECT a, b, c, d, count(*) FROM loose GROUP BY a, b, c, d").await.1, "X <= |loose|");
+    let b = sized("SELECT a, b, c, d, count(*) FROM loose GROUP BY a, b, c, d").await;
+    assert_eq!(b.upper, Some(100));
 }
 
 /// DuckDB's `EXPLAIN (FORMAT JSON)` of
@@ -282,12 +290,12 @@ async fn observed_plans_see_declared_keys() {
         }
         let catalog = Catalog::from_context(&ctx).await.unwrap();
         let sql = "SELECT f.id, d.name FROM facts f JOIN dims d ON f.dim_id = d.id";
-        let options = Options { selectivity: true, ..Default::default() };
+        let options = Options { ..Default::default() };
         let a = analyze_duckdb(&catalog, DUCKDB_KEY_JOIN, Some(sql), options).unwrap();
-        a.bounds().unwrap().to_string()
+        common::sized(&a, &[("facts", 1000), ("dims", 100)]).upper
     };
-    assert_eq!(bounds(true).await, "X <= |facts|");
-    assert_ne!(bounds(false).await, "X <= |facts|");
+    assert_eq!(bounds(true).await, Some(1000));
+    assert_eq!(bounds(false).await, Some(1000 * 100));
 }
 
 
@@ -300,7 +308,7 @@ async fn validation_checks_the_dependencies_relied_on() {
         ctx.sql(sql).await.unwrap().collect().await.unwrap();
     }
     let sql = "SELECT id, x FROM dup GROUP BY id, x";
-    let a = analyze_sql_with(&ctx, sql, Options::default()).await.unwrap();
+    let a = analyze_sql(&ctx, sql, Options::default()).await.unwrap();
     let v = a.validate(&ctx).await.unwrap();
     assert!(v.violation.as_ref().is_some_and(|op| op.contains("determine")), "{:?}", v.violation);
     // Data keeping the key, every dependency holds.

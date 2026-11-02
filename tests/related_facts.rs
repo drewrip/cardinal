@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio, Term};
-use cardinal::{Analysis, FactMode, Informed, Options, analyze_sql_with};
+use cardinal::{Analysis, Bounds, Facts, Options, analyze_sql};
 use datafusion::arrow::array::AsArray;
 use datafusion::arrow::datatypes::Int64Type;
 use datafusion::common::JoinType;
@@ -41,8 +41,8 @@ async fn count(sql: &str) -> u64 {
 
 async fn analyze(sql: &str) -> Analysis {
     let ctx = context().await;
-    let options = Options { selectivity: true, ..Default::default() };
-    analyze_sql_with(&ctx, sql, options).await.unwrap()
+    let options = Options { trace: true, ..Default::default() };
+    analyze_sql(&ctx, sql, options).await.unwrap()
 }
 
 fn terms(exprs: impl IntoIterator<Item = Expr>) -> BTreeSet<Term> {
@@ -92,14 +92,21 @@ async fn sizes(tables: &[&str]) -> FactSet {
     counted(&facts).await
 }
 
-/// `sql` informed by `facts`; checks its true row count lies in the range.
-async fn informed(sql: &str, facts: &FactSet, mode: FactMode) -> (Informed, (u64, Option<u64>)) {
-    let i = analyze(sql).await.with_facts(facts, mode).unwrap();
-    let range = i.range().unwrap();
+/// `sql` with `facts` put in place, and its bounds; checks its true row
+/// count lies in them.
+async fn informed(sql: &str, facts: &FactSet) -> (Analysis, Bounds) {
+    let a = analyze(sql).await.with_facts(&Facts::new(facts.clone())).unwrap();
+    let b = a.bounds().unwrap();
     let rows = count(sql).await;
-    println!("{sql}\n  {range:?}, {rows} rows\n  {i}");
-    assert!(range.0 <= rows && range.1.is_none_or(|hi| rows <= hi), "{sql}: {rows} outside {range:?}");
-    (i, range)
+    println!("{sql}\n  {b}, {rows} rows");
+    assert!(b.holds(rows), "{sql}: {rows} outside {b}");
+    (a, b)
+}
+
+/// The variables the facts put a floor under in `a`.
+fn floors(a: &Analysis) -> Vec<String> {
+    let t = a.trace.as_ref().unwrap();
+    t.constraints.iter().filter(|c| c.fact.as_ref().is_some_and(|f| f.source == "floor")).flat_map(|c| c.vars.clone()).collect()
 }
 
 const JOIN: &str = "SELECT * FROM sales s JOIN products p ON s.product_id = p.id";
@@ -111,7 +118,7 @@ async fn contexts_built_here_are_the_analysis_own() {
     // The join's own count pins it: the contexts below name its rows.
     let facts = counted(&[(joined(), JOIN)]).await;
     let rows = count(JOIN).await;
-    assert_eq!(informed(JOIN, &facts, FactMode::Pinned).await.1, (rows, Some(rows)));
+    assert_eq!(informed(JOIN, &facts).await.1, Bounds { lower: rows, upper: Some(rows) });
 }
 
 #[tokio::test]
@@ -119,13 +126,11 @@ async fn filtered_joins_bound_the_join_below() {
     let eleven = terms([col("products.category").in_list(vec![lit(11), lit(12)], false)]);
     let facts = counted(&[(joined().filter(&category(7)), SEVEN), (joined().filter(&eleven), ELEVEN)]).await;
     let largest = count(SEVEN).await.max(count(ELEVEN).await);
-    let (_, unknown) = informed(JOIN, &FactSet::default(), FactMode::Ratios).await;
-    for mode in [FactMode::Ratios, FactMode::Pinned] {
-        let (i, range) = informed(JOIN, &facts, mode).await;
-        assert_eq!(range.0, largest, "{i}");
-        // The upper bound is the same as without the facts.
-        assert_eq!(range.1, unknown.1);
-    }
+    let (_, unknown) = informed(JOIN, &FactSet::default()).await;
+    let (_, b) = informed(JOIN, &facts).await;
+    assert_eq!(b.lower, largest);
+    // The upper bound is the same as without the facts.
+    assert_eq!(b.upper, unknown.upper);
 }
 
 #[tokio::test]
@@ -133,7 +138,7 @@ async fn a_filter_below_the_join_bounds_it_too() {
     let below = t("products").filter(&category(7)).cross(&t("sales")).unwrap().filter(&on());
     let sql = "SELECT * FROM sales s JOIN (SELECT * FROM products WHERE category = 7) p ON s.product_id = p.id";
     let facts = counted(&[(below, sql)]).await;
-    assert_eq!(informed(JOIN, &facts, FactMode::Ratios).await.1.0, count(sql).await);
+    assert_eq!(informed(JOIN, &facts).await.1.lower, count(sql).await);
 }
 
 #[tokio::test]
@@ -142,7 +147,7 @@ async fn semi_joins_bound_below_with_a_narrower_other_side() {
     let sql = "SELECT * FROM sales WHERE product_id IN (SELECT id FROM products WHERE category = 7)";
     let facts = counted(&[(semi(t("products").filter(&category(7))), sql)]).await;
     let all = "SELECT * FROM sales WHERE product_id IN (SELECT id FROM products)";
-    assert_eq!(informed(all, &facts, FactMode::Ratios).await.1.0, count(sql).await);
+    assert_eq!(informed(all, &facts).await.1.lower, count(sql).await);
 }
 
 #[tokio::test]
@@ -155,14 +160,14 @@ async fn anti_joins_bound_below_only_with_a_narrower_kept_side() {
                  (SELECT 1 FROM products p WHERE p.id = sales.product_id AND p.category = 7)";
     let facts = counted(&[(anti(t("products").filter(&category(7))), wider)]).await;
     // (They are among the sales, which the fact does bound below.)
-    let (i, range) = informed(all, &facts, FactMode::Ratios).await;
-    assert!(i.floors.iter().all(|(v, _)| v.contains("Scan_sales")), "{i}");
-    assert_eq!(range.0, 0);
+    let (a, b) = informed(all, &facts).await;
+    assert!(floors(&a).iter().all(|v| v.contains("Scan_sales")), "{:?}", floors(&a));
+    assert_eq!(b.lower, 0);
     // A filter on the sales kept is a narrower context.
     let store = terms([col("sales.store").eq(lit(1))]);
     let narrower = format!("{all} AND store = 1");
     let facts = counted(&[(anti(t("products")).filter(&store), &narrower)]).await;
-    assert_eq!(informed(all, &facts, FactMode::Ratios).await.1.0, count(&narrower).await);
+    assert_eq!(informed(all, &facts).await.1.lower, count(&narrower).await);
 }
 
 #[tokio::test]
@@ -180,7 +185,7 @@ async fn left_joins_bound_below_with_either_input_narrower() {
         (joined().filter(&category(7)), SEVEN),
     ] {
         let facts = counted(&[(c, sql)]).await;
-        assert_eq!(informed(all, &facts, FactMode::Ratios).await.1.0, count(sql).await, "{sql}");
+        assert_eq!(informed(all, &facts).await.1.lower, count(sql).await, "{sql}");
     }
 }
 
@@ -194,7 +199,7 @@ async fn limits_and_groups_bound_nothing_yet() {
     let sql = "SELECT p.category FROM sales s JOIN products p ON s.product_id = p.id WHERE p.category = 7 GROUP BY p.category";
     let facts = counted(&[(group, sql)]).await;
     let all = "SELECT p.category FROM sales s JOIN products p ON s.product_id = p.id GROUP BY p.category";
-    assert!(informed(all, &facts, FactMode::Ratios).await.0.floors.is_empty());
+    assert!(floors(&informed(all, &facts).await.0).is_empty());
 }
 
 #[tokio::test]
@@ -204,8 +209,8 @@ async fn a_tables_distinct_count_bounds_a_filtered_group_by() {
     distinct(&mut facts, &[("reviews", "emp_id")]).await;
     let sql = "SELECT emp_id, count(*) FROM reviews WHERE score IS NOT NULL GROUP BY emp_id";
     let ndv = count("SELECT DISTINCT emp_id FROM reviews").await;
-    let (i, range) = informed(sql, &facts, FactMode::Pinned).await;
-    assert_eq!(range.1, Some(ndv), "{i}");
+    let (_, b) = informed(sql, &facts).await;
+    assert_eq!(b.upper, Some(ndv));
     assert!(ndv < count("SELECT * FROM reviews").await);
 }
 
@@ -216,15 +221,13 @@ async fn a_dimensions_distinct_count_bounds_a_group_by_over_a_join() {
     let categories = count("SELECT DISTINCT category FROM products").await;
     let stores = count("SELECT DISTINCT store FROM sales").await;
     let sql = "SELECT p.category, count(*) FROM sales s JOIN products p ON s.product_id = p.id GROUP BY p.category";
-    assert_eq!(informed(sql, &facts, FactMode::Pinned).await.1.1, Some(categories));
+    assert_eq!(informed(sql, &facts).await.1.upper, Some(categories));
     let sql = "SELECT p.category, s.store, count(*) FROM sales s JOIN products p ON s.product_id = p.id
                GROUP BY p.category, s.store";
-    assert_eq!(informed(sql, &facts, FactMode::Pinned).await.1.1, Some(categories * stores));
+    assert_eq!(informed(sql, &facts).await.1.upper, Some(categories * stores));
     // A left join pads with NULL: one more value.
     let sql = "SELECT p.category, count(*) FROM sales s LEFT JOIN products p ON s.product_id = p.id GROUP BY p.category";
-    assert_eq!(informed(sql, &facts, FactMode::Pinned).await.1.1, Some(categories + 1));
-    // Ratios leave the counts to grow with the tables.
-    assert_eq!(informed(sql, &facts, FactMode::Ratios).await.0.pinned_ndv, vec![]);
+    assert_eq!(informed(sql, &facts).await.1.upper, Some(categories + 1));
 }
 
 #[tokio::test]
@@ -233,12 +236,12 @@ async fn wider_rows_bound_narrower_above() {
     let wide = "SELECT * FROM sales WHERE store = 1";
     let mut facts = counted(&[(t("sales").filter(&store), wide)]).await;
     let narrow = "SELECT * FROM sales WHERE store = 1 AND product_id > 2";
-    assert_eq!(informed(narrow, &facts, FactMode::Pinned).await.1.1, Some(count(wide).await));
+    assert_eq!(informed(narrow, &facts).await.1.upper, Some(count(wide).await));
     // So does a join's count bound it over a narrower input.
     for f in counted(&[(joined(), JOIN)]).await.iter() {
         facts.insert(f.clone());
     }
-    assert_eq!(informed(SEVEN, &facts, FactMode::Pinned).await.1.1, Some(count(JOIN).await));
+    assert_eq!(informed(SEVEN, &facts).await.1.upper, Some(count(JOIN).await));
 }
 
 #[tokio::test]
@@ -252,7 +255,7 @@ async fn a_groups_distinct_count_over_wider_rows_bounds_it() {
     facts.insert(Fact { kind: kind.canonical(), value: Ratio::int(count(wide).await), origins: vec![Origin::Counted] });
     let sql = "SELECT p.category, s.store, count(*) FROM sales s JOIN products p ON s.product_id = p.id
                WHERE p.id > 1 GROUP BY p.category, s.store";
-    let (i, range) = informed(sql, &facts, FactMode::Pinned).await;
-    assert_eq!(range.1, Some(count(wide).await), "{i}");
+    let (_, b) = informed(sql, &facts).await;
+    assert_eq!(b.upper, Some(count(wide).await));
     assert!(count(wide).await < count(JOIN).await);
 }

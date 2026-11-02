@@ -110,7 +110,7 @@
 //!     `X =` it and anti `X = 0`;
 //!   - mark: `X =` the kept side.
 //!
-//!   Outer and anti joins also get the counts their selectivities measure
+//!   Outer and anti joins are also stated in terms of their auxiliary joins
 //!   (`join_parts`): the inner join's rows `i` and each side's rows with a
 //!   partner `m`, with `X = i + l − m` (left), and so on. Columns: a
 //!   preserved side's `ndv` equal, a padded side's `≤ ndv + 1` (NULL), and
@@ -140,7 +140,7 @@
 //! their variables. Their inputs are still visited, so their scans count.
 
 mod aggregate;
-mod join;
+pub(crate) mod join;
 
 use std::collections::BTreeSet;
 
