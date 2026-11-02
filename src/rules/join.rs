@@ -96,8 +96,10 @@ impl<'a> Analyzer<'a> {
             JoinType::RightMark => self.assert(o.card.eq(&r.card)),
         }
         self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
+        self.join_overlap(join, &o, &l, &r);
         self.at_most_once = (ru || fl, lu || fr);
         self.join_ndv(join, &o, &l, &r);
+        self.join_ndv_kept(join, &o, &l, &r, (fl, fr));
         self.join_ranges(plan, join, &o, &l, &r);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
@@ -194,6 +196,86 @@ impl<'a> Analyzer<'a> {
             _ => return,
         };
         self.assert(o.card.eq(&rows));
+    }
+
+    /// An equi-join on one key keeps the key values both sides share. Where
+    /// both sides' non-NULL values lie among one table's referenced key
+    /// values (by foreign keys), at most `|T|` of them, the shared ones
+    /// number at least `ndv_l + ndv_r − |T|` (inclusion–exclusion), less one
+    /// per side whose key may be NULL. An anti join (not NULL-aware) keeps
+    /// each row whose key the other side lacks: `ndv ≥ ndv_l − 1 − ndv_r`.
+    pub(crate) fn join_overlap(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+        if join.on.len() != 1 || join.null_equality == NullEquality::NullEqualsNull {
+            return;
+        }
+        let (a, b) = &join.on[0];
+        let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { return };
+        if join.left.schema().field(ia).data_type().is_floating() || join.right.schema().field(ib).data_type().is_floating() {
+            return;
+        }
+        let non_null = |side: &LogicalPlan, rel: &Rel, i: usize| {
+            let nullable = !rel.facts.dom(&col(side, i), side.schema()).never_null();
+            &rel.ndv[i] - int(nullable as u64)
+        };
+        let (vl, vr) = (non_null(&join.left, l, ia), non_null(&join.right, r, ib));
+        let out = match join.join_type {
+            JoinType::LeftAnti if !join.null_aware => return self.assert(o.ndv[ia].ge(&vl - &r.ndv[ib])),
+            JoinType::RightAnti if !join.null_aware => return self.assert(o.ndv[ib].ge(&vr - &l.ndv[ia])),
+            JoinType::Inner | JoinType::LeftSemi if join.filter.is_none() => &o.ndv[ia],
+            JoinType::RightSemi if join.filter.is_none() => &o.ndv[ib],
+            _ => return,
+        };
+        let (Some((p, lf)), Some((q, rf))) = (self.universe(&join.left, a), self.universe(&join.right, b)) else { return };
+        let Some(t) = self.tables.values().find(|t| p == q && t.display == p) else { return };
+        // A foreign key's values are never NULL.
+        let vl = if lf { l.ndv[ia].clone() } else { vl };
+        let vr = if rf { r.ndv[ib].clone() } else { vr };
+        self.assert(out.ge(vl + vr - &t.var));
+    }
+
+    /// On an inner join, a side whose rows each match exactly once (a
+    /// foreign key to all of the other's table) keeps its columns' `ndv`;
+    /// and each pair of equi-keys holds equal values on every row, so equal
+    /// `ndv`.
+    pub(crate) fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, (fl, fr): (bool, bool)) {
+        if join.join_type != JoinType::Inner {
+            return;
+        }
+        let nl = l.ndv.len();
+        if fl {
+            for i in 0..nl {
+                self.assert(o.ndv[i].eq(&l.ndv[i]));
+            }
+        }
+        if fr {
+            for i in 0..r.ndv.len() {
+                self.assert(o.ndv[nl + i].eq(&r.ndv[i]));
+            }
+        }
+        for (a, b) in &join.on {
+            let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { continue };
+            if !join.left.schema().field(ia).data_type().is_floating() && !join.right.schema().field(ib).data_type().is_floating() {
+                self.assert(o.ndv[ia].eq(&o.ndv[nl + ib]));
+            }
+        }
+    }
+
+    /// The table whose referenced key holds every non-NULL value of `side`'s
+    /// column `e`, by a single-column foreign key: the referenced table, if
+    /// `e` holds the referencing column, and whether it does (so is never
+    /// NULL).
+    fn universe(&self, side: &LogicalPlan, e: &Expr) -> Option<(String, bool)> {
+        let c = key_column(side, e)?;
+        let (table, _, column) = self.values(side, &c, String::new())?;
+        self.foreign_keys.iter().filter(|fk| fk.columns.len() == 1).find_map(|fk| {
+            if fk.table == table && fk.columns[0] == column {
+                Some((fk.references.clone(), true))
+            } else if fk.references == table && fk.referenced[0] == column {
+                Some((table.clone(), false))
+            } else {
+                None
+            }
+        })
     }
 
     /// Whether `join` is on exactly a declared foreign key's columns, from the
@@ -310,6 +392,24 @@ impl<'a> Analyzer<'a> {
             | LogicalPlan::SubqueryAlias(_)
             | LogicalPlan::Subquery(_)
             | LogicalPlan::Window(_) => through(plan.inputs()[0]),
+            // A side whose rows each match exactly once (a foreign key to all
+            // of the other's table), or on an outer join at most once, keeps
+            // each of them once.
+            LogicalPlan::Join(join) if join.filter.is_none() && !join.on.is_empty() => {
+                let nl = join.left.schema().fields().len();
+                let (fl, fr) = self.foreign_key(join);
+                let unique = |side: &LogicalPlan, keys: Vec<&Expr>| self.key_is_unique(join, side, &keys);
+                let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
+                let left = || self.every_row(&join.left, &child_column(&join.left, i)?);
+                let right = || self.every_row(&join.right, &child_column(&join.right, i - nl)?);
+                match join.join_type {
+                    JoinType::Inner if i < nl && fl => left(),
+                    JoinType::Inner if i >= nl && fr => right(),
+                    JoinType::Left if i < nl && (fl || unique(&join.right, rk)) => left(),
+                    JoinType::Right if i >= nl && (fr || unique(&join.left, lk)) => right(),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

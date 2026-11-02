@@ -113,7 +113,16 @@
 //!   (`join_parts`): the inner join's rows `i` and each side's rows with a
 //!   partner `m`, with `X = i + l − m` (left), and so on. Columns: a
 //!   preserved side's `ndv` equal, a padded side's `≤ ndv + 1` (NULL), and
-//!   an equi-key's `≤` the other side's key `ndv`.
+//!   an equi-key's `≤` the other side's key `ndv`. On an inner join, the
+//!   two equi-keys' `ndv` are equal, and a side on a foreign key keeps its
+//!   `ndv`. On one key whose values on both sides are among table `T`'s
+//!   referenced key, inner and semi joins keep `ndv ≥ ndv_l + ndv_r − |T|`
+//!   (less one per side whose key may be NULL); an anti join keeps `ndv ≥
+//!   ndv_l − 1 − ndv_r`.
+//! - **Foreign keys** through joins: a join keeps each of a side's rows once
+//!   if each matches exactly once (inner, on a foreign key from it) or at
+//!   most once (outer, on the other side's unique key), so a foreign key to
+//!   such a side reaches every row of its table.
 //!
 //! ## `Union`
 //!
