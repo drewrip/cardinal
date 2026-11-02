@@ -140,8 +140,9 @@ pub struct Validation {
     /// Actual output rows of every evaluated plan node, by variable name.
     pub rows: HashMap<String, u64>,
     /// The first operator (children before parents) whose actual row count
-    /// contradicts `S` given the counts below it. `None` means every evaluated
-    /// node is consistent with `S`.
+    /// contradicts `S` given the counts below it; or, first, the first
+    /// operator whose rows break a functional dependency the rules relied
+    /// on, with how. `None` means every evaluated node is consistent with `S`.
     pub violation: Option<String>,
     /// True if Z3 could not decide consistency at some step.
     pub undecided: bool,
@@ -167,8 +168,12 @@ impl Analysis {
     /// break a constraint derived from it.
     pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
         let auxiliary = self.selectivity.is_some();
-        let (counts, ends, aux) = validate::evaluate(&self.nodes, ctx, auxiliary).await;
+        let (counts, ends, aux, broken) = validate::evaluate(&self.nodes, ctx, auxiliary).await;
         let mut v = validate::check(&self.constraints, self.assertions, &counts, &ends)?;
+        // A broken dependency explains the counts that contradict `S`.
+        if broken.is_some() {
+            v.violation = broken;
+        }
         v.selectivity = self
             .selectivity
             .as_ref()

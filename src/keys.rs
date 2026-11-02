@@ -7,9 +7,9 @@ use datafusion::common::{Column, Constraint, JoinType, NullEquality};
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 
-use crate::analysis::{Analyzer, ScanKind};
+use crate::analysis::{Analyzer, Dependency, Determines, ScanKind, address};
 use crate::rules::{
-    child_column, column_index, determined, equalities, exact_index, key_column, output_indices, pinned, same_positions,
+    child_column, column_index, determined, equalities, exact_index, key_column, output_indices, pinned, same_positions, scan_pinned,
     strip_alias, with_equalities,
 };
 
@@ -41,6 +41,14 @@ impl<'a> Analyzer<'a> {
     pub(crate) fn covers_key(&self, plan: &LogicalPlan, cols: &[Column], nulls: Nulls) -> bool {
         match plan {
             LogicalPlan::TableScan(scan) => {
+                // Columns the scan's filters pin to one value add nothing to
+                // tell its rows apart.
+                let mut cols = cols.to_vec();
+                for c in scan_pinned(scan, plan.schema()) {
+                    if !cols.contains(&c) {
+                        cols.push(c);
+                    }
+                }
                 let schema = scan.source.schema();
                 let Some(indices) = cols
                     .iter()
@@ -82,9 +90,23 @@ impl<'a> Analyzer<'a> {
                     return true;
                 }
                 let mut with = cs.clone();
-                for c in pinned(&f.predicate) {
+                for c in pinned(&f.predicate, f.input.schema()) {
                     if f.input.schema().has_column(&c) && !with.contains(&c) {
                         with.push(c);
+                    }
+                }
+                // With NULLs equal, so do the columns `cols` determine, as
+                // those the filter holds equal to them. Not with NULLs
+                // distinct: a determined column may be NULL, and a UNIQUE
+                // constraint on it then says nothing.
+                if nulls == Nulls::Equal
+                    && let Some(ix) = output_indices(plan, cols)
+                {
+                    for i in self.fd_closure(plan, &ix) {
+                        let c = Column::from(f.input.schema().qualified_field(i));
+                        if !with.contains(&c) {
+                            with.push(c);
+                        }
                     }
                 }
                 with.len() > cs.len() && self.covers_key(&f.input, &with, nulls)
@@ -290,9 +312,15 @@ impl<'a> Analyzer<'a> {
             self.fd_closure(input, &keys)
         };
         match plan {
-            LogicalPlan::TableScan(_) => {
-                let cols: Vec<Column> =
-                    keys.iter().map(|&i| Column::from(plan.schema().qualified_field(i))).collect();
+            // A column the scan's filters pin to one value is the same on
+            // every row.
+            LogicalPlan::TableScan(scan) => {
+                for c in scan_pinned(scan, plan.schema()) {
+                    if let Ok(i) = plan.schema().index_of_column(&c) {
+                        out.insert(i);
+                    }
+                }
+                let cols: Vec<Column> = out.iter().map(|&i| Column::from(plan.schema().qualified_field(i))).collect();
                 if self.covers_key(plan, &cols, Nulls::Equal) {
                     out.extend(0..width);
                 }
@@ -306,20 +334,45 @@ impl<'a> Analyzer<'a> {
             // row, and columns it holds equal agree.
             LogicalPlan::Filter(f) => {
                 let mut keys = keys.to_vec();
-                for c in pinned(&f.predicate) {
+                for c in pinned(&f.predicate, f.input.schema()) {
                     if let Ok(i) = f.input.schema().index_of_column(&c) {
                         keys.push(i);
                     }
                 }
                 out.extend(with_equalities(keys, &equalities(&f.predicate, &f.input), |k| self.fd_closure(&f.input, k)));
             }
-            // The window's own columns are not determined.
             LogicalPlan::Sort(_)
             | LogicalPlan::Limit(_)
             | LogicalPlan::Repartition(_)
+            | LogicalPlan::Subquery(_)
             | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Window(_)
             | LogicalPlan::Distinct(Distinct::All(_)) => out.extend(same(plan.inputs()[0])),
+            // The window's own columns are not determined, but `row_number()`
+            // and its partition columns pick out one row.
+            LogicalPlan::Window(w) => {
+                out.extend(same(&w.input));
+                let n = w.input.schema().fields().len();
+                let numbered = w.window_expr.iter().enumerate().any(|(i, e)| match strip_alias(e) {
+                    Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
+                        out.contains(&(n + i))
+                            && f.params.partition_by.iter().all(|p| determined(p, &w.input, &out))
+                    }
+                    _ => false,
+                });
+                if numbered {
+                    out.extend(0..width);
+                }
+            }
+            // Selected columns keep their input's dependencies, and rows
+            // agreeing on the ON expressions are one row.
+            LogicalPlan::Distinct(Distinct::On(on)) => {
+                let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&on.input, &on.select_expr[k])).collect();
+                let closed = self.fd_closure(&on.input, &input);
+                out.extend((0..width).filter(|&j| determined(&on.select_expr[j], &on.input, &closed)));
+                if on.on_expr.iter().all(|e| determined(e, &on.input, &closed)) {
+                    out.extend(0..width);
+                }
+            }
             LogicalPlan::Join(join) => {
                 let nl = join.left.schema().fields().len();
                 // A padded side's columns are NULL on unmatched rows, so its
@@ -345,10 +398,37 @@ impl<'a> Analyzer<'a> {
                             closed
                         }));
                     }
-                    JoinType::Left | JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => {
-                        out.extend(side(&join.left, keys, 0))
+                    // A padded side's columns are all NULL on its padded rows.
+                    // So its dependencies hold where the determinant has a
+                    // column no matched row leaves NULL: rows agreeing on it
+                    // are all matched or all padded. And on equalities alone
+                    // against a unique key, rows agreeing on the preserved
+                    // side's keys are padded alike or matched to one row.
+                    JoinType::Left | JoinType::Right => {
+                        let ((kept, kept_at, kept_on), (padded, padded_at, padded_on)) = {
+                            let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
+                            let (l, r) = ((&*join.left, 0, lk), (&*join.right, nl, rk));
+                            if join.join_type == JoinType::Left { (l, r) } else { (r, l) }
+                        };
+                        let mut closed = side(kept, keys, kept_at);
+                        let keys_match = join.null_equality == NullEquality::NullEqualsNothing;
+                        let never_null = |i: usize| {
+                            !padded.schema().field(i).is_nullable()
+                                || (keys_match && padded_on.iter().any(|e| column_index(padded, e) == Some(i)))
+                        };
+                        if keys.iter().filter_map(|&k| k.checked_sub(padded_at)).filter(|&k| k < padded.schema().fields().len()).any(never_null) {
+                            closed.extend(side(padded, keys, padded_at));
+                        }
+                        let picked = join.filter.is_none()
+                            && !kept_on.is_empty()
+                            && kept_on.iter().all(|e| exact_index(kept, e).is_some_and(|i| closed.contains(&(kept_at + i))))
+                            && self.key_is_unique(join, padded, &padded_on);
+                        if picked {
+                            closed.extend(padded_at..padded_at + padded.schema().fields().len());
+                        }
+                        out.extend(closed);
                     }
-                    JoinType::Right => out.extend(side(&join.right, keys, nl)),
+                    JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => out.extend(side(&join.left, keys, 0)),
                     // These output the right side's schema (plus a mark column).
                     JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => {
                         out.extend(side(&join.right, keys, 0))
@@ -375,18 +455,73 @@ impl<'a> Analyzer<'a> {
         out
     }
 
+    /// True if rows of `plan` agreeing on `keys` (output positions) are one
+    /// row: the columns `keys` determine cover a key, there or below,
+    /// through operators whose rows are their input's, columns kept.
+    pub(crate) fn determines_key(&self, plan: &LogicalPlan, keys: &[usize]) -> bool {
+        if keys.is_empty() {
+            return false;
+        }
+        let closed: Vec<Column> =
+            self.fd_closure(plan, keys).into_iter().map(|i| Column::from(plan.schema().qualified_field(i))).collect();
+        let determines = self.covers_key(plan, &closed, Nulls::Equal) || self.determines_key_below(plan, keys);
+        if determines {
+            self.rely(plan, Dependency { on: keys.to_vec(), determines: Determines::Row });
+        }
+        determines
+    }
+
+    /// [`Self::determines_key`] of the columns `keys` are of `plan`'s input.
+    fn determines_key_below(&self, plan: &LogicalPlan, keys: &[usize]) -> bool {
+        match plan {
+            LogicalPlan::Projection(p) => {
+                let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&p.input, &p.expr[k])).collect();
+                self.determines_key(&p.input, &input)
+            }
+            LogicalPlan::Filter(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::SubqueryAlias(_) => {
+                let input = plan.inputs()[0];
+                let n = input.schema().fields().len();
+                self.determines_key(input, &keys.iter().copied().filter(|&k| k < n).collect::<Vec<_>>())
+            }
+            _ => false,
+        }
+    }
+
     /// A smallest-by-greedy subset of `plan`'s first `n` output positions
-    /// that determines all of them ([`Self::fd_closure`]).
-    pub(crate) fn determining_keys(&self, plan: &LogicalPlan, n: usize) -> Vec<usize> {
-        let mut keys: Vec<usize> = (0..n).collect();
-        for k in 0..n {
+    /// that determines all of them ([`Self::fd_closure`]). `sizes` holds
+    /// each one's domain size, if finite: those without one are dropped
+    /// first, since a column with few values bounds a product better.
+    pub(crate) fn determining_keys(&self, plan: &LogicalPlan, n: usize, sizes: &[Option<u128>]) -> Vec<usize> {
+        self.determining(plan, &(0..n).collect::<Vec<_>>(), sizes)
+    }
+
+    /// [`Self::determining_keys`] of the output positions `cols`, with
+    /// `sizes` by position in `cols`. The kept positions are in `cols`' order.
+    pub(crate) fn determining(&self, plan: &LogicalPlan, cols: &[usize], sizes: &[Option<u128>]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..cols.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().flatten().unwrap_or(u128::MAX)));
+        let mut keys: Vec<usize> = cols.to_vec();
+        for i in order {
+            let k = cols[i];
             let rest: Vec<usize> = keys.iter().copied().filter(|&j| j != k).collect();
             let closed = self.fd_closure(plan, &rest);
-            if (0..n).all(|j| closed.contains(&j)) {
+            if cols.iter().all(|j| closed.contains(j)) {
                 keys = rest;
             }
         }
+        if keys.len() < cols.len() {
+            self.rely(plan, Dependency { on: keys.clone(), determines: Determines::Columns(cols.to_vec()) });
+        }
         keys
+    }
+
+    /// Notes that a rule relied on `d` holding in `plan`'s rows.
+    fn rely(&self, plan: &LogicalPlan, d: Dependency) {
+        self.relied.borrow_mut().push((address(plan), d));
     }
 }
 

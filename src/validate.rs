@@ -18,7 +18,7 @@ use datafusion::prelude::SessionContext;
 use z3::SatResult;
 use z3::ast::Int;
 
-use crate::analysis::{Node, new_solver};
+use crate::analysis::{Dependency, Determines, Node, new_solver};
 use crate::selectivity::auxiliary_joins;
 use crate::{Error, Result, Validation};
 
@@ -34,13 +34,15 @@ use crate::{Error, Result, Validation};
 /// counts describe.
 ///
 /// With `auxiliary`, also returns the counts that measure the selectivities of
-/// outer and anti joins (see `selectivity::auxiliary_joins`), by name.
+/// outer and anti joins (see `selectivity::auxiliary_joins`), by name. And
+/// the first functional dependency a node's rows break, described.
 pub(crate) async fn evaluate(
     nodes: &[Node],
     ctx: &SessionContext,
     auxiliary: bool,
-) -> (Vec<(String, u64)>, Vec<(usize, String, i64)>, HashMap<String, u64>) {
+) -> (Vec<(String, u64)>, Vec<(usize, String, i64)>, HashMap<String, u64>, Option<String>) {
     let state = ctx.state();
+    let mut broken = None;
     let mut counts = vec![];
     let mut ends = vec![];
     let mut aux = HashMap::new();
@@ -128,11 +130,54 @@ pub(crate) async fn evaluate(
         };
         let values = measure(&batches, node.ndv_vars.len());
         record(&mut counts, &node.var, &node.ndv_vars, &values);
+        if broken.is_none() {
+            broken = node.dependencies.iter().find_map(|d| breaks(&batches, d)).map(|why| format!("{}: {why}", node.var));
+        }
         ranges(&mut ends, counts.len(), &batches, &node.min_vars, &node.max_vars);
         measured.push(Some(values));
         outputs.push(materialize(id, &node.plan, batches));
     }
-    (counts, ends, aux)
+    (counts, ends, aux, broken)
+}
+
+/// How `batches` break `d`, if they do: rows agreeing on its columns that
+/// disagree on what it says they determine. A column the row format cannot
+/// encode is not checked.
+fn breaks(batches: &[RecordBatch], d: &Dependency) -> Option<String> {
+    let on = groups(batches, &d.on)?;
+    match &d.determines {
+        Determines::Row => (on != rows(batches)).then(|| format!("{:?} determine a row, but {on} values on {} rows", d.on, rows(batches))),
+        Determines::Columns(cols) => {
+            let all: Vec<usize> = d.on.iter().chain(cols).copied().collect();
+            let both = groups(batches, &all)?;
+            (on != both).then(|| format!("{:?} determine {cols:?}, but {on} values on them are {both} with them", d.on))
+        }
+    }
+}
+
+/// How many distinct values the columns `k` take together (NULLs equal).
+fn groups(batches: &[RecordBatch], k: &[usize]) -> Option<u64> {
+    let Some(first) = batches.first() else {
+        return Some(0);
+    };
+    if k.is_empty() {
+        return Some(rows(batches).min(1));
+    }
+    let width = first.num_columns();
+    if k.iter().any(|&j| j >= width) {
+        return None;
+    }
+    let fields = k.iter().map(|&j| SortField::new(first.schema().field(j).data_type().clone())).collect();
+    let converter = RowConverter::new(fields).ok()?;
+    let mut seen = HashSet::new();
+    for b in batches {
+        let columns: Vec<_> = k.iter().map(|&j| Arc::clone(b.column(j))).collect();
+        let rows = converter.convert_columns(&columns).ok()?;
+        for row in rows.iter() {
+            seen.insert(row.as_ref().to_vec());
+        }
+    }
+    Some(seen.len() as u64)
 }
 
 /// Row count, then each column's distinct count (NULL counted as one value);

@@ -81,14 +81,15 @@
 //! ## `DistinctOn`
 //!
 //! - **Claim**: `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv` of the `ON`
-//!   expressions.
+//!   expressions, without those the others determine.
 //!
 //! ## `aggregate`
 //!
 //! - **Claim**: without GROUP BY, `X = 1`. With GROUP BY on keys `K`:
 //!   `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv(K)` (or of the keys that
 //!   determine the rest, or of one column determining every key), each
-//!   key's `ndv` its expression's, and `X = l` if `K` covers a unique key.
+//!   key's `ndv` its expression's, and `X = l` if `K`, or the columns it
+//!   determines, cover a unique key.
 //!   `count` columns sum to at most `l`; `min` and `max` take their
 //!   argument's range. ROLLUP, CUBE and GROUPING SETS: nothing (they may emit
 //!   more rows than they read).
@@ -135,7 +136,7 @@ use std::collections::BTreeSet;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::Column;
+use datafusion::common::{Column, DFSchema};
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, LogicalPlan, SkipType, TableScan};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
@@ -266,7 +267,8 @@ impl<'a> Analyzer<'a> {
                     self.assert(o.card.le(p));
                 }
                 // Columns the others determine add no distinct rows.
-                let determining = self.determining_keys(input, all.len());
+                let sizes = sizes(input, &l.facts);
+                let determining = self.determining_keys(input, all.len(), &sizes);
                 if determining.len() < all.len() {
                     let factors: Vec<&Int> = determining.iter().map(|&j| &l.ndv[j]).collect();
                     if let Some(p) = product(&factors, self.max_product) {
@@ -287,11 +289,17 @@ impl<'a> Analyzer<'a> {
                 o.facts = computed_facts(plan, &on.select_expr, &on.input, &l.facts);
                 self.assert(o.card.le(&l.card));
                 self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
-                let bounds: Option<Vec<Int>> = on
-                    .on_expr
-                    .iter()
-                    .map(|e| expr_bound(e, &on.input, &l, self.max_product))
-                    .collect();
+                // ON expressions the others determine add no rows.
+                let mut on_expr: Vec<&Expr> = on.on_expr.iter().collect();
+                for e in &on.on_expr {
+                    let rest: Vec<&Expr> = on_expr.iter().copied().filter(|x| *x != e).collect();
+                    let cols: Vec<usize> = rest.iter().filter_map(|x| column_index(&on.input, x)).collect();
+                    if determined(e, &on.input, &self.fd_closure(&on.input, &cols)) {
+                        on_expr = rest;
+                    }
+                }
+                let bounds: Option<Vec<Int>> =
+                    on_expr.iter().map(|e| expr_bound(e, &on.input, &l, self.max_product)).collect();
                 if let Some(bounds) = bounds
                     && let Some(p) = product(&bounds.iter().collect::<Vec<_>>(), self.max_product)
                 {
@@ -597,6 +605,11 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+/// The size of each output column's domain in `facts`, if finite.
+pub(crate) fn sizes(plan: &LogicalPlan, facts: &Facts) -> Vec<Option<u128>> {
+    (0..plan.schema().fields().len()).map(|j| facts.dom(&col(plan, j), plan.schema()).size()).collect()
+}
+
 /// `e`, over the output of projection `plan` computing `exprs`, as an
 /// expression over its input. `None` if it reads what it can't rewrite.
 pub(crate) fn unproject(e: &Expr, plan: &LogicalPlan, exprs: &[Expr]) -> Option<Expr> {
@@ -815,9 +828,12 @@ pub(crate) fn same_positions(plan: &LogicalPlan, child: &LogicalPlan, cols: &[Co
         .collect()
 }
 
-/// Columns `predicate` holds equal to a non-NULL constant on every row it keeps.
-pub(crate) fn pinned(predicate: &Expr) -> Vec<Column> {
-    split_conjunction(predicate)
+/// Columns of `schema` that take one non-NULL value on every row
+/// `predicate` keeps: equal to a non-NULL constant, or with a domain of at
+/// most one value (`= $1`, `IN (7)`, `BETWEEN 5 AND 5`). Not `IS NULL`: a
+/// UNIQUE constraint on a NULL column does not make the rest unique.
+pub(crate) fn pinned(predicate: &Expr, schema: &DFSchema) -> Vec<Column> {
+    let mut out: Vec<Column> = split_conjunction(predicate)
         .into_iter()
         .filter_map(|e| match e {
             Expr::BinaryExpr(BinaryExpr { left, op: Operator::Eq, right }) => {
@@ -830,7 +846,31 @@ pub(crate) fn pinned(predicate: &Expr) -> Vec<Column> {
             }
             _ => None,
         })
-        .collect()
+        .collect();
+    let mut facts = Facts::default();
+    facts.assume(predicate, schema);
+    for j in 0..schema.fields().len() {
+        let c = Column::from(schema.qualified_field(j));
+        let d = facts.dom(&Expr::Column(c.clone()), schema);
+        if !out.contains(&c) && d.never_null() && d.size().is_some_and(|n| n <= 1) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// [`pinned`], by every filter `scan` applies exactly.
+pub(crate) fn scan_pinned(scan: &TableScan, schema: &DFSchema) -> Vec<Column> {
+    if inexact_filters(scan) {
+        return vec![];
+    }
+    let mut out = vec![];
+    for c in scan.filters.iter().flat_map(|f| pinned(f, schema)) {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Positions of `cols` in `plan`'s output.

@@ -142,16 +142,41 @@ async fn dependent_group_keys_keep_a_key() {
     assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
 }
 
-/// The padded side of a LEFT JOIN is NULL on unmatched rows, so its key
-/// determines nothing there: the shipment with no supplier is a group of its
-/// own, beyond the suppliers'.
+/// The padded side of a LEFT JOIN is NULL on unmatched rows. Its key still
+/// determines its columns, since a matched row never has it NULL, but the
+/// shipments with no supplier are a group of their own, beyond the
+/// suppliers'.
 #[tokio::test]
-async fn padded_keys_determine_nothing() {
+async fn padded_keys_add_one_group() {
     let sql = "SELECT s.supplier_id, s.name, s.category, s.country, count(*) AS n
         FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
         GROUP BY s.supplier_id, s.name, s.category, s.country";
     let bounds = formula(sql).await.1;
-    assert!(!bounds.contains("X <= |suppliers|"), "{bounds}");
+    assert!(bounds.contains("X <= |suppliers| + 1") && !bounds.contains("X <= |suppliers|;"), "{bounds}");
+}
+
+/// A LEFT JOIN on equalities alone against a unique key: shipments with one
+/// `supplier_id` all match the same supplier, or none, so the left key
+/// determines the supplier's columns, and the four keys reduce to it.
+#[tokio::test]
+async fn preserved_keys_pick_the_padded_row() {
+    let sql = "SELECT sh.supplier_id, s.name, s.category, s.country, count(*) AS n
+        FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id
+        WHERE sh.supplier_id BETWEEN 1 AND 3
+        GROUP BY sh.supplier_id, s.name, s.category, s.country";
+    assert_eq!(formula(sql).await.1, "X <= 3");
+}
+
+/// A condition beyond the equalities can match one row with a given key and
+/// pad another, so the key picks out nothing: the grouping stays unbounded
+/// by the key's three values.
+#[tokio::test]
+async fn residual_conditions_pick_nothing() {
+    let sql = "SELECT sh.supplier_id, s.name, s.category, s.country, count(*) AS n
+        FROM shipments sh LEFT JOIN suppliers s ON sh.supplier_id = s.supplier_id AND sh.qty > 4
+        WHERE sh.supplier_id BETWEEN 1 AND 3
+        GROUP BY sh.supplier_id, s.name, s.category, s.country";
+    assert!(!formula(sql).await.1.contains("X <= 3"));
 }
 
 /// A volatile group key takes values no column determines.
@@ -173,6 +198,57 @@ async fn one_column_determining_the_keys_bounds_the_groups() {
         GROUP BY s.name, s.category, s.country";
     let bounds = formula(sql).await.1;
     assert!(bounds.contains("X <= |suppliers|"), "{bounds}");
+}
+
+/// `row_number()` with its partition picks out one row, so on the rows
+/// numbered 1 the partition column determines the rest: the four keys
+/// reduce to `w.a`, which takes at most `|loose|` values.
+#[tokio::test]
+async fn first_row_per_partition_is_determined_by_the_partition() {
+    let sql = "SELECT w.a, w.b, w.c, w.d, count(*) AS n
+        FROM sales s JOIN (SELECT a, b, c, d, row_number() OVER (PARTITION BY a ORDER BY b) AS rn FROM loose) w
+          ON s.dim_id = w.a
+        WHERE w.rn = 1
+        GROUP BY w.a, w.b, w.c, w.d";
+    let bounds = formula(sql).await.1;
+    assert!(bounds.contains("X <= |loose|"), "{bounds}");
+}
+
+/// A filter leaving a column one value pins it, though not by `=` (an
+/// integer range of one value): with `d`
+/// out of the product, the other three keys' domains multiply to 8.
+#[tokio::test]
+async fn columns_with_one_value_add_no_groups() {
+    let sql = "SELECT a, b, c, d, count(*) FROM loose
+        WHERE a BETWEEN 1 AND 2 AND b BETWEEN 1 AND 2 AND c BETWEEN 1 AND 2 AND d >= 1 AND d < 2
+        GROUP BY a, b, c, d";
+    assert_eq!(formula(sql).await.1, "X <= 8");
+}
+
+/// The filter holds `amount` equal to the key `s.id`, which with the join
+/// to `dims`' key determines every column: grouping by `amount` and
+/// `category` leaves one row per group, though the projection below the
+/// GROUP BY drops `s.id`. The GROUP BY's share is resolved.
+#[tokio::test]
+async fn grouping_by_what_determines_a_key_keeps_every_row() {
+    let sql = "SELECT s.amount, d.category, count(*) FROM sales s JOIN dims d ON s.dim_id = d.id
+        WHERE s.amount = s.id GROUP BY s.amount, d.category";
+    let (formula, _) = formula(sql).await;
+    assert_eq!(formula, "s1·s2·|sales|·|dims|");
+}
+
+/// `row_number()` over a partition whose columns depend on `s.dim_id`
+/// (through the join to `dims`' key) is unique with `s.dim_id`,
+/// `s.store_id` and the number alone, whose domains multiply to 6.
+#[tokio::test]
+async fn numbered_partitions_reduce_to_their_determining_columns() {
+    let sql = "SELECT * FROM (
+          SELECT s.id, s.dim_id, d.category, d.id AS did, s.store_id,
+            row_number() OVER (PARTITION BY s.dim_id, d.category, d.id, s.store_id ORDER BY s.id) AS rn
+          FROM sales s JOIN dims d ON s.dim_id = d.id
+          WHERE s.dim_id BETWEEN 1 AND 3 AND s.store_id BETWEEN 1 AND 2) w
+        WHERE rn <= 1";
+    assert_eq!(formula(sql).await.1, "X <= 6");
 }
 
 /// With no declared key, four group keys are too many to multiply, and the
@@ -214,3 +290,19 @@ async fn observed_plans_see_declared_keys() {
     assert_ne!(bounds(false).await, "X <= |facts|");
 }
 
+
+/// Validation checks each dependency the rules relied on against the rows:
+/// data breaking a declared key breaks the grouping's reduction to it.
+#[tokio::test]
+async fn validation_checks_the_dependencies_relied_on() {
+    let ctx = SessionContext::new();
+    for sql in ["CREATE TABLE dup (id INT NOT NULL PRIMARY KEY, x INT)", "INSERT INTO dup VALUES (1, 1), (1, 2), (2, 3)"] {
+        ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    }
+    let sql = "SELECT id, x FROM dup GROUP BY id, x";
+    let a = analyze_sql_with(&ctx, sql, Options::default()).await.unwrap();
+    let v = a.validate(&ctx).await.unwrap();
+    assert!(v.violation.as_ref().is_some_and(|op| op.contains("determine")), "{:?}", v.violation);
+    // Data keeping the key, every dependency holds.
+    analyze(&sql.replace("dup", "dims").replace(", x", ", category"), vec![]).await;
+}

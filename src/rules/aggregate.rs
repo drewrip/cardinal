@@ -59,7 +59,7 @@ impl<'a> Analyzer<'a> {
             self.assert(o.card.le(p));
         }
         // Keys the others determine add no groups.
-        let determining = self.determining_keys(plan, agg.group_expr.len());
+        let determining = self.determining_keys(plan, agg.group_expr.len(), &super::sizes(plan, &o.facts));
         if determining.len() < factors.len() {
             let factors: Vec<&Int> = determining.iter().map(|&j| &o.ndv[j]).collect();
             if let Some(p) = product(&factors, self.max_product) {
@@ -67,13 +67,18 @@ impl<'a> Analyzer<'a> {
             }
         }
         self.determining_column(agg, &o);
-        // Grouping by a unique key leaves every row its own group.
+        // Grouping by a unique key leaves every row its own group, as does
+        // grouping by columns that determine one.
         let cols: Option<Vec<Column>> = agg
             .group_expr
             .iter()
             .map(|e| key_column(&agg.input, e))
             .collect();
-        if cols.is_some_and(|cols| self.covers_key(&agg.input, &cols, Nulls::Equal)) {
+        let keyed = cols.is_some_and(|cols| self.covers_key(&agg.input, &cols, Nulls::Equal)) || {
+            let keys: Vec<usize> = agg.group_expr.iter().filter_map(|e| column_index(&agg.input, e)).collect();
+            self.determines_key(&agg.input, &keys)
+        };
+        if keyed {
             self.assert(o.card.eq(&l.card));
         }
         o
