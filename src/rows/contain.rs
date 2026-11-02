@@ -2,18 +2,23 @@
 //!
 //! A fact is about one context, but it also bounds others: dropping a filter
 //! can only add rows, so `|σp(C)| ≤ |C|` whatever the data. A fact about a
-//! context with more filters is a lower bound on one with fewer, and the
-//! reverse an upper bound. Facts are matched to contexts that have no
+//! context with more or narrower filters (`c < 5` against `c < 10`) is a
+//! lower bound on one with fewer or wider, and the reverse an upper bound. Facts are matched to contexts that have no
 //! variable of their own in a plan with these; the constraints relate the
 //! ones that do.
 //!
 //! Each test is conservative: `false` loses a bound, `true` must hold for any
 //! data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use datafusion::common::ScalarValue;
+use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use super::canonical::{MAX_ORDERS, each_order};
-use super::{Context, Exists, ExistsKind};
+use super::{Context, Exists, ExistsKind, Term};
+use crate::axioms::comparison;
 use crate::facts::FactKind;
 use super::rewrite::Spj;
 
@@ -33,8 +38,103 @@ pub(crate) fn subset(a: &Context, b: &Context) -> bool {
     let (x, y) = (Spj::of(a), Spj::of(b));
     x.tables == y.tables
         && x.atoms == y.atoms
-        && x.preds.is_superset(&y.preds)
+        && y.preds.iter().all(|q| x.preds.contains(q) || implied(&x.preds, q))
         && y.exists.iter().all(|e| x.exists.iter().any(|f| stricter(f, e)))
+}
+
+/// True if every row passing `preds` passes `q`: `q` compares one
+/// expression with literals (a comparison, or an `OR` of them such as an
+/// `IN` list), and `preds`' comparisons of it let through only values one of
+/// `q`'s does. Those comparisons drop NULL, so a passing row has a value in
+/// their interval. Strings are compared only for equality, as their order
+/// is the collation's.
+fn implied(preds: &BTreeSet<Term>, q: &Term) -> bool {
+    let mut disjuncts = vec![];
+    let mut todo = vec![&q.expr];
+    while let Some(e) = todo.pop() {
+        match e {
+            Expr::BinaryExpr(BinaryExpr { left, op: Operator::Or, right }) => todo.extend([left.as_ref(), right.as_ref()]),
+            e => disjuncts.push(comparison(e)),
+        }
+    }
+    let Some(disjuncts) = disjuncts.into_iter().collect::<Option<Vec<_>>>() else { return false };
+    let ordered = |op: Operator, v: &ScalarValue| op == Operator::Eq || !v.data_type().is_string();
+    let target = disjuncts[0].0.to_string();
+    if disjuncts.iter().any(|(e, op, v)| e.to_string() != target || !ordered(*op, v)) {
+        return false;
+    }
+    let mut have: Option<Interval> = None;
+    for p in preds {
+        let Some((e, op, v)) = comparison(&p.expr) else { continue };
+        if e.to_string() != target {
+            continue;
+        }
+        if !ordered(op, &v) {
+            return false;
+        }
+        let next = Interval::of(op, v);
+        have = match have {
+            None => Some(next),
+            Some(h) => match h.and(&next) {
+                Some(both) => Some(both),
+                None => return false,
+            },
+        };
+    }
+    have.is_some_and(|h| disjuncts.into_iter().any(|(_, op, v)| h.within(&Interval::of(op, v))))
+}
+
+/// An interval's end: the value, and whether it is let through. `None` is
+/// open.
+type End = Option<(ScalarValue, bool)>;
+
+/// The values a conjunction of comparisons lets through.
+#[derive(Clone)]
+struct Interval {
+    lo: End,
+    hi: End,
+}
+
+impl Interval {
+    fn of(op: Operator, v: ScalarValue) -> Interval {
+        match op {
+            Operator::Eq => Interval { lo: Some((v.clone(), true)), hi: Some((v, true)) },
+            Operator::Lt => Interval { lo: None, hi: Some((v, false)) },
+            Operator::LtEq => Interval { lo: None, hi: Some((v, true)) },
+            Operator::Gt => Interval { lo: Some((v, false)), hi: None },
+            _ => Interval { lo: Some((v, true)), hi: None },
+        }
+    }
+
+    /// The values both let through; `None` if their ends do not compare.
+    fn and(&self, o: &Interval) -> Option<Interval> {
+        // The tighter end: the greater lower end, the lesser upper one.
+        let pick = |a: &End, b: &End, tighter: Ordering| -> Option<End> {
+            Some(match (a, b) {
+                (None, x) | (x, None) => x.clone(),
+                (Some((x, xin)), Some((y, yin))) => match x.partial_cmp(y)? {
+                    Ordering::Equal => Some((x.clone(), *xin && *yin)),
+                    c if c == tighter => Some((x.clone(), *xin)),
+                    _ => Some((y.clone(), *yin)),
+                },
+            })
+        };
+        Some(Interval { lo: pick(&self.lo, &o.lo, Ordering::Greater)?, hi: pick(&self.hi, &o.hi, Ordering::Less)? })
+    }
+
+    /// True if every value `self` lets through, `o` does.
+    fn within(&self, o: &Interval) -> bool {
+        let end = |mine: &End, theirs: &End, inside: Ordering| match (mine, theirs) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some((x, xin)), Some((y, yin))) => match x.partial_cmp(y) {
+                Some(Ordering::Equal) => *yin || !*xin,
+                Some(c) => c == inside,
+                None => false,
+            },
+        };
+        end(&self.lo, &o.lo, Ordering::Greater) && end(&self.hi, &o.hi, Ordering::Less)
+    }
 }
 
 /// True if `|a| ≤ |b|`: `a`'s rows are among `b`'s, or both are outer joins
@@ -260,5 +360,25 @@ mod tests {
         let narrow = pair("emp@2", "emp@1").filter(&p("emp@1.dept", 3));
         assert!(!subset(&narrow, &wide));
         assert!(renamed(&narrow, &wide, subset));
+    }
+
+    #[test]
+    fn narrower_ranges_imply_wider_ones() {
+        let f = |e: datafusion::logical_expr::Expr| t("lineitem").filter(&terms([e]));
+        let q = "lineitem.l_quantity";
+        assert!(subset(&f(col(q).lt(lit(5))), &f(col(q).lt(lit(10)))));
+        assert!(subset(&f(col(q).lt_eq(lit(9))), &f(col(q).lt(lit(10)))));
+        assert!(!subset(&f(col(q).lt_eq(lit(10))), &f(col(q).lt(lit(10)))));
+        assert!(!subset(&f(col(q).lt(lit(10))), &f(col(q).lt(lit(5)))));
+        assert!(subset(&f(col(q).eq(lit(3))), &f(col(q).gt_eq(lit(3)))));
+        assert!(subset(&f(col(q).eq(lit(3))), &f(col(q).in_list(vec![lit(1), lit(3)], false))));
+        let both = t("lineitem").filter(&terms([col(q).gt(lit(2)), col(q).lt(lit(4))]));
+        assert!(subset(&both, &f(col(q).gt(lit(1)))));
+        assert!(!subset(&both, &f(col(q).gt(lit(2)).and(col(q).lt(lit(3))))));
+        // Other columns, other types, and strings' order are not compared.
+        assert!(!subset(&f(col("lineitem.l_tax").lt(lit(5))), &f(col(q).lt(lit(10)))));
+        assert!(!subset(&f(col(q).lt(lit(5i32))), &f(col(q).lt(lit(10i64)))));
+        assert!(!subset(&f(col(q).lt(lit("a"))), &f(col(q).lt(lit("b")))));
+        assert!(subset(&f(col(q).eq(lit("a"))), &f(col(q).in_list(vec![lit("a"), lit("b")], false))));
     }
 }

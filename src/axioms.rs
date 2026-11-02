@@ -837,7 +837,7 @@ fn contradict(a: &BTreeSet<Term>, b: &BTreeSet<Term>) -> bool {
 
 /// `e op v`, for a comparison of an expression with a non-NULL literal, the
 /// literal on the right as [`Term`] writes it.
-fn comparison(e: &Expr) -> Option<(&Expr, Operator, ScalarValue)> {
+pub(crate) fn comparison(e: &Expr) -> Option<(&Expr, Operator, ScalarValue)> {
     let Expr::BinaryExpr(BinaryExpr { left, op, right }) = e else { return None };
     if !matches!(op, Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq) {
         return None;
