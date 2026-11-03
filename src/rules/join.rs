@@ -10,7 +10,35 @@ use crate::analysis::{Analyzer, Rel, Rows, ScanKind, int, min};
 use crate::domain::Facts;
 
 impl<'a> Analyzer<'a> {
-    pub(crate) fn join(&mut self, plan: &LogicalPlan, join: &Join) -> Rel {
+    /// `Join` of every kind. Notation as in [the module](super#notation).
+    ///
+    /// - **Claim**: with `inner` the bound on the matched pairs, `l·r`, or
+    ///   `≤ l` if the right key is unique or a foreign key goes from the left
+    ///   to the whole right table (and the mirror):
+    ///   - inner: `X ≤ inner`; a cross join `X = l·r`; on a foreign key from
+    ///     the left `X = l`;
+    ///   - left: `X = l` if each left row matches at most once, else `l ≤ X
+    ///     ≤ inner + l`; right: the mirror;
+    ///   - full: `X ≥ l`, `X ≥ r`, `X ≤ inner + l + r`, and `≤ l + r` with a
+    ///     unique key;
+    ///   - semi and anti: `X ≤` the kept side; on a foreign key from it, semi
+    ///     `X =` it and anti `X = 0`;
+    ///   - mark: `X =` the kept side.
+    ///
+    ///   Outer and anti joins are also stated in terms of their auxiliary
+    ///   joins ([`Self::join_parts`]). Columns: a preserved side's `ndv`
+    ///   equal, a padded side's `≤ ndv + 1` (NULL), and an equi-key's `≤`
+    ///   the other side's key `ndv` ([`Self::join_ndv`]). On an inner join,
+    ///   the two equi-keys' `ndv` are equal, and a side on a foreign key
+    ///   keeps its `ndv` ([`Self::join_ndv_kept`]). Keys whose values lie
+    ///   among one table's referenced key keep at least the values both
+    ///   sides must share ([`Self::join_overlap`]). Values stay within the
+    ///   inputs' ranges ([`Self::join_ranges`]).
+    /// - **Foreign keys** through joins: a join keeps each of a side's rows
+    ///   once if each matches exactly once (inner, on a foreign key from it)
+    ///   or at most once (outer, on the other side's unique key), so a
+    ///   foreign key to such a side reaches every row of its table.
+    pub fn join(&mut self, plan: &LogicalPlan, join: &Join) -> Rel {
         let l = self.visit(&join.left);
         let r = self.visit(&join.right);
         let equi = !join.on.is_empty();
@@ -144,13 +172,20 @@ impl<'a> Analyzer<'a> {
         o
     }
 
-    /// An outer or anti join's rows, in terms of its inner join's rows
-    /// (`{o}_inner`) and the rows of each side with a partner (`{o}_left`,
-    /// `{o}_right`): the joins of [`auxiliary_joins`], which `validate`
-    /// counts too. `inner` bounds the inner join's rows;
+    /// Part of [`Self::join`]: an outer or anti join's rows, in terms of its
+    /// auxiliary joins, which `validate` counts too.
+    ///
+    /// - **Claim**: with `i ≤ inner` the inner join's rows (`{o}_inner`) and
+    ///   `m_l`, `m_r` each side's rows with a partner (`{o}_left`,
+    ///   `{o}_right`): `X = i + l − m_l` (left), `i + r − m_r` (right),
+    ///   `i + l − m_l + r − m_r` (full), `l − m_l` (left anti, not
+    ///   NULL-aware), `r − m_r` (right anti). Each `m ≤` its side and `≤ i`,
+    ///   `i ≥ 1 ⇒ m ≥ 1`; `m = i` if the other side's key is unique, and
+    ///   `m = i =` its side on a foreign key from it.
+    ///
     /// `keys` says whether the right and left keys are unique, and whether a
     /// foreign key goes from the left or the right side to all of the other.
-    pub(crate) fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: (bool, bool, bool, bool)) {
+    pub fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: (bool, bool, bool, bool)) {
         let parts = auxiliary_joins(join);
         if parts.is_empty() {
             return;
@@ -196,13 +231,14 @@ impl<'a> Analyzer<'a> {
         self.assert(o.card.eq(&rows));
     }
 
-    /// An equi-join on one key keeps the key values both sides share. Where
-    /// both sides' non-NULL values lie among one table's referenced key
-    /// values (by foreign keys), at most `|T|` of them, the shared ones
-    /// number at least `ndv_l + ndv_r − |T|` (inclusion–exclusion), less one
-    /// per side whose key may be NULL. An anti join (not NULL-aware) keeps
-    /// each row whose key the other side lacks: `ndv ≥ ndv_l − 1 − ndv_r`.
-    pub(crate) fn join_overlap(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    /// Part of [`Self::join`]: an equi-join on one key keeps the key values
+    /// both sides share. Where both sides' non-NULL values lie among one
+    /// table's referenced key values (by foreign keys), at most `|T|` of them,
+    /// the shared ones number at least `ndv_l + ndv_r − |T|`
+    /// (inclusion–exclusion), less one per side whose key may be NULL. An anti
+    /// join (not NULL-aware) keeps each row whose key the other side lacks:
+    /// `ndv ≥ ndv_l − 1 − ndv_r`.
+    pub fn join_overlap(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
         if join.on.len() != 1 || join.null_equality == NullEquality::NullEqualsNull {
             return;
         }
@@ -231,11 +267,11 @@ impl<'a> Analyzer<'a> {
         self.assert(out.ge(vl + vr - &t.var));
     }
 
-    /// On an inner join, a side whose rows each match exactly once (a
-    /// foreign key to all of the other's table) keeps its columns' `ndv`;
-    /// and each pair of equi-keys holds equal values on every row, so equal
-    /// `ndv`.
-    pub(crate) fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, (fl, fr): (bool, bool)) {
+    /// Part of [`Self::join`]: on an inner join, a side whose rows each match
+    /// exactly once (a foreign key to all of the other's table) keeps its
+    /// columns' `ndv`; and each pair of equi-keys holds equal values on every
+    /// row, so equal `ndv`.
+    pub fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, (fl, fr): (bool, bool)) {
         if join.join_type != JoinType::Inner {
             return;
         }
@@ -264,7 +300,7 @@ impl<'a> Analyzer<'a> {
     /// NULL).
     fn universe(&self, side: &LogicalPlan, e: &Expr) -> Option<(String, bool)> {
         let c = key_column(side, e)?;
-        let (table, _, column) = self.values(side, &c, String::new())?;
+        let (table, _, column) = self.stored_column(side, &c, String::new())?;
         self.foreign_keys.iter().filter(|fk| fk.columns.len() == 1).find_map(|fk| {
             if fk.table == table && fk.columns[0] == column {
                 Some((fk.references.clone(), true))
@@ -306,7 +342,7 @@ impl<'a> Analyzer<'a> {
                 return false;
             };
             let (Some((ft, row, fname)), Some((tt, tname))) =
-                (self.values(from, &fc, String::new()), self.every_row(to, &tc))
+                (self.stored_column(from, &fc, String::new()), self.every_row(to, &tc))
             else {
                 return false;
             };
@@ -333,18 +369,18 @@ impl<'a> Analyzer<'a> {
     /// row: `(table, row, column)`, where columns with the same `row` hold
     /// values of one row of the table. `path` names the scan by the join
     /// sides leading to it, so two reads of one table stay apart.
-    pub(crate) fn values(&self, plan: &LogicalPlan, c: &Column, path: String) -> Option<(String, String, String)> {
+    pub(crate) fn stored_column(&self, plan: &LogicalPlan, c: &Column, path: String) -> Option<(String, String, String)> {
         let i = plan.schema().index_of_column(c).ok()?;
-        let through = |child: &LogicalPlan, path: String| self.values(child, &child_column(child, i)?, path);
+        let through = |child: &LogicalPlan, path: String| self.stored_column(child, &child_column(child, i)?, path);
         match plan {
             LogicalPlan::TableScan(scan) => match (self.resolve)(scan) {
                 ScanKind::Base { display, .. } => Some((display, path, c.name.clone())),
                 ScanKind::NonBase => None,
             },
-            LogicalPlan::Projection(p) => self.values(&p.input, &key_column(&p.input, &p.expr[i])?, path),
+            LogicalPlan::Projection(p) => self.stored_column(&p.input, &key_column(&p.input, &p.expr[i])?, path),
             LogicalPlan::Aggregate(a) => {
                 let key = a.group_expr.get(i)?;
-                self.values(&a.input, &key_column(&a.input, key)?, path)
+                self.stored_column(&a.input, &key_column(&a.input, key)?, path)
             }
             LogicalPlan::Filter(_)
             | LogicalPlan::Sort(_)
@@ -361,7 +397,7 @@ impl<'a> Analyzer<'a> {
                     JoinType::Inner | JoinType::Left if i < nl => through(&join.left, path + "L"),
                     JoinType::Inner | JoinType::Right if i >= nl => {
                         let child = &join.right;
-                        self.values(child, &child_column(child, i - nl)?, path + "R")
+                        self.stored_column(child, &child_column(child, i - nl)?, path + "R")
                     }
                     JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => through(&join.left, path),
                     JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => through(&join.right, path),
@@ -412,10 +448,11 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// A join's output values are its inputs', and matched equi-keys take
-    /// values both sides have: on an inner join, the two keys' values are
-    /// the same. Disjoint ranges leave no row with a value, so none at all.
-    pub(crate) fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    /// Part of [`Self::join`]: a join's output values are its inputs', and
+    /// matched equi-keys take values both sides have: on an inner join, the two
+    /// keys' values are the same. Disjoint ranges leave no row with a value, so
+    /// none at all.
+    pub fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
         let nl = l.min.len();
         let (left, right) = match join.join_type {
             JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => (Some(0), Some(nl)),
@@ -454,9 +491,10 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// NDVs of a join's output columns: values come from the inputs, plus NULL
-    /// on a padded side, and equi-key columns only keep values both sides share.
-    pub(crate) fn join_ndv(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    /// Part of [`Self::join`]: the `ndv` of a join's output columns: values
+    /// come from the inputs, plus NULL on a padded side, and equi-key columns
+    /// only keep values both sides share.
+    pub fn join_ndv(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
         let (nl, nr) = (l.ndv.len(), r.ndv.len());
         // (output position, input rel, input position, padded, exact)
         let mut map: Vec<(usize, &Rel, usize, bool, bool)> = vec![];

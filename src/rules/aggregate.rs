@@ -11,7 +11,19 @@ use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
 
 impl<'a> Analyzer<'a> {
-    pub(crate) fn aggregate(&mut self, plan: &LogicalPlan, agg: &Aggregate) -> Rel {
+    /// `Aggregate`: one row per group. Notation as in
+    /// [the module](super#notation).
+    ///
+    /// - **Claim**: without GROUP BY, `X = 1`. With GROUP BY on keys `K`:
+    ///   `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv(K)` (or of the keys that
+    ///   determine the rest, or of one column determining every key,
+    ///   [`Self::determining_column`]), each key's `ndv` its expression's,
+    ///   and `X = l` if `K`, or the columns it determines, cover a unique
+    ///   key. `count` columns sum to at most `l`; `min` and `max` take their
+    ///   argument's range ([`Self::aggregate_ranges`]).
+    /// - **When**: ROLLUP, CUBE and GROUPING SETS get nothing: they may emit
+    ///   more rows than they read.
+    pub fn aggregate(&mut self, plan: &LogicalPlan, agg: &Aggregate) -> Rel {
         let l = self.visit(&agg.input);
         if agg
             .group_expr
@@ -84,12 +96,12 @@ impl<'a> Analyzer<'a> {
         o
     }
 
-    /// A column that determines every key, as a key of `nation` does its
-    /// name, has at least as many values as there are groups. It may be one
-    /// of the input's, or of the rows the projections and filters below it
-    /// read: those keep fewer rows, each computed from one of them. The
-    /// first of at most 64 columns tried bounds the groups.
-    pub(crate) fn determining_column(&self, agg: &Aggregate, o: &Rel) {
+    /// Part of [`Self::aggregate`]: a column that determines every key, as a
+    /// key of `nation` does its name, has at least as many values as there are
+    /// groups. It may be one of the input's, or of the rows the projections and
+    /// filters below it read: those keep fewer rows, each computed from one of
+    /// them. The first of at most 64 columns tried bounds the groups.
+    pub fn determining_column(&self, agg: &Aggregate, o: &Rel) {
         let (mut node, mut keys) = (self.nodes.len() - 1, agg.group_expr.clone());
         let mut tries = 64;
         loop {
@@ -121,8 +133,9 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// A grouping key's values, and a MIN's or MAX's, are its input's.
-    pub(crate) fn aggregate_ranges(&self, agg: &Aggregate, o: &Rel, l: &Rel) {
+    /// Part of [`Self::aggregate`]: a grouping key's values, and a MIN's or
+    /// MAX's, are its input's.
+    pub fn aggregate_ranges(&self, agg: &Aggregate, o: &Rel, l: &Rel) {
         let groups = agg.group_expr.len();
         for (j, e) in agg.group_expr.iter().chain(&agg.aggr_expr).enumerate() {
             let arg = match strip_alias(e) {

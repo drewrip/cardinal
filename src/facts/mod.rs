@@ -63,8 +63,8 @@
 //!    operators' quantities in every analysis, so Z3 carries each claim to
 //!    the rest.
 //!
-//! Each fact records the rule it came from ([`Origin`]): the name is the
-//! heading of its spec in [`observe`] or [`derive`](mod@derive).
+//! Each fact records the rule it came from ([`Origin`]), by the name the
+//! rule tables of [`observe`] and [`derive`](mod@derive) list it under.
 //!
 //! [`Analysis::with_facts`]: crate::Analysis::with_facts
 
@@ -411,9 +411,9 @@ impl FactSet {
     }
 
     /// Adds the facts `plan`'s counts give the rows of its operators as a
-    /// query names them, once translated with `catalog` (see
-    /// [rule `translated`](observe#translated)): rows the rules may not name. A plan that does not
-    /// translate adds none.
+    /// query names them, once translated with `catalog` (rule
+    /// [`translated`](observe::observe_translated)): rows the other rules
+    /// may not name. A plan that does not translate adds none.
     pub fn observe_translated(&mut self, catalog: &Catalog, plan: &ObservedPlan, options: &Options) {
         for (fact, floor) in observe::observe_translated(catalog, plan, options) {
             if floor {

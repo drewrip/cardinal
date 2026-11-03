@@ -19,71 +19,25 @@
 //!
 //! # Rules
 //!
-//! ## `ratio`
+//! Each rule is one function, run on the whole set in every pass, and
+//! named as its facts' [`Origin::Derived`] records it:
 //!
-//! - **Claim**: `s(P | C) = |C ∧ P| / |C|`.
-//! - **When**: both sizes are known; `C` and `C ∧ P` are SPJs with the same
-//!   inputs and conditions, and `P` (the predicates only `C ∧ P` has) is not
-//!   empty. Also for `C` a single atom `G`: `s(P | G) = |σP(G)| / |G|`.
-//!
-//! ## `product`
-//!
-//! - **Claim**: `|C ∧ P| = s(P | C) · |C|`, and back, `|C| = |C ∧ P| /
-//!   s(P | C)`.
-//! - **When**: the result is an integer. Not back to a `C` over several
-//!   inputs: a cross product's size is its inputs' product.
-//!
-//! ## `join`
-//!
-//! - **Claim**: `s(Q | L × R) = |C| / (|L| · |R|)`.
-//! - **When**: `C`, `L` and `R` are SPJs with known sizes; `L`'s and `R`'s
-//!   inputs split `C`'s, their conditions are among `C`'s, and `C` is
-//!   `(L × R) ∧ Q`. Some term of `Q` reads columns of both sides.
-//!
-//! ```text
-//! |orders| = 1500, |customer| = 150,
-//! |orders × customer ∧ o_custkey = c_custkey| = 1500
-//! ⇒ s(o_custkey = c_custkey | orders × customer) = 1/150
-//! ```
-//!
-//! ## `match`
-//!
-//! - **Claim**: for `S` an SPJ with a semi or anti condition on `on` against
-//!   `O`, and `K` the same without it: `m(on | K ⋉ O) = |S| / |K|` (semi),
-//!   or `(|K| − |S|) / |K|` (anti).
-//! - **When**: both sizes are known and `|K| > 0`. Not for `NOT IN`, whose
-//!   rows also depend on NULLs in `O`.
-//!
-//! ## `redundant`
-//!
-//! - **Claim**: a fact on rows `D ∧ p` holds of `D` too, with the same
-//!   value; and `s(P | D) = s(P − {p} | D)` for `p ∈ P`, `P` with another
-//!   term.
-//! - **When**: `s(P' | C) = 1` for some SPJ `C` with `p ∈ P'`, `p` not
-//!   among `C`'s predicates, and `D` has at least `C`'s inputs, conditions
-//!   and predicates. Applies to the rows of any fact, and to both sides of
-//!   a `m`. One term is dropped per fact per pass.
-//! - **Why**: every row of `C` satisfies `p`, and a row of `D` is, on `C`'s
-//!   inputs, a row of `C`. Engines add such terms (DuckDB filters a join's
-//!   side by the other's key range), and queries that do not spell them out
-//!   find facts without them.
-//!
-//! ```text
-//! s(o_custkey <= 150000 | orders) = 1
-//! |orders ∧ o_custkey <= 150000 ∧ o_orderdate < d| = 900
-//! ⇒ |orders ∧ o_orderdate < d| = 900
-//! ```
-//!
-//! ## `unique`
-//!
-//! - **Claim**: `unique(K | C) = 1`.
-//! - **When**: `ndv(K | C) = |C|`.
+//! | Rule | Gives | Spec |
+//! |---|---|---|
+//! | `ratio` | `s(P \| C)` | [`ratio`] |
+//! | `product` | `\|C\|` | [`product`] |
+//! | `join` | `s(Q \| L × R)` | [`join`] |
+//! | `match` | `m(on \| K ⋉ O)` | [`match_share`] |
+//! | `redundant` | any | [`redundant`] |
+//! | `unique` | `unique(K \| C)` | [`unique`] |
 
 use std::collections::{BTreeSet, HashMap};
 
 use crate::rows::rewrite::Spj;
 use super::{Context, Exists, ExistsKind, Fact, FactKind, FactSet, Origin, Ratio, Term};
 
+/// Adds what follows from `set`'s facts, one pass of every rule at a time,
+/// until a pass adds nothing.
 pub(super) fn close(set: &mut FactSet) {
     loop {
         let mut added = false;
@@ -106,24 +60,60 @@ fn parts(c: &Context) -> Option<Parts<'_>> {
     }
 }
 
-fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
-    let mut out = vec![];
-    let cards: HashMap<&Context, Ratio> = set
-        .iter()
-        .filter_map(|f| match &f.kind {
-            FactKind::Cardinality(c) => Some((c, f.value)),
-            _ => None,
-        })
-        .collect();
-    let spj: Vec<(Parts, &Context, Ratio)> = cards.iter().filter_map(|(c, v)| Some((parts(c)?, *c, *v))).collect();
-    // By inputs: tables and atoms.
-    let mut by_inputs: HashMap<(&BTreeSet<String>, &BTreeSet<Context>), Vec<usize>> = HashMap::new();
-    for (i, ((tables, atoms, ..), ..)) in spj.iter().enumerate() {
-        by_inputs.entry((*tables, *atoms)).or_default().push(i);
-    }
+/// A rule: the facts it derives from a set's, and their values.
+type Rule = fn(&FactSet) -> Vec<(FactKind, Ratio)>;
 
-    // Ratio: |C ∧ p| / |C| = s(p | C), where C ∧ p has C's inputs and
-    // conditions, and predicates that are C's with p.
+/// One pass of every rule over `set`: each new fact with its rule's name.
+fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
+    let rules: [(Rule, &'static str); 6] = [
+        (ratio, "ratio"),
+        (product, "product"),
+        (join, "join"),
+        (match_share, "match"),
+        (redundant, "redundant"),
+        (unique, "unique"),
+    ];
+    rules.iter().flat_map(|(rule, name)| rule(set).into_iter().map(|(kind, value)| (kind, value, *name))).collect()
+}
+
+/// The sizes `set` knows, and those of SPJs by their parts and inputs.
+struct Sizes<'a> {
+    cards: HashMap<&'a Context, Ratio>,
+    spj: Vec<(Parts<'a>, &'a Context, Ratio)>,
+    /// Indices into `spj`, by inputs: tables and atoms.
+    by_inputs: HashMap<(&'a BTreeSet<String>, &'a BTreeSet<Context>), Vec<usize>>,
+}
+
+impl<'a> Sizes<'a> {
+    fn new(set: &'a FactSet) -> Sizes<'a> {
+        let cards: HashMap<&Context, Ratio> = set
+            .iter()
+            .filter_map(|f| match &f.kind {
+                FactKind::Cardinality(c) => Some((c, f.value)),
+                _ => None,
+            })
+            .collect();
+        let spj: Vec<(Parts, &Context, Ratio)> = cards.iter().filter_map(|(c, v)| Some((parts(c)?, *c, *v))).collect();
+        let mut by_inputs: HashMap<(&BTreeSet<String>, &BTreeSet<Context>), Vec<usize>> = HashMap::new();
+        for (i, ((tables, atoms, ..), ..)) in spj.iter().enumerate() {
+            by_inputs.entry((*tables, *atoms)).or_default().push(i);
+        }
+        Sizes { cards, spj, by_inputs }
+    }
+}
+
+/// `ratio`: a selectivity from two sizes.
+///
+/// - **Claim**: `s(P | C) = |C ∧ P| / |C|`.
+/// - **When**: both sizes are known; `C` and `C ∧ P` are SPJs with the same
+///   inputs and conditions, and `P` (the predicates only `C ∧ P` has) is not
+///   empty. Also for `C` a single atom `G`: `s(P | G) = |σP(G)| / |G|`.
+pub fn ratio(set: &FactSet) -> Vec<(FactKind, Ratio)> {
+    let sizes = Sizes::new(set);
+    let cards = &sizes.cards;
+    let spj = &sizes.spj;
+    let by_inputs = &sizes.by_inputs;
+    let mut out = vec![];
     for group in by_inputs.values() {
         for &i in group {
             for &j in group {
@@ -133,45 +123,71 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
                 }
                 let pred: BTreeSet<Term> = p2.difference(p1).cloned().collect();
                 if let (false, Some(s)) = (pred.is_empty(), v2.over(*v1)) {
-                    out.push((FactKind::Selectivity { pred, over: (*c1).clone() }, s, "ratio"));
+                    out.push((FactKind::Selectivity { pred, over: (*c1).clone() }, s));
                 }
             }
         }
     }
     // A filter over one atom: |σp(G)| / |G|.
-    for &((tables, atoms, preds, exists), _, v) in &spj {
+    for &((tables, atoms, preds, exists), _, v) in spj {
         if tables.is_empty() && atoms.len() == 1 && exists.is_empty() && !preds.is_empty() {
             let atom = atoms.first().unwrap();
             if let Some(s) = cards.get(atom).and_then(|n| v.over(*n)) {
-                out.push((FactKind::Selectivity { pred: preds.clone(), over: atom.clone() }, s, "ratio"));
+                out.push((FactKind::Selectivity { pred: preds.clone(), over: atom.clone() }, s));
             }
         }
     }
+    out
+}
 
-    // Product: s(p | C) · |C| = |C ∧ p|, and back. Not back to a cross
-    // product, whose size is just the product of its inputs'.
+/// `product`: a size from a selectivity and a size.
+///
+/// - **Claim**: `|C ∧ P| = s(P | C) · |C|`, and back, `|C| = |C ∧ P| /
+///   s(P | C)`.
+/// - **When**: the result is an integer. Not back to a `C` over several
+///   inputs: a cross product's size is its inputs' product.
+pub fn product(set: &FactSet) -> Vec<(FactKind, Ratio)> {
+    let sizes = Sizes::new(set);
+    let cards = &sizes.cards;
+    let mut out = vec![];
     for f in set.iter() {
         let FactKind::Selectivity { pred, over } = &f.kind else { continue };
         let target = over.filter(pred);
         if let Some(n) = cards.get(over).and_then(|n| n.times(f.value)).filter(|n| n.as_int().is_some()) {
-            out.push((FactKind::Cardinality(target.clone()), n, "product"));
+            out.push((FactKind::Cardinality(target.clone()), n));
         }
         let cross = matches!(parts(over), Some((tables, atoms, ..)) if tables.len() + atoms.len() > 1);
         if let (false, Some(n)) = (cross, cards.get(&target).and_then(|n| n.over(f.value)))
             && n.as_int().is_some()
         {
-            out.push((FactKind::Cardinality(over.clone()), n, "product"));
+            out.push((FactKind::Cardinality(over.clone()), n));
         }
     }
+    out
+}
 
-    // Join: s(rest | L × R) = |C| / (|L| · |R|), where C's inputs are L's
-    // and R's, C is L × R with more predicates, `rest`, and at least one of
-    // them relates the two sides.
-    for &((tables, atoms, preds, exists), c, cv) in &spj {
+/// `join`: a join's selectivity from its size and its inputs'.
+///
+/// - **Claim**: `s(Q | L × R) = |C| / (|L| · |R|)`.
+/// - **When**: `C`, `L` and `R` are SPJs with known sizes; `L`'s and `R`'s
+///   inputs split `C`'s, their conditions are among `C`'s, and `C` is
+///   `(L × R) ∧ Q`. Some term of `Q` reads columns of both sides.
+///
+/// ```text
+/// |orders| = 1500, |customer| = 150,
+/// |orders × customer ∧ o_custkey = c_custkey| = 1500
+/// ⇒ s(o_custkey = c_custkey | orders × customer) = 1/150
+/// ```
+pub fn join(set: &FactSet) -> Vec<(FactKind, Ratio)> {
+    let sizes = Sizes::new(set);
+    let spj = &sizes.spj;
+    let by_inputs = &sizes.by_inputs;
+    let mut out = vec![];
+    for &((tables, atoms, preds, exists), c, cv) in spj {
         if tables.len() + atoms.len() < 2 {
             continue;
         }
-        for &((lt, la, _, le), l, lv) in &spj {
+        for &((lt, la, _, le), l, lv) in spj {
             if lt.len() + la.len() >= tables.len() + atoms.len()
                 || !lt.is_subset(tables)
                 || !la.is_subset(atoms)
@@ -198,15 +214,28 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
                     !used.is_disjoint(&ls) && !used.is_disjoint(&rs)
                 });
                 if let (true, Some(s)) = (relates, lv.times(rv).and_then(|lr| cv.over(lr))) {
-                    out.push((FactKind::Selectivity { pred: rest, over }, s, "join"));
+                    out.push((FactKind::Selectivity { pred: rest, over }, s));
                 }
             }
         }
     }
+    out
+}
 
-    // Match: a context with a semi or anti condition, over the same without
-    // it, is the share of its rows with a partner.
-    for &((tables, atoms, preds, exists), _, v) in &spj {
+/// `match`: a semi or anti join's match share from its size and its kept
+/// side's.
+///
+/// - **Claim**: for `S` an SPJ with a semi or anti condition on `on` against
+///   `O`, and `K` the same without it: `m(on | K ⋉ O) = |S| / |K|` (semi),
+///   or `(|K| − |S|) / |K|` (anti).
+/// - **When**: both sizes are known and `|K| > 0`. Not for `NOT IN`, whose
+///   rows also depend on NULLs in `O`.
+pub fn match_share(set: &FactSet) -> Vec<(FactKind, Ratio)> {
+    let sizes = Sizes::new(set);
+    let cards = &sizes.cards;
+    let spj = &sizes.spj;
+    let mut out = vec![];
+    for &((tables, atoms, preds, exists), _, v) in spj {
         for e in exists {
             let semi = match e.kind {
                 ExistsKind::Semi => true,
@@ -222,17 +251,34 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
             let matched = if semi { Some(rows) } else { n.checked_sub(rows) };
             if let Some(m) = matched.and_then(|m| Ratio::new(m, n)) {
                 let kind = FactKind::Match { on: e.on.clone(), kept, other: e.other.clone() };
-                out.push((kind.canonical(), m, "match"));
+                out.push((kind.canonical(), m));
             }
         }
     }
+    out
+}
 
-    // Redundant: s(P | C) = 1 says every row of C satisfies each term of P,
-    // so a context with C's inputs and conditions names the same rows with
-    // or without it. Engines add such terms (DuckDB filters a join's side by
-    // the other's key range), and a query that does not spell them out
-    // finds the facts without them. One term goes at a time: which can go
-    // next may depend on which went first.
+/// `redundant`: facts without the predicates every row already satisfies.
+///
+/// - **Claim**: a fact on rows `D ∧ p` holds of `D` too, with the same
+///   value; and `s(P | D) = s(P − {p} | D)` for `p ∈ P`, `P` with another
+///   term.
+/// - **When**: `s(P' | C) = 1` for some SPJ `C` with `p ∈ P'`, `p` not
+///   among `C`'s predicates, and `D` has at least `C`'s inputs, conditions
+///   and predicates. Applies to the rows of any fact, and to both sides of
+///   a `m`. One term is dropped per fact per pass.
+/// - **Why**: every row of `C` satisfies `p`, and a row of `D` is, on `C`'s
+///   inputs, a row of `C`. Engines add such terms (DuckDB filters a join's
+///   side by the other's key range), and queries that do not spell them out
+///   find facts without them.
+///
+/// ```text
+/// s(o_custkey <= 150000 | orders) = 1
+/// |orders ∧ o_custkey <= 150000 ∧ o_orderdate < d| = 900
+/// ⇒ |orders ∧ o_orderdate < d| = 900
+/// ```
+pub fn redundant(set: &FactSet) -> Vec<(FactKind, Ratio)> {
+    let mut out = vec![];
     let always: Vec<(Parts, &Term)> = set
         .iter()
         .filter(|f| f.value == Ratio::int(1))
@@ -303,16 +349,25 @@ fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
                     kept_side.chain(other_side).collect()
                 }
             };
-            out.extend(kinds.into_iter().map(|k| (k.canonical(), f.value, "redundant")));
+            out.extend(kinds.into_iter().map(|k| (k.canonical(), f.value)));
         }
     }
+    out
+}
 
-    // Unique: ndv(keys | C) = |C|.
+/// `unique`: keys with as many values as rows.
+///
+/// - **Claim**: `unique(K | C) = 1`.
+/// - **When**: `ndv(K | C) = |C|`.
+pub fn unique(set: &FactSet) -> Vec<(FactKind, Ratio)> {
+    let sizes = Sizes::new(set);
+    let cards = &sizes.cards;
+    let mut out = vec![];
     for f in set.iter() {
         if let FactKind::Distinct { keys, over } = &f.kind
             && cards.get(over) == Some(&f.value)
         {
-            out.push((FactKind::Unique { keys: keys.clone(), over: over.clone() }, Ratio::int(1), "unique"));
+            out.push((FactKind::Unique { keys: keys.clone(), over: over.clone() }, Ratio::int(1)));
         }
     }
     out

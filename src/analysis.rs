@@ -1,10 +1,11 @@
 //! Building one plan's SMT system: a bottom-up walk over a DataFusion
-//! `LogicalPlan`.
+//! `LogicalPlan` by an [`Analyzer`].
 //!
-//! Every operator gets an integer variable for its output cardinality and one per
-//! output column bounding that column's number of distinct values (NDV, with NULL
-//! counted as one value). The operator's rule ([`crate::rules`]) relates
-//! them to its inputs'.
+//! Every operator gets a [`Rel`]: an integer variable for its output
+//! cardinality and, per output column, one bounding its number of distinct
+//! values (NDV, with NULL counted as one value), and for some its least and
+//! greatest value. The operator's rule ([`crate::rules`]) relates them to its
+//! inputs', and the [axioms](crate::axioms) to what holds of any rows.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -43,10 +44,11 @@ pub(crate) struct TableVar {
     pub(crate) var: Int,
 }
 
-/// The abstract state of a relation: its cardinality and, per output column, a
-/// variable bounding its number of distinct values.
+/// The abstract state of a relation: a variable for its cardinality and, per
+/// output column, one for its number of distinct values and, for some, its
+/// least and greatest value; and what is known of its rows whatever the data.
 #[derive(Clone)]
-pub(crate) struct Rel {
+pub struct Rel {
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
     /// Per output column, the ends of an interval holding each of its
@@ -104,7 +106,11 @@ impl Rows {
     }
 }
 
-pub(crate) struct Analyzer<'a> {
+/// The state of one analysis as it walks a plan: the Z3 solver and every
+/// variable and assertion so far. Each [rule](crate::rules) and
+/// [axiom](crate::axioms) is one of its methods. Made by
+/// [`Analysis`](crate::Analysis).
+pub struct Analyzer<'a> {
     pub(crate) solver: Solver,
     pub(crate) resolve: &'a dyn Fn(&TableScan) -> ScanKind,
     /// One variable per distinct base table, keyed by `ScanKind::Base::key` and

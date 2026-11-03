@@ -13,7 +13,7 @@
 //! - [`facts`]: counts read off plans that ran, added as claims on the
 //!   query's operators ([`Analysis::with_facts`]).
 
-mod analysis;
+pub mod analysis;
 pub mod axioms;
 mod bounds;
 mod domain;

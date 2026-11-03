@@ -12,8 +12,9 @@
 //!   `ndv`, `min` and `max` variables, the value domains its rules found,
 //!   and the declared keys.
 //! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
-//!   names the function that asserted it. No quantifiers: Rust decides where an axiom applies, Z3
-//!   does the arithmetic.
+//!   names the function that asserted it, or the axiom's name. No
+//!   quantifiers: Rust decides where an axiom applies, Z3 does the
+//!   arithmetic.
 //! - **Guarantees**: each axiom holds for any data; a schema axiom for any
 //!   data satisfying the declared keys. The tests deciding where an
 //!   axiom applies are conservative: missing a case loses an axiom, never
@@ -21,75 +22,50 @@
 //! - **Not done**: selectivities and match shares get no axioms; contexts
 //!   outside the relevant set are not related.
 //!
-//! Axioms come in two kinds, by when they are asserted:
-//!
-//! - [On each relation](#axioms-on-each-relation), as the analysis makes
-//!   its variables.
-//! - [Between named rows](#axioms-between-named-rows), once every
-//!   operator is visited: over the quantities of the rows its operators
-//!   name.
-//!
-//! Both are asserted in every analysis.
+//! Axioms come in two kinds, by when they are asserted. Both are asserted
+//! in every analysis.
 //!
 //! # Axioms on each relation
 //!
-//! ## `non-negative`
+//! Asserted as the analysis makes each relation's variables, by a method of
+//! [`Analyzer`] each:
 //!
-//! - **Claim**: `v ≥ 0` for every row count and `ndv`, and each table's
-//!   size.
-//!
-//! ## `ndv within rows`
-//!
-//! - **Claim**: `ndv ≤ X` for each column; between named rows,
-//!   `ndv(K | C) ≤ |C|`.
-//!
-//! ## `nonempty ndv`
-//!
-//! - **Claim**: `X ≥ 1 ⇒ ndv ≥ 1`: a row has a value, NULL counting as one.
-//!
-//! ## `boolean ndv`
-//!
-//! - **Claim**: `ndv ≤ 3` for a boolean column: true, false and NULL.
-//!
-//! ## `empty domain`
-//!
-//! - **Claim**: `X = 0`.
-//! - **When**: the relation's value domains contradict (`x < 1 AND x > 5`),
-//!   or a column's domain holds no value.
-//! - **Why**: every row satisfies its domains, so there is none.
-//!
-//! ## `ndv within domain`
-//!
-//! - **Claim**: `ndv ≤ n`, for a column whose domain holds `n` values,
-//!   NULL included if it may occur.
-//!
-//! ```text
-//! WHERE d BETWEEN 1 AND 7  ⇒  ndv(d) ≤ 7
-//! ```
-//!
-//! ## `range within domain`
-//!
-//! - **Claim**: for a column with `min` and `max` variables: they lie
-//!   within its domain's integer range; `X ≥ 1 ⇒ min ≤ max` if it is never
-//!   NULL; and `ndv ≤ max − min + 1`, plus 1 if it may be NULL.
-//!
-//! ## `key ndv`
-//!
-//! - **Claim**: `ndv = X` for a column that traces to a declared primary
-//!   key or NOT NULL UNIQUE column, through every operator that keeps it
-//!   unique (`keys.rs`).
-//!
-//! ## `composite key`
-//!
-//! - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or of
-//!   a composite UNIQUE constraint's on NOT NULL columns.
-//! - **Why**: each row has its own combination of key values.
+//! | Axiom | Claim |
+//! |---|---|
+//! | `non-negative` | [`Analyzer::non_negative`] |
+//! | `ndv within rows` | [`Analyzer::ndv_within_rows`] |
+//! | `nonempty ndv` | [`Analyzer::nonempty_ndv`] |
+//! | `boolean ndv` | [`Analyzer::boolean_ndv`] |
+//! | `empty domain` | [`Analyzer::empty_domain`] |
+//! | `ndv within domain` | [`Analyzer::ndv_within_domain`] |
+//! | `range within domain` | [`Analyzer::range_within_domain`] |
+//! | `key ndv` | [`Analyzer::key_ndv`] |
+//! | `composite key` | [`Analyzer::composite_key`] |
+//! | `disjoint` | [`Analyzer::disjoint`] |
 //!
 //! # Axioms between named rows
 //!
-//! These relate the quantities of rows named as [`Context`]s, wherever
-//! terms for them exist: the analysis's variables for the rows its
-//! operators name (`rows::logical`).
+//! Once every operator is visited, [`Analyzer::named_rows`] names each
+//! operator's rows as a [`Context`] and collects the quantities of those
+//! rows in a [`Space`]. The functions below relate them, wherever terms for
+//! them exist, and each [`Axiom`] carries its name.
+//!
+//! ```text
+//!  operators ──name──▶ Space: |C|, ndv(K | C), min, max ──axioms──▶ Z3
+//!                       of the relevant contexts
+//! ```
+//!
+//! | Axiom | Claim |
+//! |---|---|
+//! | `same rows` | [`same_rows`], [`subset`] |
+//! | `subset` | [`subset`] |
+//! | `fewer` | [`fewer`] |
+//! | `failing rows` | [`failing`] |
+//! | `implied` | [`implied`] |
+//! | `semi and anti` | [`split`] |
+//! | `fewer keys` | [`fewer_keys`] |
+//! | `wider rows` | [`wider`] |
+//! | `disjoint` | [`disjoint`] |
 //!
 //! ## Relevant contexts
 //!
@@ -113,97 +89,6 @@
 //!   `B` a full join on the same condition, inputs pairwise `⊆` either way.
 //! - `D` joins `C`: both SPJs, `D` with more inputs, and all of `C`'s
 //!   tables, atoms, conditions and predicates.
-//!
-//! ## `same rows`
-//!
-//! - **Claim**: `t = t'` for any two terms of one quantity. And for `A ⊆ B`:
-//!   `|A| = |B| ⇒` each key quantity of `A` equals `B`'s of the same keys.
-//! - **Why**: one quantity has one value; `A ⊆ B` with as many rows makes
-//!   them the same rows.
-//!
-//! ## `subset`
-//!
-//! - **Claim**: for `A ⊆ B`, `A ≠ B`: `|A| ≤ |B|`; `ndv(K | A) ≤ ndv(K' |
-//!   B)` for `K ⊆ K'`; `min(k | A) ≥ min(k | B)`; `max(k | A) ≤ max(k | B)`.
-//! - **Why**: fewer rows have fewer values, within the same range.
-//!
-//! ## `fewer`
-//!
-//! - **Claim**: `|A| ≤ |B|` for `fewer(A, B)` but not `A ⊆ B`.
-//! - **Why**: an outer join emits each preserved row once per partner or
-//!   once padded, so narrowing an input never adds rows. Its rows need not
-//!   be among the other's (a row may lose its partner and be padded), so
-//!   nothing is said of their values.
-//!
-//! ## `failing rows`
-//!
-//! - **Claim**: `|D| − |D ∧ P| ≤ |C| − |C ∧ P|`.
-//! - **When**: `D ⊆ C` as named, `C` an SPJ, `C ∧ P` a relevant SPJ with
-//!   `C`'s inputs and conditions, and `D ∧ P ≠ D`.
-//! - **Why**: `D`'s rows failing `P` are among `C`'s.
-//!
-//! ```text
-//! D = orders ∧ o_status = 'F' ⊆ C = orders, P = {o_price > 100}
-//! ⇒ |D| − |D ∧ P| ≤ |orders| − |orders ∧ P|
-//! ```
-//!
-//! ## `implied`
-//!
-//! - **Claim**: `|C ∧ P| = |C| ⇒ |D ∧ P| = |D|`.
-//! - **When**: `C` an SPJ, `C ∧ P` a relevant SPJ with `C`'s inputs and
-//!   conditions, `D` joins `C` and does not already have all of `P`.
-//! - **Why**: if every row of `C` satisfies `P`, so does every row of `D`,
-//!   which is, on `C`'s inputs, a row of `C`.
-//!
-//! ```text
-//! C = lineitem, P = {l_quantity >= 1}, D = lineitem ⋈ orders
-//! ⇒ |lineitem ∧ P| = |lineitem| ⇒ |D ∧ P| = |D|
-//! ```
-//!
-//! ## `semi and anti`
-//!
-//! - **Claim**: `|K ⋉ O| + |K ▷ O| = |K|`, for `K ⋉ O` an SPJ with a semi
-//!   condition, `K` it without it, and `K ▷ O` it with the anti condition on
-//!   the same `on` and `O` instead.
-//! - **Why**: each row of `K` has a partner or has none.
-//!
-//! ## `fewer keys`
-//!
-//! - **Claim**: `ndv(K | C) ≤ ndv(K' | C)` for `K ⊊ K'`.
-//! - **Why**: fewer keys have no more combinations.
-//!
-//! ## `wider rows`
-//!
-//! - **Claim**: for `D` joining `C`, and keys `K` (or `k`) whose columns are
-//!   all of `C`'s tables: `ndv(K | D) ≤ |C|`; `ndv(K | D) ≤ ndv(K' | C)` for
-//!   `K ⊆ K'`; `min(k | D) ≥ min(k | C)`; `max(k | D) ≤ max(k | C)`.
-//! - **Why**: each row of `D` holds a row of `C`, so `C`'s columns take in
-//!   `D` only values they take in `C`.
-//!
-//! ```text
-//! D = orders ⋈ lineitem on o_orderkey = l_orderkey
-//! ⇒ ndv(o_custkey | D) ≤ ndv(o_custkey | orders) and ≤ |orders|
-//! ```
-//!
-//! ## `disjoint`
-//!
-//! - **Claim**: rows that no row satisfies the conditions of both are apart
-//!   among any rows holding both: `|X| + |Y| ≤ |Z|`. Found two ways:
-//! - **When** (relations): relations made of distinct rows of one stored
-//!   table, reached through operators that never repeat a row (filter,
-//!   projection, sort, limit, distinct, semi and anti joins), whose value
-//!   domains on some column do not meet. `Z` is the table. Relations with
-//!   the same domains form a class bounded by one variable, and each set of
-//!   pairwise disjoint classes sums to at most `|T|`; at most 64 classes per
-//!   table.
-//! - **When** (named rows): `X`, `Y` and `Z` are SPJs with the same inputs
-//!   and conditions; `X` and `Y` compare some expression with literals in
-//!   ranges that do not meet (values of different types are taken to
-//!   meet); `Z`'s predicates are among both's, and no such `Z` has more.
-//!
-//! ```text
-//! |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
-//! ```
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -218,50 +103,72 @@ use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
 use crate::rows::canonical::Renamed;
-use crate::rows::contain::{fewer, renamed, renamed_kind, subset};
+use crate::rows::contain::{self, renamed, renamed_kind};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
 
-// Axioms on each relation's variables, asserted as the analysis makes
-// them. Each is a function of its own, named as its heading above, so a
-// trace names the axiom a constraint is from.
+/// [Axioms on each relation](self#axioms-on-each-relation), one function
+/// each, so a trace names the axiom a constraint is from.
 impl<'a> Analyzer<'a> {
-    /// [`non-negative`](self#non-negative): `v ≥ 0`.
-    pub(crate) fn non_negative(&self, v: &Int) {
+    /// `non-negative`.
+    ///
+    /// - **Claim**: `v ≥ 0` for every row count and `ndv`, and each table's
+    ///   size.
+    pub fn non_negative(&self, v: &Int) {
         self.assert(v.ge(int(0)));
     }
 
-    /// [`ndv within rows`](self#ndv-within-rows): `ndv ≤ rows`.
-    pub(crate) fn ndv_within_rows(&self, ndv: &Int, rows: &Int) {
+    /// `ndv within rows`.
+    ///
+    /// - **Claim**: `ndv ≤ X` for each column.
+    pub fn ndv_within_rows(&self, ndv: &Int, rows: &Int) {
         self.assert(ndv.le(rows));
     }
 
-    /// [`nonempty ndv`](self#nonempty-ndv): `rows ≥ 1 ⇒ ndv ≥ 1`.
-    pub(crate) fn nonempty_ndv(&self, ndv: &Int, rows: &Int) {
+    /// `nonempty ndv`.
+    ///
+    /// - **Claim**: `X ≥ 1 ⇒ ndv ≥ 1`: a row has a value, NULL counting as
+    ///   one.
+    pub fn nonempty_ndv(&self, ndv: &Int, rows: &Int) {
         self.assert(rows.ge(int(1)).implies(ndv.ge(int(1))));
     }
 
-    /// [`boolean ndv`](self#boolean-ndv): true, false, NULL.
-    pub(crate) fn boolean_ndv(&self, ndv: &Int) {
+    /// `boolean ndv`.
+    ///
+    /// - **Claim**: `ndv ≤ 3` for a boolean column: true, false and NULL.
+    pub fn boolean_ndv(&self, ndv: &Int) {
         self.assert(ndv.le(int(3)));
     }
 
-    /// [`empty domain`](self#empty-domain): no rows.
-    pub(crate) fn empty_domain(&self, rows: &Int) {
+    /// `empty domain`.
+    ///
+    /// - **Claim**: `X = 0`.
+    /// - **When**: the relation's value domains contradict (`x < 1 AND x >
+    ///   5`), or a column's domain holds no value.
+    /// - **Why**: every row satisfies its domains, so there is none.
+    pub fn empty_domain(&self, rows: &Int) {
         self.assert(rows.eq(int(0)));
     }
 
-    /// [`ndv within domain`](self#ndv-within-domain): `ndv ≤ n`, for a
-    /// column whose domain holds `n` values.
-    pub(crate) fn ndv_within_domain(&self, ndv: &Int, n: u64) {
+    /// `ndv within domain`.
+    ///
+    /// - **Claim**: `ndv ≤ n`, for a column whose domain holds `n` values,
+    ///   NULL included if it may occur.
+    ///
+    /// ```text
+    /// WHERE d BETWEEN 1 AND 7  ⇒  ndv(d) ≤ 7
+    /// ```
+    pub fn ndv_within_domain(&self, ndv: &Int, n: u64) {
         self.assert(ndv.le(int(n)));
     }
 
-    /// Each column's interval holds the values its domain allows, and isn't
-    /// empty where the column has a value; it holds at most its width of
-    /// distinct values, and NULL.
-    pub(crate) fn range_within_domain(&self, plan: &LogicalPlan, rel: &Rel) {
+    /// `range within domain`.
+    ///
+    /// - **Claim**: for a column with `min` and `max` variables: they lie
+    ///   within its domain's integer range; `X ≥ 1 ⇒ min ≤ max` if it is
+    ///   never NULL; and `ndv ≤ max − min + 1`, plus 1 if it may be NULL.
+    pub fn range_within_domain(&self, plan: &LogicalPlan, rel: &Rel) {
         let schema = plan.schema();
         for (j, (lo, hi)) in rel.min.iter().zip(&rel.max).enumerate() {
             let (Some(lo), Some(hi)) = (lo, hi) else { continue };
@@ -282,9 +189,13 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// A column that traces to a declared key takes a distinct value on every
-    /// row: its NDV (NULL counted as one value) equals the cardinality.
-    pub(crate) fn key_ndv(&self, plan: &LogicalPlan, rel: &Rel) {
+    /// `key ndv`.
+    ///
+    /// - **Claim**: `ndv = X` for a column that traces to a declared primary
+    ///   key or NOT NULL UNIQUE column, through every operator that keeps it
+    ///   unique.
+    /// - **Why**: such a column takes a distinct value on every row.
+    pub fn key_ndv(&self, plan: &LogicalPlan, rel: &Rel) {
         let schema = plan.schema();
         for j in 0..schema.fields().len() {
             let col = Column::from(schema.qualified_field(j));
@@ -294,10 +205,12 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// A composite primary key, or a composite UNIQUE constraint on NOT NULL
-    /// columns, is unique as a tuple: the table has at most as many rows as
-    /// the product of its key columns' NDVs.
-    pub(crate) fn composite_key(&self, scan: &TableScan, rel: &Rel) {
+    /// `composite key`.
+    ///
+    /// - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or
+    ///   of a composite UNIQUE constraint's on NOT NULL columns.
+    /// - **Why**: each row has its own combination of key values.
+    pub fn composite_key(&self, scan: &TableScan, rel: &Rel) {
         let Some(constraints) = scan.source.constraints() else {
             return;
         };
@@ -327,11 +240,23 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Relations over one table whose rows are provably disjoint together hold
-    /// at most the table's rows. Each class of relations with the same domains
-    /// gets a variable for the table rows in those domains, bounding all of
-    /// its members, and disjoint classes' variables sum to at most the table.
-    pub(crate) fn disjoint(&mut self) {
+    /// `disjoint`, between relations. [`disjoint`](fn@disjoint) finds it
+    /// between named rows.
+    ///
+    /// - **Claim**: relations whose rows no row of the table is in both of
+    ///   are apart: `|X| + |Y| ≤ |T|`.
+    /// - **When**: relations made of distinct rows of one stored table `T`,
+    ///   reached through operators that never repeat a row (filter,
+    ///   projection, sort, limit, distinct, semi and anti joins), whose value
+    ///   domains on some column do not meet. Relations with the same domains
+    ///   form a class bounded by one variable, and each set of pairwise
+    ///   disjoint classes sums to at most `|T|`; at most 64 classes per
+    ///   table.
+    ///
+    /// ```text
+    /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
+    /// ```
+    pub fn disjoint(&mut self) {
         let origins: Vec<Origin> = self.origins.iter().map(|(_, o)| o.clone()).collect();
         let (classes, cliques) = origin::disjoint_classes(&origins, 64);
         let mut part: HashMap<usize, Int> = HashMap::new();
@@ -353,18 +278,17 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Every axiom between named rows over the quantities of this
-    /// analysis's own operators, each operator's rows named as facts name
-    /// them. `ndv within rows` is left out: each relation has it already.
-    pub(crate) fn named_rows(&mut self) {
+    /// Every [axiom between named rows](self#axioms-between-named-rows)
+    /// over the quantities of this analysis's own operators, each
+    /// operator's rows named as facts name them, among the
+    /// [relevant contexts](self#relevant-contexts).
+    pub fn named_rows(&mut self) {
         let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
         let logical = Logical::new(&self.nodes, &scans);
         let mut space = Space::default();
         let seeds = add_nodes(&mut space, &self.nodes, &logical);
         for a in space.axioms(&space.relevant(&seeds)) {
-            if a.rule != "ndv within rows" {
-                self.assert_named(a.rule, a.claim);
-            }
+            self.assert_named(a.rule, a.claim);
         }
     }
 }
@@ -423,15 +347,17 @@ fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<C
     contexts
 }
 
-/// An assertion every data satisfies, and the rule it is from.
-struct Axiom {
+/// An assertion every data satisfies, and the axiom it is an instance of.
+pub struct Axiom {
     pub claim: Bool,
     pub rule: &'static str,
 }
 
-/// The terms each quantity equals.
+/// The quantities of named rows (`|C|`, `ndv(K | C)`, `min`, `max`), each
+/// with the Z3 terms it equals: the variables of the operators whose rows
+/// it is of.
 #[derive(Default)]
-struct Space {
+pub struct Space {
     terms: BTreeMap<FactKind, Vec<Int>>,
 }
 
@@ -477,7 +403,6 @@ impl Space {
 
     /// Every axiom over the quantities of `relevant` contexts.
     fn axioms(&self, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
-        let mut out = vec![];
         let card = |c: &Context| self.term(&FactKind::Cardinality(c.clone()));
         // Each relevant context's key quantities.
         let mut keys: BTreeMap<&Context, Vec<&FactKind>> = BTreeMap::new();
@@ -486,54 +411,18 @@ impl Space {
                 keys.entry(over(q)).or_default().push(q);
             }
         }
-        for (q, terms) in &self.terms {
-            if !relevant.contains(over(q)) {
-                continue;
-            }
-            // Every term of one quantity is one value.
-            for t in &terms[1..] {
-                out.push(Axiom { claim: t.eq(&terms[0]), rule: "same rows" });
-            }
-            if let FactKind::Distinct { over, .. } = q
-                && let Some(n) = card(over)
-            {
-                out.push(Axiom { claim: terms[0].le(n), rule: "ndv within rows" });
-            }
-        }
-
+        let mut out = same_rows(self, relevant);
         let buckets = self.buckets();
         for a in relevant {
-            let Some(ca) = card(a) else { continue };
+            if card(a).is_none() {
+                continue;
+            }
             for b in buckets.get(&bases(a)).into_iter().flatten().filter(|b| relevant.contains(**b) && **b != a) {
-                let Some(cb) = card(b) else { continue };
-                if renamed(a, b, subset) {
-                    out.push(Axiom { claim: ca.le(cb), rule: "subset" });
-                    // Each key of `a` that is one of `b`'s, over rows among
-                    // `b`'s, and the same once there are as many rows.
-                    let mut same = vec![];
-                    for qa in keys.get(a).into_iter().flatten() {
-                        for qb in keys.get(*b).into_iter().flatten() {
-                            if !renamed_kind(qa, qb, key_within) {
-                                continue;
-                            }
-                            let (ta, tb) = (self.term(qa).unwrap(), self.term(qb).unwrap());
-                            let claim = match qa {
-                                FactKind::Min { .. } => ta.ge(tb),
-                                _ => ta.le(tb),
-                            };
-                            out.push(Axiom { claim, rule: "subset" });
-                            if width(qa) == width(qb) {
-                                same.push(ta.eq(tb));
-                            }
-                        }
-                    }
-                    if !same.is_empty() {
-                        let all = Bool::and(&same);
-                        out.push(Axiom { claim: ca.eq(cb).implies(&all), rule: "same rows" });
-                    }
+                if renamed(a, b, contain::subset) {
+                    out.extend(subset(self, &keys, a, b));
                     out.extend(failing(self, relevant, a, b));
-                } else if renamed(a, b, fewer) {
-                    out.push(Axiom { claim: ca.le(cb), rule: "fewer" });
+                } else {
+                    out.extend(fewer(self, a, b));
                 }
             }
             out.extend(split(self, a));
@@ -570,10 +459,82 @@ fn over(q: &FactKind) -> &Context {
     }
 }
 
+/// `same rows`, between the terms of one quantity. [`subset`] states it
+/// between rows among others' too.
+///
+/// - **Claim**: `t = t'` for any two terms of one quantity. And for `A ⊆ B`:
+///   `|A| = |B| ⇒` each key quantity of `A` equals `B`'s of the same keys.
+/// - **Why**: one quantity has one value; `A ⊆ B` with as many rows makes
+///   them the same rows.
+pub fn same_rows(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+    let mut out = vec![];
+    for (q, terms) in &space.terms {
+        if relevant.contains(over(q)) {
+            for t in &terms[1..] {
+                out.push(Axiom { claim: t.eq(&terms[0]), rule: "same rows" });
+            }
+        }
+    }
+    out
+}
+
+/// `subset`, for `A ⊆ B` ([relations](self#relations-between-contexts)),
+/// with `keys` each context's key quantities. Also the `same rows` claim
+/// between them ([`same_rows`]).
+///
+/// - **Claim**: for `A ⊆ B`, `A ≠ B`: `|A| ≤ |B|`; `ndv(K | A) ≤ ndv(K' |
+///   B)` for `K ⊆ K'`; `min(k | A) ≥ min(k | B)`; `max(k | A) ≤ max(k |
+///   B)`.
+/// - **Why**: fewer rows have fewer values, within the same range.
+pub fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Context, b: &Context) -> Vec<Axiom> {
+    let card = |c: &Context| space.term(&FactKind::Cardinality(c.clone()));
+    let (Some(ca), Some(cb)) = (card(a), card(b)) else { return vec![] };
+    let mut out = vec![Axiom { claim: ca.le(cb), rule: "subset" }];
+    // Each key of `a` that is one of `b`'s, over rows among `b`'s, and the
+    // same once there are as many rows.
+    let mut same = vec![];
+    for qa in keys.get(a).into_iter().flatten() {
+        for qb in keys.get(b).into_iter().flatten() {
+            if !renamed_kind(qa, qb, key_within) {
+                continue;
+            }
+            let (ta, tb) = (space.term(qa).unwrap(), space.term(qb).unwrap());
+            let claim = match qa {
+                FactKind::Min { .. } => ta.ge(tb),
+                _ => ta.le(tb),
+            };
+            out.push(Axiom { claim, rule: "subset" });
+            if width(qa) == width(qb) {
+                same.push(ta.eq(tb));
+            }
+        }
+    }
+    if !same.is_empty() {
+        let all = Bool::and(&same);
+        out.push(Axiom { claim: ca.eq(cb).implies(&all), rule: "same rows" });
+    }
+    out
+}
+
+/// `fewer`, for `fewer(A, B)` ([relations](self#relations-between-contexts)).
+///
+/// - **Claim**: `|A| ≤ |B|` for `fewer(A, B)` but not `A ⊆ B`.
+/// - **Why**: an outer join emits each preserved row once per partner or
+///   once padded, so narrowing an input never adds rows. Its rows need not
+///   be among the other's (a row may lose its partner and be padded), so
+///   nothing is said of their values.
+pub fn fewer(space: &Space, a: &Context, b: &Context) -> Vec<Axiom> {
+    let card = |c: &Context| space.term(&FactKind::Cardinality(c.clone()));
+    match (card(a), card(b)) {
+        (Some(ca), Some(cb)) if renamed(a, b, contain::fewer) => vec![Axiom { claim: ca.le(cb), rule: "fewer" }],
+        _ => vec![],
+    }
+}
+
 /// True if `a` and `b` name rows one bounds the other's: either is among
 /// the other's, has fewer, or is the other with other predicates.
 fn related(a: &Context, b: &Context) -> bool {
-    renamed(a, b, fewer) || renamed(b, a, fewer) || renamed(a, b, same_inputs)
+    renamed(a, b, contain::fewer) || renamed(b, a, contain::fewer) || renamed(a, b, same_inputs)
 }
 
 /// True if `a` and `b` are SPJs over the same inputs and conditions.
@@ -590,19 +551,28 @@ fn same_inputs(a: &Context, b: &Context) -> bool {
 fn key_within(a: &FactKind, b: &FactKind) -> bool {
     match (a, b) {
         (FactKind::Distinct { keys: ka, over: oa }, FactKind::Distinct { keys: kb, over: ob }) => {
-            ka.is_subset(kb) && subset(oa, ob)
+            ka.is_subset(kb) && contain::subset(oa, ob)
         }
         (FactKind::Min { key: ka, over: oa }, FactKind::Min { key: kb, over: ob })
-        | (FactKind::Max { key: ka, over: oa }, FactKind::Max { key: kb, over: ob }) => ka == kb && subset(oa, ob),
+        | (FactKind::Max { key: ka, over: oa }, FactKind::Max { key: kb, over: ob }) => ka == kb && contain::subset(oa, ob),
         _ => false,
     }
 }
 
-/// For `d` among `c`'s rows as named, each `c ∧ P` with a term and `d ∧ P`
-/// too: the rows of `d` failing `P` are among those of `c` failing it.
-fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
+/// `failing rows`, for `d ⊆ c`.
+///
+/// - **Claim**: `|D| − |D ∧ P| ≤ |C| − |C ∧ P|`.
+/// - **When**: `D ⊆ C` as named, `C` an SPJ, `C ∧ P` a relevant SPJ with
+///   `C`'s inputs and conditions, and `D ∧ P ≠ D`.
+/// - **Why**: `D`'s rows failing `P` are among `C`'s.
+///
+/// ```text
+/// D = orders ∧ o_status = 'F' ⊆ C = orders, P = {o_price > 100}
+/// ⇒ |D| − |D ∧ P| ≤ |orders| − |orders ∧ P|
+/// ```
+pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
     let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
-    let (Some(cd), Some(cc), true) = (card(d), card(c), subset(d, c)) else { return vec![] };
+    let (Some(cd), Some(cc), true) = (card(d), card(c), contain::subset(d, c)) else { return vec![] };
     let Context::Spj { preds: pc, .. } = c else { return vec![] };
     let mut out = vec![];
     for cp in relevant {
@@ -623,11 +593,20 @@ fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context
     out
 }
 
-/// For each `c ∧ P` with a term, and each `d` over more inputs than `c`
-/// and at least its conditions and predicates, with `d ∧ P` a term too: if
-/// every row of `c` satisfies `P`, every row of `d` does. Contexts over the
-/// same inputs are left to [`failing`].
-fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+/// `implied`.
+///
+/// - **Claim**: `|C ∧ P| = |C| ⇒ |D ∧ P| = |D|`.
+/// - **When**: `C` an SPJ, `C ∧ P` a relevant SPJ with `C`'s inputs and
+///   conditions, `D` joins `C` and does not already have all of `P`.
+///   Contexts over the same inputs are left to [`failing`].
+/// - **Why**: if every row of `C` satisfies `P`, so does every row of `D`,
+///   which is, on `C`'s inputs, a row of `C`.
+///
+/// ```text
+/// C = lineitem, P = {l_quantity >= 1}, D = lineitem ⋈ orders
+/// ⇒ |lineitem ∧ P| = |lineitem| ⇒ |D ∧ P| = |D|
+/// ```
+pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let mut out = vec![];
     for c in relevant {
@@ -655,9 +634,13 @@ fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     out
 }
 
-/// For `s` with a semi join condition, its rows with and without a partner
-/// split the rows without the condition, where all three have terms.
-fn split(space: &Space, s: &Context) -> Vec<Axiom> {
+/// `semi and anti`, for `s` with a semi join condition.
+///
+/// - **Claim**: `|K ⋉ O| + |K ▷ O| = |K|`, for `K ⋉ O` an SPJ with a semi
+///   condition, `K` it without it, and `K ▷ O` it with the anti condition
+///   on the same `on` and `O` instead.
+/// - **Why**: each row of `K` has a partner or has none.
+pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
     let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let Context::Spj { tables, atoms, preds, exists } = s else { return vec![] };
     let Some(semi) = card(s) else { return vec![] };
@@ -685,9 +668,11 @@ fn width(q: &FactKind) -> usize {
     }
 }
 
-/// For each distinct count over `c` of keys among another's over `c`, the
-/// fewer keys' count is at most the other's.
-fn fewer_keys(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, c: &Context) -> Vec<Axiom> {
+/// `fewer keys`, over `c`, with `keys` each context's key quantities.
+///
+/// - **Claim**: `ndv(K | C) ≤ ndv(K' | C)` for `K ⊊ K'`.
+/// - **Why**: fewer keys have no more combinations.
+pub fn fewer_keys(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, c: &Context) -> Vec<Axiom> {
     let mut out = vec![];
     for qa in keys.get(c).into_iter().flatten() {
         let FactKind::Distinct { keys: ka, .. } = qa else { continue };
@@ -727,11 +712,19 @@ fn of_tables(keys: &BTreeSet<Term>, tables: &BTreeSet<String>) -> bool {
         })
 }
 
-/// For each `d` a join of `c` ([`joins`]), each key quantity of `d` over
-/// `c`'s tables' columns is within `c`'s: its distinct count at most `|c|`
-/// and at most that of any keys of `c` it is among, and its min and max
-/// within `c`'s.
-fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+/// `wider rows`, with `keys` each context's key quantities.
+///
+/// - **Claim**: for `D` joining `C`, and keys `K` (or `k`) whose columns are
+///   all of `C`'s tables: `ndv(K | D) ≤ |C|`; `ndv(K | D) ≤ ndv(K' | C)` for
+///   `K ⊆ K'`; `min(k | D) ≥ min(k | C)`; `max(k | D) ≤ max(k | C)`.
+/// - **Why**: each row of `D` holds a row of `C`, so `C`'s columns take in
+///   `D` only values they take in `C`.
+///
+/// ```text
+/// D = orders ⋈ lineitem on o_orderkey = l_orderkey
+/// ⇒ ndv(o_custkey | D) ≤ ndv(o_custkey | orders) and ≤ |orders|
+/// ```
+pub fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let mut out = vec![];
     for d in relevant {
@@ -774,11 +767,20 @@ fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BT
     out
 }
 
-/// For each two SPJs over the same inputs and conditions whose predicates
-/// cannot hold together, their rows are apart among those of any SPJ over
-/// the same with only predicates both have: `|x| + |y| <= |z|`. Of such
-/// `z`, only those with the most predicates are used.
-fn disjoint(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+/// `disjoint`, between named rows. [`Analyzer::disjoint`] finds it between
+/// relations.
+///
+/// - **Claim**: rows that no row satisfies the conditions of both are apart
+///   among any rows holding both: `|X| + |Y| ≤ |Z|`.
+/// - **When**: `X`, `Y` and `Z` are SPJs with the same inputs and
+///   conditions; `X` and `Y` compare some expression with literals in
+///   ranges that do not meet (values of different types are taken to
+///   meet); `Z`'s predicates are among both's, and no such `Z` has more.
+///
+/// ```text
+/// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
+/// ```
+pub fn disjoint(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let mut groups: BTreeMap<_, Vec<(&BTreeSet<Term>, &Int)>> = BTreeMap::new();
     for c in relevant {
