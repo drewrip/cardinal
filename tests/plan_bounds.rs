@@ -89,17 +89,8 @@ async fn real_executions_stay_within_every_range() {
             assert!(v.violation.is_none(), "{sql}: {:?}", v.violation);
             let sizes: Vec<(&str, u64)> = a.scans.iter().map(|(s, t)| (t.as_str(), v.rows[s])).collect();
             let p = a.with_facts(&common::table_sizes(&sizes)).unwrap().plan_bounds().unwrap();
-            let mut sum = Some(0);
-            for n in &p.nodes {
-                let rows = v.rows.get(&n.var).copied();
-                if let Some(rows) = rows {
-                    assert!(n.bounds.holds(rows), "{sql}: {} has {rows} rows, outside {}", n.operator, n.bounds);
-                }
-                sum = sum.zip(rows).map(|(s, r)| s + r);
-            }
-            if let Some(sum) = sum {
-                assert!(p.total.holds(sum), "{sql}: {sum} rows in all, outside {}", p.total);
-            }
+            let failures = common::check_plan_bounds(&p, &v);
+            assert!(failures.is_empty(), "{sql}: {failures:?}");
         }
     }
 }

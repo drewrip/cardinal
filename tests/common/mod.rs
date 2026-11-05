@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio};
-use cardinal::{Analysis, Bounds, Facts, Validation, analyze_sql};
+use cardinal::{Analysis, Bounds, Facts, PlanBounds, Validation, analyze_sql};
 use datafusion::arrow::array::{ArrayRef, Date32Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -820,6 +820,29 @@ pub fn table_sizes(sizes: &[(&str, u64)]) -> Facts {
 /// `a`'s bounds with each of `sizes`' tables held to its row count.
 pub fn sized(a: &Analysis, sizes: &[(&str, u64)]) -> Bounds {
     a.with_facts(&table_sizes(sizes)).unwrap().bounds().unwrap()
+}
+
+/// Checks `p` against one real execution: every operator's actual rows
+/// must be in its range, and, if every operator ran, their sum in the
+/// total's.
+pub fn check_plan_bounds(p: &PlanBounds, v: &Validation) -> Vec<String> {
+    let mut failures = vec![];
+    let mut sum = Some(0);
+    for (i, n) in p.nodes.iter().enumerate() {
+        let rows = v.rows.get(&n.var).copied();
+        if let Some(rows) = rows
+            && !n.bounds.holds(rows)
+        {
+            failures.push(format!("node {i} {} has {rows} rows, outside {}", n.operator, n.bounds));
+        }
+        sum = sum.zip(rows).map(|(s, r)| s + r);
+    }
+    if let Some(sum) = sum
+        && !p.total.holds(sum)
+    {
+        failures.push(format!("{sum} rows in all, outside {}", p.total));
+    }
+    failures
 }
 
 /// Checks `b` against one real execution: the actual output rows must be

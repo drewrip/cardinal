@@ -396,6 +396,10 @@ async fn check_mode(
             if v.rows.get(&a.root).is_some_and(|&n| sized.lower == n && sized.upper == Some(n)) {
                 stats.exact += 1;
             }
+            let plan = a.with_facts(&common::table_sizes(&sizes)).unwrap().plan_bounds().unwrap();
+            for f in common::check_plan_bounds(&plan, &v) {
+                failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
+            }
         }
     }
     bounds.map(|b| b.upper)
