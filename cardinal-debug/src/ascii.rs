@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use cardinal::{Constraint, Proof, ProofStatus, Trace};
 
-use crate::{Dump, FactsDump, readable, roots};
+use crate::{Dump, FactsDump, PlanDump, readable, roots};
 
 /// What to show.
 #[derive(Debug, Clone, Default)]
@@ -36,11 +36,19 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     if let Some(b) = &dump.bounds {
         let _ = writeln!(w, "Bounds:  {b}");
     }
+    if let Some(p) = &dump.plan_bounds {
+        let _ = writeln!(w, "Total:   {}", p.total);
+    }
     if let Some(f) = facts {
         let n = t.constraints.iter().filter(|c| c.fact.is_some()).count();
         let _ = writeln!(w, "With facts: {}", f.bounds.as_deref().unwrap_or("not computed"));
+        if let Some(p) = &f.plan_bounds {
+            let _ = writeln!(w, "Total with facts: {}", p.total);
+        }
         let _ = writeln!(w, "Facts:   {n} fact constraints");
     }
+    // The operators' bounds the tree shows: with facts if they are shown.
+    let plan = facts.map_or(dump.plan_bounds.as_ref(), |f| f.plan_bounds.as_ref());
     let _ = writeln!(w, "Root:    {}   ({} nodes, {} constraints)", t.root, t.nodes.len(), t.constraints.len());
 
     if let Some(id) = view.node {
@@ -81,7 +89,7 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
         if i + 1 < rs.len() {
             let _ = writeln!(w, "(subquery)");
         }
-        tree(w, t, facts, r, "", true, &marked, &shown, view.brief);
+        tree(w, t, facts, plan, r, "", true, &marked, &shown, view.brief);
     }
     let partitions: Vec<&Constraint> = t.constraints.iter().filter(|c| c.node.is_none() && shown(c)).collect();
     if !partitions.is_empty() {
@@ -179,6 +187,7 @@ fn tree(
     w: &mut String,
     t: &Trace,
     facts: Option<&FactsDump>,
+    plan: Option<&PlanDump>,
     id: usize,
     prefix: &str,
     last: bool,
@@ -195,7 +204,8 @@ fn tree(
     let label = n.label.lines().next().unwrap_or("");
     let constraints: Vec<&Constraint> = t.of_node(id).filter(|c| shown(c)).collect();
     let count = if brief { format!("  ({} constraints)", constraints.len()) } else { String::new() };
-    let _ = writeln!(w, "{prefix}{branch}{mark}[{id}] {label}   {}{}{count}", n.var, values(n, t, facts.is_some()));
+    let bounds = plan.and_then(|p| p.nodes.get(id)).map(|b| format!("   {b}")).unwrap_or_default();
+    let _ = writeln!(w, "{prefix}{branch}{mark}[{id}] {label}   {}{}{bounds}{count}", n.var, values(n, t, facts.is_some()));
     let child_prefix = if prefix.is_empty() {
         "   ".to_string()
     } else {
@@ -208,7 +218,7 @@ fn tree(
         }
     }
     for (i, &input) in n.inputs.iter().enumerate() {
-        tree(w, t, facts, input, &child_prefix, i + 1 == n.inputs.len(), marked, shown, brief);
+        tree(w, t, facts, plan, input, &child_prefix, i + 1 == n.inputs.len(), marked, shown, brief);
     }
 }
 

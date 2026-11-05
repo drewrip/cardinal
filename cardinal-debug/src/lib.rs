@@ -1,6 +1,7 @@
 //! Dumps what cardinal tells Z3 about a query, and renders it.
 //!
-//! A [`Dump`] holds an analysis's bounds, its [`Trace`] (every
+//! A [`Dump`] holds an analysis's bounds (of the root, and of every
+//! operator: [`PlanDump`]), its [`Trace`] (every
 //! constraint with the plan node and analyzer line it comes from) and a
 //! [`Proof`] of each bound naming the constraints it needs, and, with facts,
 //! the same again with the facts' constraints among them
@@ -31,6 +32,26 @@ pub struct Dump {
     /// The analysis informed by facts, if any were given.
     #[serde(default)]
     pub facts: Option<FactsDump>,
+    /// Every operator's proven bounds, if computed.
+    #[serde(default)]
+    pub plan_bounds: Option<PlanDump>,
+}
+
+/// Every operator's proven bounds, and their sum's
+/// ([`cardinal::Analysis::plan_bounds`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanDump {
+    /// Each node's, by node id.
+    pub nodes: Vec<String>,
+    /// The sum of every node's output cardinality.
+    pub total: String,
+}
+
+impl PlanDump {
+    fn of(a: &Analysis) -> Result<PlanDump, String> {
+        let p = a.plan_bounds().map_err(|e| e.to_string())?;
+        Ok(PlanDump { nodes: p.nodes.iter().map(|n| n.bounds.to_string()).collect(), total: p.total.to_string() })
+    }
 }
 
 /// An analysis with facts ([`cardinal::Analysis::with_facts`]).
@@ -49,6 +70,9 @@ pub struct FactsDump {
     pub explained: bool,
     /// Facts two plans disagree on, which are left out.
     pub conflicts: Vec<String>,
+    /// Every operator's bounds proven with the facts, if computed.
+    #[serde(default)]
+    pub plan_bounds: Option<PlanDump>,
 }
 
 /// Facts to put in an analysis.
@@ -124,14 +148,23 @@ pub fn foreign_key(s: &str) -> Result<ForeignKey, String> {
     Ok(ForeignKey { table, columns, references, referenced })
 }
 
-/// Analyzes `source` against `ctx` with `options` (traced), proves bounds
-/// unless `bounds` is false, and explains each; with `facts`, does the same
-/// again with them.
+/// What bounds a [`dump`] proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prove {
+    /// The root's, with a proof of each.
+    pub bounds: bool,
+    /// Every operator's ([`PlanDump`]).
+    pub plan_bounds: bool,
+}
+
+/// Analyzes `source` against `ctx` with `options` (traced), proves the
+/// bounds `prove` asks for, and explains the root's; with `facts`, does the
+/// same again with them.
 pub async fn dump(
     ctx: &SessionContext,
     source: &Source,
     options: Options,
-    bounds: bool,
+    prove: Prove,
     facts: Option<&FactInput>,
 ) -> Result<Dump, String> {
     let options = Options { trace: true, ..options };
@@ -148,10 +181,11 @@ pub async fn dump(
             (sql.clone().unwrap_or_else(|| "(from an EXPLAIN plan)".into()), a)
         }
     };
-    let proven = if bounds { Some(analysis.bounds().map_err(err)?) } else { None };
+    let proven = if prove.bounds { Some(analysis.bounds().map_err(err)?) } else { None };
     let proofs = explain(&analysis, proven.as_ref())?;
+    let plan_bounds = if prove.plan_bounds { Some(PlanDump::of(&analysis)?) } else { None };
     let facts = match facts {
-        Some(f) => Some(inform(&analysis, f, bounds)?),
+        Some(f) => Some(inform(&analysis, f, prove)?),
         None => None,
     };
     Ok(Dump {
@@ -161,13 +195,15 @@ pub async fn dump(
         trace: analysis.trace.expect("traced"),
         proofs,
         facts,
+        plan_bounds,
     })
 }
 
-fn inform(analysis: &Analysis, input: &FactInput, bounds: bool) -> Result<FactsDump, String> {
+fn inform(analysis: &Analysis, input: &FactInput, prove: Prove) -> Result<FactsDump, String> {
     let err = |e: cardinal::Error| e.to_string();
     let informed = analysis.with_facts(&input.facts).map_err(err)?;
-    let proven = if bounds { Some(informed.bounds().map_err(err)?) } else { None };
+    let proven = if prove.bounds { Some(informed.bounds().map_err(err)?) } else { None };
+    let plan_bounds = if prove.plan_bounds { Some(PlanDump::of(&informed)?) } else { None };
     let (proofs, base_proofs) = if input.explain {
         (explain(&informed, proven.as_ref())?, explain(analysis, proven.as_ref())?)
     } else {
@@ -191,6 +227,7 @@ fn inform(analysis: &Analysis, input: &FactInput, bounds: bool) -> Result<FactsD
         base_proofs,
         explained: input.explain,
         conflicts,
+        plan_bounds,
     })
 }
 

@@ -169,6 +169,7 @@ footer dd { margin: 0; }
   <table class="kv">
     <tr><th id="bounds-label">Bounds</th><td><code id="bounds"></code></td></tr>
     <tr id="fbounds-row" hidden><th id="fbounds-label">With facts</th><td><code id="fbounds"></code></td></tr>
+    <tr id="total-row" hidden><th>Total rows</th><td><code id="total"></code></td></tr>
     <tr id="facts-row" hidden><th>Facts</th><td id="facts-stats"></td></tr>
     <tr><th>Size</th><td id="stats"></td></tr>
     <tr><th>Query</th><td><pre id="query"></pre></td></tr>
@@ -263,6 +264,12 @@ footer dd { margin: 0; }
     $('facts-stats').textContent = `${k} fact constraints`;
     $('hide-label').hidden = false;
   }
+  // Every operator's bounds, with facts if any, and their sum's.
+  const plan = F ? F.plan_bounds : dump.plan_bounds;
+  if (plan) {
+    $('total-row').hidden = false;
+    $('total').textContent = F && dump.plan_bounds ? `${dump.plan_bounds.total} without facts, ${plan.total} with` : plan.total;
+  }
   const partitions = t.constraints.filter(c => c.node === null).length;
   $('stats').textContent = `${t.nodes.length} plan nodes, ${t.constraints.length} constraints` +
     (partitions ? ` (${partitions} over table partitions)` : '') + `, root variable ${t.root}`;
@@ -308,6 +315,11 @@ footer dd { margin: 0; }
         if (c.fact && ['pinned rows', 'row cap'].includes(c.fact.source) && c.vars.length === 1 && mine.includes(x))
           v += `  ${x === n.var ? '' : (names[x] ?? x) + ' '}${c.fact.value}`;
       }
+    }
+    if (plan && plan.nodes[id]) {
+      v += `   ${plan.nodes[id]}`;
+      const base = F && dump.plan_bounds && dump.plan_bounds.nodes[id];
+      if (base && base !== plan.nodes[id]) v += ` (without facts ${base})`;
     }
     op.append(el('div', 'v m', v));
     const count = el('span', 'n m');

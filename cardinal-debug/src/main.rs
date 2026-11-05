@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cardinal::Options;
-use cardinal_debug::{Dump, FactInput, Profile, Source, ascii, context, dump, foreign_key, html, read_facts};
+use cardinal_debug::{Dump, FactInput, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_facts};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -75,6 +75,9 @@ struct Input {
     /// Skip proving bounds.
     #[arg(long)]
     no_bounds: bool,
+    /// Skip proving every operator's bounds and their total.
+    #[arg(long)]
+    no_plan_bounds: bool,
     #[command(flatten)]
     facts: Facts,
 }
@@ -196,7 +199,8 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
     } else {
         None
     };
-    dump(&ctx, &source, options, !input.no_bounds, facts.as_ref()).await
+    let prove = Prove { bounds: !input.no_bounds, plan_bounds: !input.no_bounds && !input.no_plan_bounds };
+    dump(&ctx, &source, options, prove, facts.as_ref()).await
 }
 
 fn show(d: &Dump, output: &Output) -> Result<(), String> {
@@ -233,7 +237,8 @@ async fn run(cli: Cli) -> Result<(), String> {
                 write(&path, &d.trace.to_smt2())?;
             }
             let bounds = d.bounds.as_deref().unwrap_or("no bounds");
-            eprintln!("{bounds}: {} constraints over {} nodes", d.trace.constraints.len(), d.trace.nodes.len());
+            let total = d.plan_bounds.as_ref().map(|p| format!(" (total {})", p.total)).unwrap_or_default();
+            eprintln!("{bounds}{total}: {} constraints over {} nodes", d.trace.constraints.len(), d.trace.nodes.len());
         }
         Command::View { dump, output } => {
             let d: Dump = serde_json::from_str(&read(&dump)?).map_err(|e| format!("{}: {e}", dump.display()))?;

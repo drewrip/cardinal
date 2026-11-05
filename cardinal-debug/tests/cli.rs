@@ -34,10 +34,14 @@ fn dump_then_view_as_text_and_html() {
     let join = dump.trace.nodes.iter().position(|n| n.label.starts_with("Inner Join")).unwrap();
     assert!(upper.core.iter().any(|&c| dump.trace.constraints[c].node == Some(join)));
     assert!(std::fs::read_to_string(&smt2).unwrap().contains("(assert "));
+    let plan = dump.plan_bounds.as_ref().unwrap();
+    assert_eq!(plan.nodes.len(), dump.trace.nodes.len());
+    assert_eq!(plan.nodes.last().map(String::as_str), Some("0 <= X <= 3"));
 
     let text = run(&["view", json.to_str().unwrap()]);
     assert!(text.contains("Inner Join: orders.o_custkey = customer.c_custkey"), "{text}");
     assert!(text.contains("upper"), "{text}");
+    assert!(text.contains(&format!("Total:   {}", plan.total)), "{text}");
     let proof = run(&["view", json.to_str().unwrap(), "--proof", "upper"]);
     assert!(proof.contains("● [") && proof.contains("Proof upper"), "{proof}");
     let node = run(&["view", json.to_str().unwrap(), "--node", "0"]);
