@@ -1,8 +1,9 @@
 //! Bounds on a query's output cardinality.
 //!
 //! The largest `lo` and smallest `hi` with `lo <= X <= hi` that Z3 proves,
-//! each by binary search. A bound is reported only when Z3 proves it; an
-//! undecided check never yields one.
+//! each by binary search, of the root's cardinality or of any operator's
+//! ([`PlanBounds`]). A bound is reported only when Z3 proves it; an undecided
+//! check never yields one.
 
 use std::cell::Cell;
 use std::fmt;
@@ -37,6 +38,29 @@ impl fmt::Display for Bounds {
             None => write!(f, "X >= {}", self.lower),
         }
     }
+}
+
+/// The proven range of every operator's output cardinality, and of their sum.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanBounds {
+    /// One per plan node, children before parents, as in
+    /// [`Trace::nodes`](crate::Trace::nodes): a node's id is its index.
+    pub nodes: Vec<NodeBounds>,
+    /// The sum of every node's output cardinality: the rows the plan's
+    /// operators produce in all.
+    pub total: Bounds,
+}
+
+/// The proven range of one operator's output cardinality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeBounds {
+    /// The cardinality variable.
+    pub var: String,
+    /// The operator, as DataFusion shows it on one line.
+    pub operator: String,
+    /// Node ids of the operator's inputs, in order.
+    pub inputs: Vec<usize>,
+    pub bounds: Bounds,
 }
 
 /// Largest constant tried; a bound needing more is treated as unbounded.
@@ -138,24 +162,44 @@ impl Search {
         }
     }
 
-    /// The largest `N` with `X >= N`.
-    pub(crate) fn lower(&self) -> u64 {
-        smallest(0, CAP, |n| !self.proves(self.output.ge(Int::from_u64(n + 1))))
+    /// The largest `N` with `x >= N`.
+    fn lower(&self, x: &Int) -> u64 {
+        smallest(0, CAP, |n| !self.proves(x.ge(Int::from_u64(n + 1))))
     }
 
-    /// The smallest `N` with `X <= N`.
-    pub(crate) fn constant(&self) -> Option<u64> {
-        if !self.proves(self.output.le(Int::from_u64(CAP))) {
+    /// The smallest `N` with `x <= N`.
+    fn constant(&self, x: &Int) -> Option<u64> {
+        if !self.proves(x.le(Int::from_u64(CAP))) {
             return None;
         }
-        Some(smallest(0, CAP, |n| {
-            self.proves(self.output.le(Int::from_u64(n)))
-        }))
+        Some(smallest(0, CAP, |n| self.proves(x.le(Int::from_u64(n)))))
+    }
+
+    /// The proven range of `x`.
+    fn range(&self, x: &Int) -> Bounds {
+        Bounds { lower: self.lower(x), upper: self.constant(x) }
     }
 
     /// The proven range of `X`.
     pub(crate) fn bounds(&self) -> Bounds {
-        Bounds { lower: self.lower(), upper: self.constant() }
+        self.range(&self.output)
+    }
+
+    /// The proven range of each of `cards`, and of their sum. `X` is one of
+    /// them, and its range is [`Search::bounds`]. `same[i]` is a card that
+    /// `cards[i]` may equal: if it provably does, they share a range.
+    pub(crate) fn plan(&self, cards: &[Int], same: &[Option<usize>]) -> (Vec<Bounds>, Bounds) {
+        let root = self.bounds();
+        let mut out: Vec<Bounds> = vec![];
+        for (i, x) in cards.iter().enumerate() {
+            let b = match same[i] {
+                _ if *x == self.output => root,
+                Some(j) if self.proves(x.eq(&cards[j])) => out[j],
+                _ => self.range(x),
+            };
+            out.push(b);
+        }
+        (out, self.range(&Int::add(cards)))
     }
 }
 

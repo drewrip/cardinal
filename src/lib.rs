@@ -3,7 +3,8 @@
 //! A query is parsed and optimized into a DataFusion `LogicalPlan`, every operator
 //! gets a Z3 integer for its output cardinality, and constraints relate them
 //! ([`Analysis`]). We then ask Z3 for the tightest `lower <= X <= upper` it can
-//! prove on the root's cardinality `X` ([`Analysis::bounds`]).
+//! prove on the root's cardinality `X` ([`Analysis::bounds`]), or on every
+//! operator's and their sum ([`Analysis::plan_bounds`]).
 //!
 //! The constraints come from three places:
 //!
@@ -26,7 +27,7 @@ pub mod rules;
 pub mod trace;
 mod validate;
 
-pub use bounds::{Bounds, SearchStats};
+pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
 pub use facts::Facts;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
@@ -41,6 +42,7 @@ use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::prelude::SessionContext;
+use z3::ast::Int;
 
 use analysis::{Analyzer, Node, ScanKind};
 
@@ -135,6 +137,47 @@ impl Analysis {
     pub fn bounds_with_stats(&self) -> Result<(Bounds, SearchStats)> {
         let search = self.search()?;
         Ok((search.bounds(), search.stats()))
+    }
+
+    /// Proves the tightest range on every operator's output cardinality,
+    /// as [`Analysis::bounds`] does on the root's, and on their sum: how many
+    /// rows the plan's operators produce in all. Every node counts, those that
+    /// pass their input's rows through (a projection, an alias) too, and a
+    /// subquery's operators count once.
+    ///
+    /// This runs a search per operator, so it costs more than
+    /// [`Analysis::bounds`]; an operator proven to output its input's rows
+    /// shares its input's range.
+    pub fn plan_bounds(&self) -> Result<PlanBounds> {
+        Ok(self.plan_bounds_with_stats()?.0)
+    }
+
+    /// [`Analysis::plan_bounds`], and how its solver checks went.
+    #[doc(hidden)]
+    pub fn plan_bounds_with_stats(&self) -> Result<(PlanBounds, SearchStats)> {
+        let search = self.search()?;
+        let cards: Vec<Int> = self.nodes.iter().map(|n| Int::new_const(n.var.as_str())).collect();
+        let same: Vec<Option<usize>> = self
+            .nodes
+            .iter()
+            .map(|n| match n.inputs[..] {
+                [i] => Some(i),
+                _ => None,
+            })
+            .collect();
+        let (ranges, total) = search.plan(&cards, &same);
+        let nodes = self
+            .nodes
+            .iter()
+            .zip(ranges)
+            .map(|(n, bounds)| NodeBounds {
+                var: n.var.clone(),
+                operator: n.plan.display().to_string(),
+                inputs: n.inputs.clone(),
+                bounds,
+            })
+            .collect();
+        Ok((PlanBounds { nodes, total }, search.stats()))
     }
 
     /// The constraints `S`, in SMT-LIB.

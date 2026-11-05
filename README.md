@@ -10,6 +10,7 @@ Requires Z3 (`brew install z3`; paths in `.cargo/config.toml`).
 ```rust
 let a = cardinal::analyze_sql(&ctx, sql, Options::default()).await?;
 a.bounds()?;              // e.g. "X <= 25" or "3 <= X <= 25"
+a.plan_bounds()?;         // every operator's bounds, and their total
 a.validate(&ctx).await?;  // check the constraints against real data
 
 // With facts from profiled plans; one `Facts` serves many analyses:
