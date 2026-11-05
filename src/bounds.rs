@@ -5,7 +5,7 @@
 //! ([`PlanBounds`]). A bound is reported only when Z3 proves it; an undecided
 //! check never yields one.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -100,6 +100,23 @@ pub(crate) struct Search {
     solver: Solver,
     output: Int,
     stats: Cell<SearchStats>,
+    /// The variables a [`Search::plan`] bounds, and what the checks so far
+    /// tell of each.
+    targets: RefCell<Vec<(Int, Known)>>,
+}
+
+/// What the checks so far tell of one target `x`.
+#[derive(Debug, Clone, Copy, Default)]
+struct Known {
+    /// `x >= floor` is proven.
+    floor: u64,
+    /// `x <= ceil` is proven, if any.
+    ceil: Option<u64>,
+    /// The least and greatest `x` in a model of the constraints, if any
+    /// was seen (`u64::MAX` for one beyond it): `x > least` and `x < most`
+    /// are not provable.
+    least: Option<u64>,
+    most: Option<u64>,
 }
 
 impl Search {
@@ -113,6 +130,7 @@ impl Search {
                 solver,
                 output: Int::new_const(root),
                 stats: Cell::default(),
+                targets: RefCell::default(),
             },
             parsed,
         )
@@ -142,9 +160,53 @@ impl Search {
     fn proves(&self, claim: Bool) -> bool {
         self.solver.push();
         self.solver.assert(claim.not());
-        let unsat = self.check() == SatResult::Unsat;
+        let result = self.check();
+        if result == SatResult::Sat {
+            self.observe();
+        }
         self.solver.pop(1);
-        unsat
+        result == SatResult::Unsat
+    }
+
+    /// Records each target's value in the model the last check found, a
+    /// model of the constraints.
+    fn observe(&self) {
+        let mut targets = self.targets.borrow_mut();
+        if targets.is_empty() {
+            return;
+        }
+        let Some(model) = self.solver.get_model() else { return };
+        for (x, k) in targets.iter_mut() {
+            let v = model.eval(x, true).and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+            k.least = Some(k.least.map_or(v, |l| l.min(v)));
+            k.most = Some(k.most.map_or(v, |m| m.max(v)));
+        }
+    }
+
+    fn known(&self, i: usize) -> Known {
+        self.targets.borrow()[i].1
+    }
+
+    /// True if the constraints entail `x >= n` of target `i`.
+    fn proves_at_least(&self, i: usize, n: u64) -> bool {
+        let x = self.targets.borrow()[i].0.clone();
+        let proven = self.proves(x.ge(Int::from_u64(n)));
+        if proven {
+            let k = &mut self.targets.borrow_mut()[i].1;
+            k.floor = k.floor.max(n);
+        }
+        proven
+    }
+
+    /// True if the constraints entail `x <= n` of target `i`.
+    fn proves_at_most(&self, i: usize, n: u64) -> bool {
+        let x = self.targets.borrow()[i].0.clone();
+        let proven = self.proves(x.le(Int::from_u64(n)));
+        if proven {
+            let k = &mut self.targets.borrow_mut()[i].1;
+            k.ceil = Some(k.ceil.map_or(n, |c| c.min(n)));
+        }
+        proven
     }
 
     /// Adds `claim` to the constraints if it is consistent with them:
@@ -185,21 +247,81 @@ impl Search {
         self.range(&self.output)
     }
 
-    /// The proven range of each of `cards`, and of their sum. `X` is one of
-    /// them, and its range is [`Search::bounds`]. `same[i]` is a card that
+    /// The largest `N` with `x >= N` of target `i`, searched only where the
+    /// checks so far leave it: from what is proven up to the least value seen.
+    fn lower_of(&self, i: usize) -> u64 {
+        let k = self.known(i);
+        let mut hi = [k.least, k.ceil, Some(CAP)].into_iter().flatten().min().unwrap_or(CAP);
+        let mut lo = k.floor.min(hi);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.proves_at_least(i, mid + 1) {
+                lo = mid + 1;
+            } else {
+                hi = self.known(i).least.map_or(mid, |l| l.min(mid)).max(lo);
+            }
+        }
+        hi
+    }
+
+    /// The smallest `N` with `x <= N` of target `i`, searched only where the
+    /// checks so far leave it: from the greatest value seen up to what is
+    /// proven.
+    fn constant_of(&self, i: usize) -> Option<u64> {
+        if self.known(i).most.is_some_and(|m| m > CAP) {
+            return None;
+        }
+        if self.known(i).ceil.is_none_or(|c| c > CAP) && !self.proves_at_most(i, CAP) {
+            return None;
+        }
+        let k = self.known(i);
+        let mut hi = k.ceil.unwrap_or(CAP).min(CAP);
+        let mut lo = k.floor.max(k.most.unwrap_or(0)).min(hi);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.proves_at_most(i, mid) {
+                hi = mid;
+            } else {
+                lo = (mid + 1).max(self.known(i).most.unwrap_or(0)).min(hi);
+            }
+        }
+        Some(hi)
+    }
+
+    fn range_of(&self, i: usize) -> Bounds {
+        Bounds { lower: self.lower_of(i), upper: self.constant_of(i) }
+    }
+
+    /// The proven range of each of `cards`, and of their sum. Each card is
+    /// non-negative, and `X` is one of them, whose range is
+    /// [`Search::bounds`]. `same[i]` is a card that
     /// `cards[i]` may equal: if it provably does, they share a range.
+    ///
+    /// Every model a check finds bounds each card's search: `X >= v + 1` and
+    /// `X <= v - 1` are unprovable of a card that is `v` in it.
     pub(crate) fn plan(&self, cards: &[Int], same: &[Option<usize>]) -> (Vec<Bounds>, Bounds) {
+        let total = Int::add(cards);
+        *self.targets.borrow_mut() = cards.iter().chain([&total]).map(|x| (x.clone(), Known::default())).collect();
         let root = self.bounds();
         let mut out: Vec<Bounds> = vec![];
         for (i, x) in cards.iter().enumerate() {
             let b = match same[i] {
                 _ if *x == self.output => root,
                 Some(j) if self.proves(x.eq(&cards[j])) => out[j],
-                _ => self.range(x),
+                _ => self.range_of(i),
             };
             out.push(b);
         }
-        (out, self.range(&Int::add(cards)))
+        // The sum is at least the cards' least, and at most their greatest.
+        let t = cards.len();
+        {
+            let k = &mut self.targets.borrow_mut()[t].1;
+            k.floor = k.floor.max(out.iter().map(|b| b.lower).sum());
+            if let Some(hi) = out.iter().map(|b| b.upper).sum::<Option<u64>>() {
+                k.ceil = Some(k.ceil.map_or(hi, |c| c.min(hi)));
+            }
+        }
+        (out, self.range_of(t))
     }
 }
 
@@ -214,4 +336,40 @@ fn smallest(mut lo: u64, mut hi: u64, pred: impl Fn(u64) -> bool) -> u64 {
         }
     }
     hi
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `plan` gives every card the range a search of it alone gives.
+    fn plan_matches_lone_searches(smt: &str, vars: &[&str]) {
+        let cards: Vec<Int> = vars.iter().map(|v| Int::new_const(*v)).collect();
+        let same: Vec<Option<usize>> = (0..vars.len()).map(|i| i.checked_sub(1)).collect();
+        let (search, _) = Search::new(smt, vars[vars.len() - 1]);
+        let (ranges, total) = search.plan(&cards, &same);
+        for (v, r) in vars.iter().zip(&ranges) {
+            let (alone, _) = Search::new(smt, v);
+            assert_eq!(*r, alone.bounds(), "{v}");
+        }
+        let (alone, _) = Search::new(smt, vars[0]);
+        assert_eq!(total, alone.range(&Int::add(&cards)), "total");
+    }
+
+    #[test]
+    fn plan_ranges_are_those_of_lone_searches() {
+        let decls = "(declare-const a Int) (declare-const b Int) (declare-const c Int) (declare-const d Int)";
+        plan_matches_lone_searches(
+            &format!("{decls} (assert (<= 3 a 40)) (assert (<= a b (* 2 a))) (assert (= c (+ a b))) (assert (= d c))"),
+            &["a", "b", "c", "d"],
+        );
+        plan_matches_lone_searches(
+            &format!("{decls} (assert (>= a 0)) (assert (<= 0 b 5)) (assert (= c 7)) (assert (<= 0 d b))"),
+            &["a", "b", "c", "d"],
+        );
+        plan_matches_lone_searches(
+            &format!("{decls} (assert (<= 0 a 10)) (assert (= (+ a b) 10)) (assert (>= b 0)) (assert (= c (- 10 a))) (assert (<= 0 d 1))"),
+            &["a", "b", "c", "d"],
+        );
+    }
 }
