@@ -1,14 +1,14 @@
-//! A dump as one self-contained HTML page: the plan tree beside its
-//! constraints, linked both ways, with a selector that picks out the
-//! constraints each proof needs, and with facts, which were used and which
-//! not.
+//! A dump as one self-contained HTML page: the result's bounds, the plan tree
+//! with every operator's bounds beside its constraints, linked both ways, and
+//! a selector that picks out the constraints each proof needs. With facts,
+//! the page can switch to the analysis without them.
 
 use serde_json::json;
 
 use crate::{Dump, column_names};
 
-/// The page for `dump`, opened on proof `proof` if given, and with its fact
-/// constraints hidden if `without_facts`.
+/// The page for `dump`, opened on proof `proof` if given, and without its
+/// facts if `without_facts`.
 pub fn render(dump: &Dump, proof: Option<&str>, without_facts: bool) -> String {
     let trace = dump.facts.as_ref().map_or(&dump.trace, |f| &f.trace);
     let data = json!({
@@ -28,29 +28,29 @@ const TEMPLATE: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cardinal Z3 Trace</title>
+<title>Cardinal Trace</title>
 <style>
 :root {
-  --bg: #ffffff; --sub: #f5f5f4; --ink: #111111; --muted: #666666; --faint: #a3a3a3;
-  --rule: #d4d4d4; --rule-soft: #ececec;
-  --accent: #1d4ed8; --accent-bg: #e8eefc; --hl: #fff4b8;
-  --good: #166534; --bad: #b91c1c; --warn: #92400e;
+  --bg: #ffffff; --sub: #f6f6f5; --ink: #18181b; --muted: #6b6b70; --faint: #a8a8ad;
+  --rule: #dcdcdf; --rule-soft: #efeff1;
+  --accent: #1d4ed8; --accent-bg: #eaf0fd; --hl: #fff4bf;
+  --good: #166534; --bad: #b91c1c; --open: #b45309; --open-bg: #fdf3e4;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #121212; --sub: #1b1b1b; --ink: #ececec; --muted: #a0a0a0; --faint: #6b6b6b;
-    --rule: #3a3a3a; --rule-soft: #262626;
-    --accent: #7aa2ff; --accent-bg: #1c2740; --hl: #4a4115;
-    --good: #6ee7a0; --bad: #ff8a8a; --warn: #f5c26b;
+    --bg: #131315; --sub: #1c1c1f; --ink: #ececee; --muted: #9d9da3; --faint: #646469;
+    --rule: #34343a; --rule-soft: #24242a;
+    --accent: #7aa2ff; --accent-bg: #1b2540; --hl: #46401a;
+    --good: #6ee7a0; --bad: #ff8a8a; --open: #f2b866; --open-bg: #3a2c16;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #121212; --sub: #1b1b1b; --ink: #ececec; --muted: #a0a0a0; --faint: #6b6b6b;
-  --rule: #3a3a3a; --rule-soft: #262626;
-  --accent: #7aa2ff; --accent-bg: #1c2740; --hl: #4a4115;
-  --good: #6ee7a0; --bad: #ff8a8a; --warn: #f5c26b;
+  --bg: #131315; --sub: #1c1c1f; --ink: #ececee; --muted: #9d9da3; --faint: #646469;
+  --rule: #34343a; --rule-soft: #24242a;
+  --accent: #7aa2ff; --accent-bg: #1b2540; --hl: #46401a;
+  --good: #6ee7a0; --bad: #ff8a8a; --open: #f2b866; --open-bg: #3a2c16;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -58,45 +58,67 @@ html, body { margin: 0; background: var(--bg); color: var(--ink); }
 body { font: 13px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif; }
 code, pre, .m { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-h1 { font-size: 15px; margin: 0 0 10px; }
-h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 6px; }
-.help { color: var(--muted); margin: 0 0 8px; max-width: 80ch; }
+h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
 section, header { padding: 14px 16px; border-bottom: 1px solid var(--rule); }
 table { border-collapse: collapse; width: 100%; }
 th { text-align: left; font-weight: 600; color: var(--muted); }
-details > summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
-details pre { margin-top: 6px; padding: 8px; background: var(--sub); border: 1px solid var(--rule-soft); max-height: 24em; overflow: auto; }
-
-/* Summary */
-table.kv th { width: 7.5em; padding: 3px 12px 3px 0; vertical-align: top; }
-table.kv td { padding: 3px 0; vertical-align: top; }
-table.kv pre { max-height: 10em; overflow: auto; }
-.status { font-weight: 700; }
-.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+details > summary { cursor: pointer; color: var(--muted); width: max-content; }
+details > summary:hover { color: var(--ink); }
+details[open] > summary { margin-bottom: 6px; }
+details pre { padding: 8px; background: var(--sub); border: 1px solid var(--rule-soft); max-height: 24em; overflow: auto; }
 .note { color: var(--muted); }
+.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--open); }
+[hidden] { display: none !important; }
+body.nofacts .fm { display: none; }
+
+/* Bounds: a closed range in bold, one with no upper end in amber. */
+.bd { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-weight: 600; white-space: nowrap; }
+.bd.open { color: var(--open); font-weight: 500; }
+.pn .bd, tr.gh .bd { font-size: 12px; padding: 0 6px; border-radius: 3px; background: var(--sub); }
+.pn .bd.open, tr.gh .bd.open { background: var(--open-bg); }
+
+/* Header */
+.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 12px; }
+h1 { font-size: 15px; margin: 0; }
+.cards { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.card { border: 1px solid var(--rule); border-radius: 4px; padding: 8px 14px; min-width: 12em; }
+.card .k { font-size: 11px; color: var(--muted); }
+.card .bd { display: block; font-size: 20px; line-height: 1.3; }
+.card .was { color: var(--muted); font-size: 12px; min-height: 1em; }
+#query { max-height: 9em; overflow: auto; color: var(--muted); margin-bottom: 8px; }
+.more { display: flex; flex-wrap: wrap; gap: 4px 20px; }
 
 /* Proofs */
-table.proofs th, table.proofs td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
-table.proofs thead th { border-bottom: 1px solid var(--rule); font-size: 12px; }
+table.proofs th, table.proofs td { padding: 4px 12px 4px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+table.proofs thead th { border-bottom: 1px solid var(--rule); font-size: 12px; font-weight: 500; }
 table.proofs tbody tr { cursor: pointer; }
 table.proofs tbody tr:hover { background: var(--sub); }
 table.proofs tbody tr.on { background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); }
-table.proofs td:first-child { padding-left: 8px; width: 6.5em; }
-table.proofs .num { text-align: right; width: 6em; }
+table.proofs td:first-child, table.proofs th:first-child { padding-left: 8px; }
+table.proofs .status { font-weight: 600; }
 #explain { margin: 8px 0 0; padding: 6px 8px; border-left: 3px solid var(--accent); background: var(--sub); }
+
+/* Facts */
+.fm { color: var(--accent); }
+table.facts { margin-top: 2px; }
+table.facts th, table.facts td { padding: 3px 12px 3px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; overflow-wrap: anywhere; }
+table.facts thead th { border-bottom: 1px solid var(--rule); font-size: 12px; font-weight: 500; }
+#conflicts-box { margin-top: 8px; color: var(--open); }
 
 /* Toolbar */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 16px;
   border-bottom: 1px solid var(--rule); background: var(--bg); position: sticky; top: 0; z-index: 3; }
-.toolbar input[type=search] { font: inherit; padding: 3px 6px; width: 18em; max-width: 100%;
-  border: 1px solid var(--rule); background: var(--bg); color: var(--ink); }
-.toolbar button { font: inherit; padding: 3px 10px; border: 1px solid var(--rule); background: var(--sub); color: var(--ink); cursor: pointer; }
-.toolbar button:hover { border-color: var(--muted); }
+.toolbar input[type=search] { font: inherit; padding: 3px 8px; width: 18em; max-width: 100%;
+  border: 1px solid var(--rule); border-radius: 3px; background: var(--bg); color: var(--ink); }
+.toolbar label { color: var(--muted); white-space: nowrap; }
 .toolbar .count { margin-left: auto; color: var(--muted); }
 .toolbar .sel { color: var(--accent); font-weight: 600; }
+.toolbar button { font: inherit; font-size: 12px; padding: 2px 8px; border: 1px solid var(--rule); border-radius: 3px;
+  background: none; color: var(--muted); cursor: pointer; }
+.toolbar button:hover { color: var(--ink); border-color: var(--muted); }
 
 /* Body */
-main { display: grid; grid-template-columns: minmax(280px, 34%) 1fr; }
+main { display: grid; grid-template-columns: minmax(320px, 42%) 1fr; }
 @media (max-width: 860px) {
   main { grid-template-columns: 1fr; }
   .plan { position: static !important; max-height: none !important; border-right: 0 !important; border-bottom: 1px solid var(--rule); }
@@ -105,33 +127,35 @@ main { display: grid; grid-template-columns: minmax(280px, 34%) 1fr; }
 .plan { padding: 14px 12px 14px 16px; border-right: 1px solid var(--rule); position: sticky; top: 41px;
   max-height: calc(100vh - 41px); overflow: auto; }
 .plan ul { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 1px solid var(--rule); }
-.plan > ul { padding-left: 0; border-left: 0; }
-.plan li { margin: 0; }
-.pn { display: grid; grid-template-columns: auto 1fr auto; gap: 0 6px; padding: 3px 6px; margin: 1px 0; cursor: pointer; border-left: 3px solid transparent; }
+.plan > div > ul { padding-left: 0; border-left: 0; }
+.pn { display: grid; grid-template-columns: auto 1fr auto 2.8em; gap: 0 8px; align-items: baseline; padding: 3px 6px; margin: 1px 0;
+  cursor: pointer; border-left: 3px solid transparent; border-radius: 0 3px 3px 0; }
 .pn:hover, .pn.hl { background: var(--hl); }
-.pn .id { color: var(--muted); }
-.pn .op { overflow-wrap: anywhere; }
+.pn .id { color: var(--faint); }
+.pn .op { overflow-wrap: anywhere; min-width: 0; }
 .pn .op b { font-weight: 600; }
-.pn .op .d { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.pn .op .v { color: var(--muted); }
-.pn .n { color: var(--muted); text-align: right; white-space: nowrap; }
+.pn .d { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pn .n { color: var(--faint); text-align: right; white-space: nowrap; font-size: 11px; }
+.pn.alias .op, .pn.alias .op b { color: var(--faint); font-weight: 400; }
+.pn.alias .bd { background: none; opacity: .6; font-weight: 400; }
 .pn.core { border-left-color: var(--accent); background: var(--accent-bg); }
 .pn.core .n { color: var(--accent); font-weight: 600; }
-.pn.out { color: var(--faint); }
-.pn.out .d, .pn.out .id, .pn.out .v { color: var(--faint); }
-.sub { color: var(--muted); font-style: italic; padding: 6px 0 2px; }
+.pn.out { opacity: .45; }
+.sub { color: var(--muted); font-style: italic; padding: 8px 0 2px; }
 
 .list { padding: 14px 16px; min-width: 0; }
 table.cs { table-layout: fixed; }
-table.cs col.id { width: 4.5em; } table.cs col.rule { width: 15em; } table.cs col.src { width: 8.5em; }
-table.cs thead th { position: sticky; top: 41px; background: var(--bg); border-bottom: 1px solid var(--rule); padding: 4px 8px 4px 0; font-size: 12px; z-index: 1; }
+table.cs col.id { width: 4.5em; } table.cs col.rule { width: 14em; }
+table.cs thead th { position: sticky; top: 41px; background: var(--bg); border-bottom: 1px solid var(--rule); padding: 4px 8px 4px 0;
+  font-size: 12px; font-weight: 500; z-index: 1; }
 table.cs td { padding: 2px 8px 2px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; overflow-wrap: anywhere; }
-table.cs td.id { padding-left: 6px; color: var(--muted); }
-table.cs td.rule, table.cs td.src { color: var(--muted); }
-table.cs td.src { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-tr.gh td { padding: 10px 6px 4px; border-bottom: 1px solid var(--rule); background: var(--bg); cursor: pointer; }
-tr.gh td b { font-weight: 600; }
-tr.gh .d, tr.gh .v { color: var(--muted); }
+table.cs td.id { padding-left: 6px; color: var(--faint); }
+table.cs td.rule { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+tr.gh td { padding: 12px 6px 4px; border-bottom: 1px solid var(--rule); background: var(--bg); cursor: pointer; }
+tr.gh .row { display: flex; gap: 8px; align-items: baseline; }
+tr.gh .lab { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tr.gh b { font-weight: 600; }
+tr.gh .d { color: var(--muted); }
 tr.gh.hl td { background: var(--hl); }
 tr.c { cursor: pointer; }
 tr.c:hover td { background: var(--sub); }
@@ -140,100 +164,83 @@ tr.c.core td.id { box-shadow: inset 3px 0 0 var(--accent); color: var(--accent);
 tr.c.core td.f { font-weight: 600; }
 tr.c.out td { color: var(--faint); }
 tr.c.out td.f .var { color: var(--faint); }
+tr.c.fact td.id { color: var(--accent); }
 tr.x td { padding: 4px 8px 8px 6px; background: var(--sub); border-bottom: 1px solid var(--rule); }
 tr.x th { color: var(--muted); font-weight: 400; width: 5em; padding: 2px 8px 2px 0; vertical-align: top; }
 tr.x table td { background: none; border: 0; padding: 2px 0; }
 .var { border-bottom: 1px dotted var(--faint); }
 .var.hl { background: var(--hl); }
-[hidden] { display: none !important; }
 
-/* Facts */
-.fm { color: var(--accent); }
-tr.c.fact td.id { color: var(--accent); }
-tr.c.fact td.rule { font-style: italic; }
-table.proofs .grp { border-left: 1px solid var(--rule); padding-left: 10px; }
-table.facts { margin: 4px 0 12px; }
-table.facts th, table.facts td { padding: 3px 10px 3px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; overflow-wrap: anywhere; }
-table.facts thead th { border-bottom: 1px solid var(--rule); font-size: 12px; }
-h3 { font-size: 12px; font-weight: 600; margin: 10px 0 2px; }
-
-footer { padding: 14px 16px 24px; color: var(--muted); border-top: 1px solid var(--rule); }
-footer dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
-footer dt { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--ink); }
-footer dd { margin: 0; }
+dl.notation { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0 0 4px; color: var(--muted); }
+dl.notation dt { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--ink); }
+dl.notation dd { margin: 0; }
 </style>
 </head>
 <body>
 <header>
-  <h1>cardinal — Z3 constraint trace</h1>
-  <table class="kv">
-    <tr><th id="bounds-label">Bounds</th><td><code id="bounds"></code></td></tr>
-    <tr id="fbounds-row" hidden><th id="fbounds-label">With facts</th><td><code id="fbounds"></code></td></tr>
-    <tr id="total-row" hidden><th>Total rows</th><td><code id="total"></code></td></tr>
-    <tr id="facts-row" hidden><th>Facts</th><td id="facts-stats"></td></tr>
-    <tr><th>Size</th><td id="stats"></td></tr>
-    <tr><th>Query</th><td><pre id="query"></pre></td></tr>
-  </table>
-  <details><summary>Optimized plan (DataFusion)</summary><pre id="plan"></pre></details>
+  <div class="top"><h1>cardinal</h1><span class="note" id="stats"></span></div>
+  <div class="cards">
+    <div class="card"><div class="k">Rows out</div><span class="bd" id="out"></span><div class="was" id="out-was"></div></div>
+    <div class="card" id="total-card" hidden><div class="k">Rows over every operator</div><span class="bd" id="total"></span><div class="was" id="total-was"></div></div>
+  </div>
+  <pre id="query"></pre>
+  <div class="more">
+    <details><summary>Optimized plan</summary><pre id="plan"></pre></details>
+    <details><summary>Notation</summary>
+      <dl class="notation">
+        <dt>X</dt><dd>Rows output by the root operator.</dd>
+        <dt>|t|, T{n}_{t}</dt><dd>Rows in base table t.</dd>
+        <dt>op{n}_{Kind}</dt><dd>Rows output by plan node n.</dd>
+        <dt>op{n}_{Kind}[col]</dt><dd>Distinct values of column col in node n's output (NULL counts as one).</dd>
+        <dt>part{n}</dt><dd>Rows of a table shared by relations whose rows are disjoint.</dd>
+        <dt>◆</dt><dd>A constraint a fact gave, or a node with one.</dd>
+        <dt>≥ n</dt><dd>No upper bound was proven.</dd>
+      </dl>
+    </details>
+  </div>
 </header>
 
 <section>
   <h2>Proofs</h2>
-  <p class="help">Each claim is re-proven from the constraints. Select one to mark the smallest set of constraints that proves it: removing any one of them makes the claim unprovable.</p>
   <table class="proofs">
-    <thead id="proofs-head"></thead>
+    <thead><tr><th>Claim</th><th>Result</th><th>Needs</th><th>From nodes</th></tr></thead>
     <tbody id="proofs"></tbody>
   </table>
   <p id="explain" hidden></p>
 </section>
 
 <section id="facts" hidden>
-  <h2>Facts</h2>
-  <p class="help">What the facts gave: each fact constraint (◆) holds a variable to a value read off a plan that ran. Facts that contradict the constraints, or whose consistency was not decided in time, are left out.</p>
-  <h3>Used</h3>
-  <table class="facts"><thead><tr><th>Kind</th><th>Claim</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
-  <div id="conflicts-box" hidden>
-    <h3>Conflicts (left out)</h3>
+  <details><summary>Facts used: <span id="facts-n"></span></summary>
+    <table class="facts"><thead><tr><th>Kind</th><th>Claim</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
+  </details>
+  <details id="conflicts-box" hidden open><summary class="warn">Facts left out for contradicting the constraints: <span id="conflicts-n"></span></summary>
     <table class="facts"><tbody id="conflicts"></tbody></table>
-  </div>
+  </details>
 </section>
 
 <div class="toolbar">
-  <label><input type="checkbox" id="only"> Only constraints the selected proof needs</label>
-  <label id="hide-label" hidden><input type="checkbox" id="hide"> Hide fact constraints</label>
-  <input type="search" id="search" placeholder="Filter: text, variable, rule…" aria-label="Filter constraints">
+  <input type="search" id="search" placeholder="Filter constraints…" aria-label="Filter constraints">
+  <label title="Show only the constraints the selected proof needs"><input type="checkbox" id="only"> Only needed</label>
+  <label id="hide-label" hidden title="Show the analysis as if no facts were given"><input type="checkbox" id="hide"> Without facts</label>
+  <span class="count" id="count"></span>
   <button id="copy">Copy SMT-LIB</button>
   <button id="save">Save .smt2</button>
-  <span class="count" id="count"></span>
 </div>
 
 <main>
   <nav class="plan" aria-label="Plan">
-    <h2>Plan <span class="note" style="text-transform:none;letter-spacing:0;font-weight:400">· root first · count = constraints</span></h2>
+    <h2>Plan and bounds</h2>
     <div id="tree"></div>
   </nav>
   <div class="list">
-    <h2>Constraints, by plan node</h2>
+    <h2>Constraints</h2>
     <table class="cs">
-      <colgroup><col class="id"><col><col class="rule"><col class="src"></colgroup>
-      <thead><tr><th style="padding-left:6px">#</th><th>Constraint</th><th class="rule">Rule (function)</th><th class="src">Source</th></tr></thead>
+      <colgroup><col class="id"><col><col class="rule"></colgroup>
+      <thead><tr><th style="padding-left:6px">#</th><th>Constraint</th><th class="rule">Rule</th></tr></thead>
       <tbody id="list"></tbody>
     </table>
   </div>
 </main>
-
-<footer>
-  <h2>Notation</h2>
-  <dl>
-    <dt>X</dt><dd>Rows output by the root operator.</dd>
-    <dt>|t|, T{n}_{t}</dt><dd>Rows in base table t.</dd>
-    <dt>op{n}_{Kind}</dt><dd>Rows output by plan node n.</dd>
-    <dt>op{n}_{Kind}[col]</dt><dd>Distinct values of column col in node n's output (NULL counts as one).</dd>
-    <dt>part{n}</dt><dd>Rows of a table shared by relations whose rows are disjoint.</dd>
-    <dt>◆</dt><dd>A constraint a fact gave, or a node with one.</dd>
-    <dt>a·b, min, max, =&gt;, ∧, ∨, ¬</dt><dd>Product, minimum, maximum, implication, and, or, not.</dd>
-  </dl>
-</footer>
 
 <script type="application/json" id="data">__DATA__</script>
 <script>
@@ -242,37 +249,56 @@ footer dd { margin: 0; }
   const dump = D.dump, F = dump.facts, t = F ? F.trace : dump.trace, names = D.names;
   // The proofs to select: with facts if they were proven, else the base
   // ones, whose constraints come first in the trace with facts too.
-  const proofs = F && F.explained ? F.proofs : dump.proofs;
+  const compare = !!(F && F.explained);
+  const proofs = compare ? F.proofs : dump.proofs;
   const baseOf = {};
-  if (F && F.explained) F.proofs.forEach((p, i) => { if (F.base_proofs[i]) baseOf[p.name] = F.base_proofs[i]; });
+  if (compare) F.proofs.forEach((p, i) => { if (F.base_proofs[i]) baseOf[p.name] = F.base_proofs[i]; });
   const isFact = c => !!c.fact;
   const $ = id => document.getElementById(id);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const statusOf = p => typeof p.status === 'string' ? p.status : 'Unknown';
+  const hiding = () => !!F && $('hide').checked;
 
-  // Summary.
+  // A bound, compactly: "= 60,175", "≤ 25", "3 – 25", or "≥ 100" when no
+  // upper end was proven.
+  const num = n => Number(n).toLocaleString('en-US');
+  function boundText(s) {
+    if (!s) return { text: '—', open: true };
+    let m;
+    if ((m = s.match(/^X = (\d+)$/))) return { text: '= ' + num(m[1]), open: false };
+    if ((m = s.match(/^(\d+) <= X <= (\d+)$/))) return { text: m[1] === '0' ? '≤ ' + num(m[2]) : `${num(m[1])} – ${num(m[2])}`, open: false };
+    if ((m = s.match(/^X <= (\d+)$/))) return { text: '≤ ' + num(m[1]), open: false };
+    if ((m = s.match(/^X >= (\d+)$/))) return { text: '≥ ' + num(m[1]), open: true };
+    return { text: s, open: !/<=|=/.test(s) };
+  }
+  function setBound(e, s, other) {
+    const b = boundText(s);
+    e.textContent = b.text;
+    e.classList.toggle('open', b.open);
+    e.title = (s ?? 'not computed') + (other && other !== s ? `\n${hiding() ? 'with' : 'without'} facts: ${other}` : '');
+  }
+  const bd = () => el('span', 'bd');
+
+  // Header.
   $('query').textContent = dump.query.trim();
   $('plan').textContent = dump.plan;
-  $('bounds').textContent = dump.bounds ?? 'not computed';
-  if (F) {
-    $('bounds-label').textContent = 'Without facts';
-    $('fbounds-row').hidden = false;
-    $('fbounds-label').textContent = 'With facts';
-    $('fbounds').textContent = F.bounds ?? 'not computed';
-    $('facts-row').hidden = false;
-    const k = t.constraints.filter(isFact).length;
-    $('facts-stats').textContent = `${k} fact constraints`;
-    $('hide-label').hidden = false;
-  }
-  // Every operator's bounds, with facts if any, and their sum's.
-  const plan = F ? F.plan_bounds : dump.plan_bounds;
-  if (plan) {
-    $('total-row').hidden = false;
-    $('total').textContent = F && dump.plan_bounds ? `${dump.plan_bounds.total} without facts, ${plan.total} with` : plan.total;
-  }
+  if (F) $('hide-label').hidden = false;
   const partitions = t.constraints.filter(c => c.node === null).length;
-  $('stats').textContent = `${t.nodes.length} plan nodes, ${t.constraints.length} constraints` +
-    (partitions ? ` (${partitions} over table partitions)` : '') + `, root variable ${t.root}`;
+  const facts = t.constraints.filter(isFact).length;
+  $('stats').textContent = `${t.nodes.length} plan nodes · ${t.constraints.length} constraints` +
+    (partitions ? ` (${partitions} over table partitions)` : '') + (F ? ` · ${facts} from facts` : '');
+  const basePlan = dump.plan_bounds, factPlan = F ? F.plan_bounds : null;
+  $('total-card').hidden = !(basePlan || factPlan);
+  function header() {
+    const facts = F && !hiding();
+    const [out, outOther] = facts ? [F.bounds, dump.bounds] : [dump.bounds, F?.bounds];
+    setBound($('out'), out, outOther);
+    const [plan, planOther] = facts ? [factPlan, basePlan] : [basePlan, factPlan];
+    if (plan) setBound($('total'), plan.total, planOther?.total);
+    const was = (e, a, b) => { e.textContent = F && a !== b ? `${facts ? 'without' : 'with'} facts ${boundText(b).text}` : ''; };
+    was($('out-was'), out, outOther);
+    if (plan) was($('total-was'), plan.total, planOther?.total);
+  }
 
   // The node each variable describes.
   const owner = {};
@@ -286,46 +312,39 @@ footer dd { margin: 0; }
   for (const c of t.constraints) (byNode[c.node ?? 'p'] ??= []).push(c);
 
   // An operator's label: its kind in bold, the rest muted.
-  function opLabel(n, cls) {
+  function opLabel(n, cls, inline) {
     const line = n.label.split('\n')[0];
     const i = line.indexOf(':');
     const box = el('span', cls);
     box.append(el('b', null, i < 0 ? line : line.slice(0, i)));
-    if (i >= 0) box.append(el('span', 'd m', line.slice(i + 1).trim()));
+    if (i >= 0) box.append(inline ? ' ' : '', el(inline ? 'span' : 'div', 'd m', line.slice(i + 1).trim()));
     return box;
+  }
+  // What a node's fact pins, for its tooltip.
+  function pinned(n) {
+    const mine = [n.var, n.raw_var].filter(x => x);
+    return (byNode[n.id] ?? []).filter(c => c.fact && c.vars.length === 1 && mine.includes(c.vars[0]))
+      .map(c => `◆ ${c.vars[0] === n.var ? 'rows' : names[c.vars[0]] ?? c.vars[0]} ${c.fact.value}`);
   }
 
   // Plan tree, root first; nodes no other node takes as input are roots.
   const used = new Set(t.nodes.flatMap(n => n.inputs));
   const roots = t.nodes.filter(n => !used.has(n.id)).map(n => n.id).reverse();
-  const treeNodes = {}, order = [];
+  const treeNodes = {}, order = [], bounds = [];
   function build(id) {
     const n = t.nodes[id];
     order.push(id);
     const li = el('li');
-    const row = el('div', 'pn');
+    const alias = n.label.startsWith('SubqueryAlias');
+    const row = el('div', alias ? 'pn alias' : 'pn');
     row.dataset.node = id;
-    row.title = n.label;
-    const op = opLabel(n, 'op');
-    let v = n.var;
-    if (F) {
-      const mine = [n.var, n.raw_var].filter(x => x);
-      for (const c of byNode[id] ?? []) {
-        const x = c.vars[0];
-        if (c.fact && ['pinned rows', 'row cap'].includes(c.fact.source) && c.vars.length === 1 && mine.includes(x))
-          v += `  ${x === n.var ? '' : (names[x] ?? x) + ' '}${c.fact.value}`;
-      }
-    }
-    if (plan && plan.nodes[id]) {
-      v += `   ${plan.nodes[id]}`;
-      const base = F && dump.plan_bounds && dump.plan_bounds.nodes[id];
-      if (base && base !== plan.nodes[id]) v += ` (without facts ${base})`;
-    }
-    op.append(el('div', 'v m', v));
+    row.title = [n.label, n.var, ...pinned(n)].join('\n');
+    const idBox = el('span', 'id m', String(id));
+    if ((byNode[id] ?? []).some(isFact)) idBox.append(el('span', 'fm', '◆'));
+    const b = bd();
+    bounds.push([b, id]);
     const count = el('span', 'n m');
-    const idBox = el('span', 'id m', `[${id}]`);
-    if ((byNode[id] ?? []).some(isFact)) idBox.append(el('span', 'fm', ' ◆'));
-    row.append(idBox, op, count);
+    row.append(idBox, opLabel(n, 'op'), b, count);
     treeNodes[id] = { row, count };
     li.append(row);
     if (n.inputs.length) {
@@ -337,7 +356,7 @@ footer dd { margin: 0; }
   }
   const top = el('ul');
   roots.forEach((r, i) => {
-    if (i > 0) top.append(el('li', 'sub', 'Subquery inside an expression:'));
+    if (i > 0) top.append(el('li', 'sub', 'Subquery inside an expression'));
     top.append(build(r));
   });
   $('tree').append(top);
@@ -366,28 +385,35 @@ footer dd { margin: 0; }
     if (!cs.length) return;
     const gh = el('tr', 'gh');
     const td = el('td');
-    td.colSpan = 4;
+    td.colSpan = 3;
+    const line = el('div', 'row');
     if (key === 'p') {
-      td.append(el('b', null, 'Table partitions'), el('span', 'd', ' — relations of one table with disjoint rows share its rows'));
+      line.append(el('span', 'lab', null));
+      line.firstChild.append(el('b', null, 'Table partitions'), el('span', 'd', ' — relations of one table with disjoint rows share its rows'));
     } else {
       const n = t.nodes[key];
-      td.append(el('span', 'm', `[${key}] `), opLabel(n), el('span', 'v m', '  ' + n.var));
+      const lab = el('span', 'lab');
+      lab.append(el('span', 'm note', `${key}  `), opLabel(n, null, true));
+      lab.title = `${n.label}\n${n.var}`;
+      const b = bd();
+      bounds.push([b, key]);
+      line.append(lab, b);
       gh.dataset.node = key;
     }
+    td.append(line);
     gh.append(td);
     heads[key] = gh;
     $('list').append(gh);
     for (const c of cs) {
       const r = el('tr', isFact(c) ? 'c fact' : 'c');
       r.dataset.c = c.id;
-      const file = c.source.split('/').pop();
-      const src = el('td', 'src m', isFact(c) ? 'fact' : file);
-      src.title = c.source;
-      r.append(el('td', 'id m', 'c' + c.id + (isFact(c) ? ' ◆' : '')), formula(c.infix), el('td', 'rule m', c.function), src);
+      const rule = el('td', 'rule m', isFact(c) ? `fact: ${c.fact.source}` : c.function);
+      rule.title = c.source;
+      r.append(el('td', 'id m', 'c' + c.id + (isFact(c) ? ' ◆' : '')), formula(c.infix), rule);
       const x = el('tr', 'x');
       x.hidden = true;
       const xd = el('td');
-      xd.colSpan = 4;
+      xd.colSpan = 3;
       const kv = el('table');
       const details = [['SMT-LIB', c.smt], ['Made by', `${c.function} at ${c.source}`], ['Code', c.code]];
       if (isFact(c)) {
@@ -410,6 +436,15 @@ footer dd { margin: 0; }
   }
   for (const id of order) group(id);
   group('p');
+
+  // Every operator's bounds, with facts unless they are hidden.
+  function nodeBounds() {
+    const [plan, other] = F && !hiding() ? [factPlan, basePlan] : [basePlan, factPlan];
+    for (const [e, id] of bounds) {
+      e.hidden = !plan;
+      if (plan) setBound(e, plan.nodes[id], other?.nodes[id]);
+    }
+  }
 
   // Hover: a node lights its constraints' header and its tree entry; a
   // variable lights every use of it and the node it describes.
@@ -454,73 +489,60 @@ footer dd { margin: 0; }
       $(body).append(r);
       factRows.push(r);
     };
-    for (const c of t.constraints.filter(isFact)) {
+    const used = t.constraints.filter(isFact);
+    $('facts-n').textContent = String(used.length);
+    for (const c of used) {
       const f = c.fact, read = f.facts.flatMap(x => x.origins);
       const claim = `${c.vars.map(v => names[v] ?? v).join(', ')} ${f.value}`;
       row('facts-used', [[f.source, 'note'], [claim, 'm'], [f.facts.map(x => x.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
     }
-    if (!$('facts-used').children.length) row('facts-used', [['—', 'note'], ['no fact applied', 'note'], ['', ''], ['', '']]);
     if (F.conflicts.length) {
       $('conflicts-box').hidden = false;
+      $('conflicts-n').textContent = String(F.conflicts.length);
       for (const c of F.conflicts) row('conflicts', [[c, 'm']]);
     }
   }
 
-  // Proofs.
+  // Proofs: the one shown is the base proof while facts are hidden.
   let current = null;
   const proofRows = {};
   const statusLabel = { Proven: ['proven', 'good'], Refuted: ['refuted', 'bad'], Unknown: ['unknown', 'warn'] };
+  const shown = p => (hiding() && compare ? baseOf[p.name] : null) ?? p;
   const all = el('tr');
-  const compare = !!(F && F.explained);
-  {
-    const h = el('tr');
-    for (const [text, cls] of compare
-      ? [['Status', ''], ['Name', ''], ['Claim', ''], ['Without facts', 'grp'], ['Needs', 'num'], ['With facts', 'grp'], ['Needs', 'num'], ['Facts', 'num'], ['From nodes', '']]
-      : [['Status', ''], ['Name', ''], ['Claim', ''], ['Needs', 'num'], ['From nodes', '']]) h.append(el('th', cls, text));
-    $('proofs-head').append(h);
-  }
-  const needs = p => statusOf(p) === 'Proven' ? String(p.core.length) : '—';
-  const cell = (p, grp) => {
-    const [label, cls] = statusLabel[statusOf(p)];
-    return el('td', `status ${cls}${grp ? ' grp' : ''}`, label);
-  };
-  {
-    const blank = compare ? 6 : 2;
-    all.append(el('td', 'note', '—'), el('td', null, 'none'), el('td', 'note', 'Show every constraint'));
-    for (let i = 0; i < blank; i++) all.append(el('td', 'note', ''));
-  }
+  all.append(el('td', 'note', 'none'), el('td', 'note', 'every constraint'), el('td'), el('td'));
   all.addEventListener('click', () => select(null));
   $('proofs').append(all);
   for (const p of proofs) {
-    const nodes = [...new Set(p.core.map(c => t.constraints[c].node).filter(n => n !== null))].sort((a, b) => a - b);
     const r = el('tr');
-    r.append(cell(p), el('td', 'm', p.name), el('td', 'm', p.claim));
-    if (compare) {
-      const b = baseOf[p.name];
-      const k = statusOf(p) === 'Proven' ? p.core.filter(c => isFact(t.constraints[c])).length : null;
-      r.append(
-        b ? cell(b, true) : el('td', 'note grp', '—'),
-        el('td', 'num m', b ? needs(b) : '—'),
-        cell(p, true),
-        el('td', 'num m', needs(p)),
-        el('td', 'num m', k === null ? '—' : String(k)),
-      );
-    } else {
-      r.append(el('td', 'num m', needs(p)));
-    }
-    r.append(el('td', 'm note', nodes.length ? nodes.map(n => `[${n}]`).join(' ') : '—'));
-    if (statusOf(p) === 'Unknown') r.title = p.status.Unknown;
+    const cells = [el('td', 'm'), el('td'), el('td', 'm'), el('td', 'm note')];
+    r.append(...cells);
     r.addEventListener('click', () => select(p.name));
-    proofRows[p.name] = r;
+    proofRows[p.name] = { r, cells, p };
     $('proofs').append(r);
   }
+  function proofTable() {
+    for (const { r, cells: [claim, result, needs, from], p } of Object.values(proofRows)) {
+      const q = shown(p), s = statusOf(q), proven = s === 'Proven';
+      claim.textContent = q.claim;
+      claim.title = q.name;
+      const [label, cls] = statusLabel[s];
+      result.textContent = '';
+      result.append(el('span', 'status ' + cls, label));
+      const base = compare && !hiding() ? baseOf[p.name] : null;
+      if (base && statusOf(base) !== s) result.append(el('span', 'note', ` · ${statusLabel[statusOf(base)][0]} without facts`));
+      const k = proven ? q.core.filter(c => isFact(t.constraints[c])).length : 0;
+      needs.textContent = proven ? String(q.core.length) + (k ? ` (${k} ◆)` : '') : '—';
+      const nodes = [...new Set(q.core.map(c => t.constraints[c].node).filter(n => n !== null))].sort((a, b) => a - b);
+      from.textContent = proven && nodes.length ? nodes.join(' ') : '—';
+      r.title = s === 'Unknown' ? q.status.Unknown : '';
+    }
+  }
 
-  // With fact constraints hidden, a proof's core is the one without them.
-  const hiding = () => !!F && $('hide').checked;
   function select(name) {
-    current = (hiding() && compare ? baseOf[name] : null) ?? proofs.find(p => p.name === name) ?? null;
+    const p = proofs.find(p => p.name === name);
+    current = p ? shown(p) : null;
     all.classList.toggle('on', !current);
-    for (const [k, r] of Object.entries(proofRows)) r.classList.toggle('on', k === name);
+    for (const [k, { r }] of Object.entries(proofRows)) r.classList.toggle('on', k === name);
     const core = new Set(current ? current.core : []);
     const perNode = {};
     for (const c of core) { const n = t.constraints[c].node; perNode[n] = (perNode[n] ?? 0) + 1; }
@@ -555,7 +577,7 @@ footer dd { margin: 0; }
     const q = $('search').value.trim().toLowerCase();
     const only = $('only').checked && current;
     const core = new Set(current ? current.core : []);
-    let shown = 0;
+    let n = 0;
     for (const [id, { r, x }] of Object.entries(rows)) {
       const c = t.constraints[+id];
       const origins = c.fact ? c.fact.facts.flatMap(f => [f.text, ...f.origins]) : [];
@@ -563,21 +585,29 @@ footer dd { margin: 0; }
       const hide = (q && !text.includes(q)) || (only && !core.has(+id)) || (hiding() && isFact(c));
       r.hidden = hide;
       if (hide) x.hidden = true;
-      if (!hide) shown++;
+      if (!hide) n++;
     }
     for (const [key, h] of Object.entries(heads)) h.hidden = !(byNode[key] ?? []).some(c => !rows[c.id].r.hidden);
     const count = $('count');
     count.textContent = '';
     if (current) {
       const s = statusOf(current);
-      count.append(el('span', 'sel', current.name), s === 'Proven' ? `: ${current.core.length} needed · ` : `: ${s.toLowerCase()} · `);
+      count.append(el('span', 'sel', current.claim), s === 'Proven' ? `: ${current.core.length} needed · ` : `: ${s.toLowerCase()} · `);
     }
-    count.append(`${shown} of ${t.constraints.length} constraints shown`);
+    count.append(`${n} of ${t.constraints.length} shown`);
     for (const r of factRows) r.hidden = !!q && !r.textContent.toLowerCase().includes(q);
+  }
+
+  function refresh() {
+    document.body.classList.toggle('nofacts', hiding());
+    header();
+    nodeBounds();
+    proofTable();
+    select(current ? current.name : null);
   }
   $('search').addEventListener('input', filter);
   $('only').addEventListener('change', filter);
-  $('hide').addEventListener('change', () => select(current ? current.name : null));
+  $('hide').addEventListener('change', refresh);
 
   $('copy').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(D.smt2); $('copy').textContent = 'Copied'; }
@@ -593,7 +623,8 @@ footer dd { margin: 0; }
 
   if (D.proof) $('only').checked = true;
   if (D.withoutFacts) $('hide').checked = true;
-  select(D.proof ?? null);
+  current = D.proof ? { name: D.proof } : null;
+  refresh();
 })();
 </script>
 </body>

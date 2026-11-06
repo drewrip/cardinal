@@ -127,7 +127,7 @@ fn facts_from_profiles() {
     let html = temp("q05.html");
     run(&["view", path, "--html", html.to_str().unwrap()]);
     let page = std::fs::read_to_string(&html).unwrap();
-    assert!(page.contains("Hide fact constraints") && page.contains("\"source\":\"pinned rows\""));
+    assert!(page.contains("Without facts") && page.contains("\"source\":\"pinned rows\""));
 }
 
 #[test]
