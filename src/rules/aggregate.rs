@@ -5,7 +5,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Aggregate, LogicalPlan};
 use z3::ast::Int;
 
-use super::{col, column_index, determined, expr_bound, key_column, strip_alias, unproject};
+use super::{col, column_index, determined, key_column, strip_alias, unproject};
 use crate::analysis::{Analyzer, Rel, int, product};
 use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
@@ -17,10 +17,13 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: without GROUP BY, `X = 1`. With GROUP BY on keys `K`:
     ///   `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv(K)` (or of the keys that
     ///   determine the rest, or of one column determining every key,
-    ///   [`Self::determining_column`]), each key's `ndv` its expression's,
-    ///   and `X = l` if `K`, or the columns it determines, cover a unique
-    ///   key. `count` columns sum to at most `l`; `min` and `max` take their
-    ///   argument's range ([`Self::aggregate_ranges`]).
+    ///   [`Self::determining_column`]), and `X = l` if `K`, or the columns
+    ///   it determines, cover a unique key. A key column holds an input
+    ///   row's value ([`wider rows`](Self::wider)), and every one, `ndv ≥`
+    ///   its input's (not for floats, merged by SQL equality); another key
+    ///   has its expression's `ndv` bound ([`Self::expr_ndv`]). `count`
+    ///   columns sum to at most `l`; `min` and `max` take their argument's
+    ///   range ([`Self::aggregate_ranges`]).
     /// - **When**: ROLLUP, CUBE and GROUPING SETS get nothing: they may emit
     ///   more rows than they read.
     pub fn aggregate(&mut self, plan: &LogicalPlan, agg: &Aggregate) -> Rel {
@@ -57,16 +60,20 @@ impl<'a> Analyzer<'a> {
         // One group per distinct combination of group values; every value of a
         // group expression shows up in some group.
         let mut factors = vec![];
+        let mut columns = vec![];
         for (j, e) in agg.group_expr.iter().enumerate() {
-            if plan.schema().field(j).data_type().is_floating() {
-                if let Some(bound) = expr_bound(e, &agg.input, &l, self.max_product) {
-                    self.assert(o.ndv[j].le(bound));
+            match column_index(&agg.input, e) {
+                Some(i) => {
+                    columns.push((j, i));
+                    if !plan.schema().field(j).data_type().is_floating() {
+                        self.assert(o.ndv[j].ge(&l.ndv[i]));
+                    }
                 }
-            } else {
-                self.expr_ndv(&o.ndv[j], e, &agg.input, &l);
+                None => self.expr_ndv(&o.ndv[j], e, &agg.input, &l),
             }
             factors.push(&o.ndv[j]);
         }
+        self.wider(&o, &l, &columns);
         if let Some(p) = product(&factors, self.max_product) {
             self.assert(o.card.le(p));
         }
@@ -133,16 +140,16 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Part of [`Self::aggregate`]: a grouping key's values, and a MIN's or
-    /// MAX's, are its input's.
+    /// Part of [`Self::aggregate`]: a MIN's or MAX's values are its
+    /// argument's.
     pub fn aggregate_ranges(&self, agg: &Aggregate, o: &Rel, l: &Rel) {
         let groups = agg.group_expr.len();
-        for (j, e) in agg.group_expr.iter().chain(&agg.aggr_expr).enumerate() {
+        for (j, e) in agg.aggr_expr.iter().enumerate() {
             let arg = match strip_alias(e) {
-                e if j < groups => e,
                 Expr::AggregateFunction(f) if matches!(f.func.name(), "min" | "max") && f.params.args.len() == 1 => &f.params.args[0],
                 _ => continue,
             };
+            let j = groups + j;
             if let Some(i) = column_index(&agg.input, arg) {
                 self.within(o, j, l, i);
             }

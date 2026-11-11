@@ -43,6 +43,22 @@
 //! | `composite key` | [`Analyzer::composite_key`] |
 //! | `disjoint` | [`Analyzer::disjoint`] |
 //!
+//! Three more relate a relation to an input, asserted by the rules that
+//! find them hold, which state only what the operator adds:
+//!
+//! | Axiom | Claim |
+//! |---|---|
+//! | `same rows` | [`Analyzer::same_rows`] |
+//! | `subset` | [`Analyzer::subset`] |
+//! | `wider rows` | [`Analyzer::wider`] |
+//!
+//! ```text
+//! Filter: subset(o, l)  ⇒  X ≤ l, ndv(c) ≤ ndv_l(c), c's range within l's
+//! ```
+//!
+//! These also hold between named rows, but rows need not be named to be
+//! related: a filter on a subquery's value has no [`Context`].
+//!
 //! # Axioms between named rows
 //!
 //! Once every operator is visited, [`Analyzer::named_rows`] names each
@@ -275,6 +291,50 @@ impl<'a> Analyzer<'a> {
                 sum.push(part[&c].clone());
             }
             self.assert(Int::add(&sum).le(&table));
+        }
+    }
+
+    /// `same rows`, between relations. [`same_rows`](fn@same_rows) and
+    /// [`subset`](fn@subset) find it between named rows.
+    ///
+    /// - **Claim**: `X = l`; for each pair `(j, i)` of `columns`, `ndv(o.j)
+    ///   = ndv(l.i)` and `o.j`'s range within `l.i`'s.
+    /// - **When**: a rule finds `o`'s rows are `l`'s, one for one, and each
+    ///   pair's column of `o` holds the other's value, or an injective image
+    ///   of it.
+    pub fn same_rows(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
+        self.assert(o.card.eq(&l.card));
+        for &(j, i) in columns {
+            self.assert(o.ndv[j].eq(&l.ndv[i]));
+            self.within(o, j, l, i);
+        }
+    }
+
+    /// `subset`, between relations. [`subset`](fn@subset) finds it between
+    /// named rows.
+    ///
+    /// - **Claim**: `X ≤ l`, and the claim of [`Self::wider`].
+    /// - **When**: a rule finds `o`'s rows are among `l`'s, as many times or
+    ///   fewer, with `columns` as in [`Self::wider`].
+    pub fn subset(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
+        self.assert(o.card.le(&l.card));
+        self.wider(o, l, columns);
+    }
+
+    /// `wider rows`, between relations. [`wider`](fn@wider) finds it between
+    /// named rows.
+    ///
+    /// - **Claim**: for each pair `(j, i)` of `columns`, `ndv(o.j) ≤
+    ///   ndv(l.i)` and `o.j`'s range within `l.i`'s.
+    /// - **When**: a rule finds each row of `o` holds a row of `l`, each
+    ///   pair's column of `o` the other's value on that row, or an injective
+    ///   image of it. For a float, SQL equality merges values distinct as
+    ///   bits (`-0.0 = 0.0`), so a column equal to `l.i` by a predicate is
+    ///   not paired.
+    pub fn wider(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
+        for &(j, i) in columns {
+            self.assert(o.ndv[j].le(&l.ndv[i]));
+            self.within(o, j, l, i);
         }
     }
 

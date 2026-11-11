@@ -30,6 +30,11 @@
 //! - **Not done**: what holds of every relation whatever its operator is
 //!   not here: `ndv ≤ X`, a key's `ndv = X`, value domains bounding `ndv`,
 //!   and disjoint filters over one table. Those are [axioms](crate::axioms).
+//!   Nor what follows from rows being another's: a rule finds that its
+//!   output is the [same rows](Analyzer::same_rows) as an input, a
+//!   [subset](Analyzer::subset) of them, or [holds](Analyzer::wider) their
+//!   rows, and the axiom states what follows. The rule states only what the
+//!   operator adds.
 //!
 //! # Notation
 //!
@@ -44,7 +49,7 @@
 //! |---|---|
 //! | `TableScan` | [`Analyzer::scan`] |
 //! | `Projection` | [`Analyzer::projection`] |
-//! | `Subquery`, `SubqueryAlias`, `Repartition` | [`Analyzer::same_rows`] |
+//! | `Subquery`, `SubqueryAlias`, `Repartition` | [`Analyzer::pass_through`] |
 //! | `Window` | [`Analyzer::window`] |
 //! | `Filter` | [`Analyzer::filter`] |
 //! | `Sort` | [`Analyzer::sort`] |
@@ -61,8 +66,9 @@
 //! their variables. Their inputs are still visited, so their scans count.
 //!
 //! A trace names each constraint's rule by the function that asserted it:
-//! the rule's own, or a part of it it calls ([`Analyzer::join_ndv`],
-//! [`Analyzer::within`], ...).
+//! the rule's own, a part of it it calls ([`Analyzer::join_sides`],
+//! [`Analyzer::within`], ...), or an axiom it calls ([`Analyzer::subset`],
+//! ...).
 
 mod aggregate;
 pub(crate) mod join;
@@ -98,13 +104,6 @@ impl<'a> Analyzer<'a> {
         }
         if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
             self.assert(a.le(b));
-        }
-    }
-
-    /// [`Self::within`], for each of `l`'s columns at the same position.
-    pub fn within_all(&self, o: &Rel, l: &Rel) {
-        for j in 0..o.min.len().min(l.min.len()) {
-            self.within(o, j, l, j);
         }
     }
 
@@ -151,9 +150,9 @@ impl<'a> Analyzer<'a> {
         let out = match plan {
             LogicalPlan::TableScan(scan) => return self.scan(plan, scan),
             LogicalPlan::Projection(p) => self.projection(plan, p),
-            LogicalPlan::Subquery(p) => self.same_rows("Subquery", plan, &p.subquery),
-            LogicalPlan::SubqueryAlias(p) => self.same_rows("SubqueryAlias", plan, &p.input),
-            LogicalPlan::Repartition(p) => self.same_rows("Repartition", plan, &p.input),
+            LogicalPlan::Subquery(p) => self.pass_through("Subquery", plan, &p.subquery),
+            LogicalPlan::SubqueryAlias(p) => self.pass_through("SubqueryAlias", plan, &p.input),
+            LogicalPlan::Repartition(p) => self.pass_through("Repartition", plan, &p.input),
             LogicalPlan::Window(p) => self.window(plan, p),
             LogicalPlan::Filter(f) => self.filter(plan, f),
             LogicalPlan::Distinct(Distinct::All(input)) => self.distinct(plan, input),
@@ -179,21 +178,21 @@ impl<'a> Analyzer<'a> {
 
     /// `Projection`: the same rows, each column computed from them.
     ///
-    /// - **Claim**: `X = l`. Per output column: a column, or an injective cast
-    ///   of one, has its `ndv`, `min` and `max`; another deterministic
-    ///   expression has `ndv ≤ Π ndv` of the columns it reads; a literal
-    ///   `≤ 1`.
+    /// - **Claim**: [`same rows`](Self::same_rows) as the input, a column or
+    ///   an injective cast of one holding its value. Another deterministic
+    ///   expression has `ndv ≤ Π ndv` of the columns it reads; a literal `≤
+    ///   1` ([`Self::expr_ndv`]).
     pub fn projection(&mut self, plan: &LogicalPlan, p: &Projection) -> Rel {
         let l = self.visit(&p.input);
         let mut o = self.fresh("Projection", plan);
-        self.assert(o.card.eq(&l.card));
+        let mut columns = vec![];
         for (j, e) in p.expr.iter().enumerate() {
-            self.expr_ndv(&o.ndv[j], e, &p.input, &l);
-            // A column, or an integer cast of it, that keeps its value.
-            if let Some(i) = column_index(&p.input, e) {
-                self.within(&o, j, &l, i);
+            match column_index(&p.input, e) {
+                Some(i) => columns.push((j, i)),
+                None => self.expr_ndv(&o.ndv[j], e, &p.input, &l),
             }
         }
+        self.same_rows(&o, &l, &columns);
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
         o.rows = l.rows.rename(&|c| passed_column(plan, &p.expr, c));
         o.origin = l.origin.as_ref().map(|origin| {
@@ -208,30 +207,27 @@ impl<'a> Analyzer<'a> {
     /// `Window`: the input's rows and columns, then one column per window
     /// function.
     ///
-    /// - **Claim**: as [`Self::same_rows`] for the input's columns.
+    /// - **Claim**: as [`Self::pass_through`] for the input's columns.
     ///   `row_number`, `rank` and `dense_rank` are `≥ 1`, and `row_number`
     ///   with its partition columns is unique ([`Self::window_functions`]).
     pub fn window(&mut self, plan: &LogicalPlan, p: &Window) -> Rel {
-        let mut o = self.same_rows("Window", plan, &p.input);
+        let mut o = self.pass_through("Window", plan, &p.input);
         self.window_functions(plan, &p.input, &p.window_expr, &mut o);
         o
     }
 
     /// `Filter`: some of the input's rows, each satisfying the predicate.
     ///
-    /// - **Claim**: `X ≤ l`; each column's `ndv ≤` its input's, its range
-    ///   within its input's. For `a = b`: `ndv(a) = ndv(b)`, each `≤` the
-    ///   other's input `ndv` ([`Self::filter_ndv`]). `a < b` orders their
+    /// - **Claim**: a [`subset`](Self::subset) of the input. For `a = b`:
+    ///   `ndv(a) = ndv(b)` ([`Self::filter_ndv`]). `a < b` orders their
     ///   ranges ([`Self::range_pairs`]). The predicate's domains hold above.
-    /// - **When**: the `a = b` rules skip floats, whose SQL equality merges
-    ///   values distinct as bits (`-0.0 = 0.0`).
+    /// - **When**: `a = b` skips floats, whose SQL equality merges values
+    ///   distinct as bits (`-0.0 = 0.0`).
     pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> Rel {
         let l = self.visit(&f.input);
         let mut o = self.fresh("Filter", plan);
-        self.assert(o.card.le(&l.card));
-        self.subset_ndv(&o, &l);
-        self.filter_ndv(&f.predicate, &f.input, &o, &l);
-        self.within_all(&o, &l);
+        self.subset(&o, &l, &aligned(l.ndv.len(), 0));
+        self.filter_ndv(&f.predicate, &f.input, &o);
         self.range_pairs(&f.predicate, plan, &o);
         o.facts = l.facts.clone();
         o.rows = l.rows.clone();
@@ -242,21 +238,19 @@ impl<'a> Analyzer<'a> {
 
     /// `Distinct`: one row per distinct input row.
     ///
-    /// - **Claim**: `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv` of the input's
-    ///   columns, or of the columns that determine the rest. Columns keep
-    ///   every value: `ndv` equal (`≤` for floats, [`Self::kept_values`]). A
-    ///   unique input: `X = l`.
+    /// - **Claim**: a [`subset`](Self::subset) of the input; `l ≥ 1 ⇒ X ≥
+    ///   1`, `X ≤ Π ndv` of the input's columns, or of the columns that
+    ///   determine the rest. Columns keep every value ([`Self::kept_values`]).
+    ///   A unique input: `X = l`.
     pub fn distinct(&mut self, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
         let mut o = self.fresh("Distinct", plan);
         o.facts = l.facts.clone();
         o.rows = l.rows.clone();
         o.origin = l.origin.clone();
-        self.assert(o.card.le(&l.card));
+        self.subset(&o, &l, &aligned(l.ndv.len(), 0));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
-        // DISTINCT keeps every value that occurs.
         self.kept_values(plan, &o, &l);
-        self.within_all(&o, &l);
         let all: Vec<&Int> = l.ndv.iter().collect();
         if let Some(p) = product(&all, self.max_product) {
             self.assert(o.card.le(p));
@@ -311,24 +305,21 @@ impl<'a> Analyzer<'a> {
 
     /// `Sort`: the input's rows in order, or its first `n` with `fetch n`.
     ///
-    /// - **Claim**: `X = l` with equal columns; with `fetch n`, `X = min(n,
-    ///   l)` and columns `≤`.
+    /// - **Claim**: [`same rows`](Self::same_rows) as the input; with `fetch
+    ///   n`, a [`subset`](Self::subset) of it with `X = min(n, l)`.
     pub fn sort(&mut self, plan: &LogicalPlan, s: &Sort) -> Rel {
         let l = self.visit(&s.input);
         let mut o = self.fresh("Sort", plan);
-        self.within_all(&o, &l);
+        let columns = aligned(l.ndv.len(), 0);
         o.facts = l.facts.clone();
         o.rows = l.rows.clone();
         o.origin = l.origin.clone();
         match s.fetch {
-            None => {
-                self.assert(o.card.eq(&l.card));
-                self.equal_ndv(&o, &l);
-            }
+            None => self.same_rows(&o, &l, &columns),
             // Top-k: exactly the first n rows.
             Some(n) => {
+                self.subset(&o, &l, &columns);
                 self.assert(o.card.eq(min(&int(n as u64), &l.card)));
-                self.subset_ndv(&o, &l);
             }
         }
         o
@@ -336,16 +327,16 @@ impl<'a> Analyzer<'a> {
 
     /// `Limit`: the input's rows after skipping `k`, at most `n` of them.
     ///
-    /// - **Claim**: literal skip `k` and fetch `n`: `X = min(n, max(l − k,
-    ///   0))`. Otherwise `X ≤ l`, and `X ≤ n` for a literal fetch.
+    /// - **Claim**: a [`subset`](Self::subset) of the input. Literal skip `k`
+    ///   and fetch `n`: `X = min(n, max(l − k, 0))`; otherwise `X ≤ n` for a
+    ///   literal fetch.
     pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> Rel {
         let l = self.visit(&lim.input);
         let mut o = self.fresh("Limit", plan);
-        self.within_all(&o, &l);
         o.facts = l.facts.clone();
         o.rows = l.rows.clone();
         o.origin = l.origin.clone();
-        self.subset_ndv(&o, &l);
+        self.subset(&o, &l, &aligned(l.ndv.len(), 0));
         let skip = match lim.get_skip_type() {
             Ok(SkipType::Literal(k)) => Some(k as u64),
             _ => None,
@@ -364,20 +355,17 @@ impl<'a> Analyzer<'a> {
                 };
                 self.assert(o.card.eq(rows));
             }
-            (_, fetch) => {
-                self.assert(o.card.le(&l.card));
-                if let Some(Some(n)) = fetch {
-                    self.assert(o.card.le(int(n)));
-                }
-            }
+            (_, Some(Some(n))) => self.assert(o.card.le(int(n))),
+            _ => {}
         }
         o
     }
 
     /// `Union` (`UNION ALL`): every input's rows.
     ///
-    /// - **Claim**: `X = Σ` inputs; `max ndv ≤ ndv ≤ Σ ndv` per column; each
-    ///   range within the inputs' together.
+    /// - **Claim**: each input a [`subset`](Self::subset) of the output; `X
+    ///   = Σ` inputs; `ndv ≤ Σ ndv` per column; each range within the
+    ///   inputs' together.
     pub fn union(&mut self, plan: &LogicalPlan, u: &Union) -> Rel {
         let inputs: Vec<Rel> = u.inputs.iter().map(|i| self.visit(i)).collect();
         let mut o = self.fresh("Union", plan);
@@ -391,12 +379,12 @@ impl<'a> Analyzer<'a> {
         }
         let cards: Vec<&Int> = inputs.iter().map(|r| &r.card).collect();
         self.assert(o.card.eq(Int::add(&cards)));
+        for input in &inputs {
+            self.subset(input, &o, &aligned(o.ndv.len(), 0));
+        }
         for (j, v) in o.ndv.iter().enumerate() {
             let parts: Vec<&Int> = inputs.iter().map(|r| &r.ndv[j]).collect();
             self.assert(v.le(Int::add(&parts)));
-            for part in parts {
-                self.assert(v.ge(part));
-            }
         }
         // Each value is one of some input's.
         for j in 0..o.min.len() {
@@ -448,9 +436,9 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X = |T|`, the table's variable, shared by every scan of
     ///   it. Pushed-down filters add a filter over the scan (`ScanFilter`),
-    ///   with `X ≤` the scan's rows and the filters' domains, unless the
-    ///   provider applies them inexactly. A pushed-down `fetch` bounds
-    ///   nothing.
+    ///   a [`subset`](Self::subset) of the scan's rows with the filters'
+    ///   domains, unless the provider applies them inexactly. A pushed-down
+    ///   `fetch` bounds nothing.
     /// - **Why**: a provider must return at least `fetch` rows and may return
     ///   more; DataFusion keeps the limit above.
     #[allow(clippy::type_complexity)]
@@ -497,9 +485,7 @@ impl<'a> Analyzer<'a> {
         // nothing.
         if !scan.filters.is_empty() {
             let mut f = self.fresh("ScanFilter", plan);
-            self.assert(f.card.le(&out.card));
-            self.subset_ndv(&f, &out);
-            self.within_all(&f, &out);
+            self.subset(&f, &out, &aligned(out.ndv.len(), 0));
             f.facts = out.facts.clone();
             // Filters applied inexactly may let through rows that fail them.
             if !inexact_filters(scan) {
@@ -550,14 +536,12 @@ impl<'a> Analyzer<'a> {
     /// `Subquery`, `SubqueryAlias` and `Repartition`: the input's rows, whose
     /// columns come first and unchanged. `kind` names the operator.
     ///
-    /// - **Claim**: `X = l`, and each column equals its input's (`ndv`,
-    ///   `min`, `max`).
-    pub fn same_rows(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
+    /// - **Claim**: [`same rows`](Self::same_rows) as the input, column for
+    ///   column.
+    pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
         let mut o = self.fresh(kind, plan);
-        self.assert(o.card.eq(&l.card));
-        self.equal_ndv(&o, &l);
-        self.within_all(&o, &l);
+        self.same_rows(&o, &l, &aligned(l.ndv.len(), 0));
         o.facts = l.facts.by_position(input.schema(), plan.schema());
         let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;
@@ -568,47 +552,28 @@ impl<'a> Analyzer<'a> {
         o
     }
 
-    /// The first columns of `o` hold exactly the values of `l`'s columns.
-    pub fn equal_ndv(&self, o: &Rel, l: &Rel) {
-        for (a, b) in o.ndv.iter().zip(&l.ndv) {
-            self.assert(a.eq(b));
-        }
-    }
-
-    /// `o` keeps every distinct value of `l`'s columns, but deduplicates by SQL
-    /// equality. For floats that can merge values that are distinct as bits
-    /// (`-0.0` and `0.0`), so only `<=` is asserted there.
+    /// `o` keeps every value of `l`'s columns: `ndv ≥` its input's. Not for
+    /// floats: deduplicating by SQL equality can merge values that are
+    /// distinct as bits (`-0.0` and `0.0`).
     pub fn kept_values(&self, plan: &LogicalPlan, o: &Rel, l: &Rel) {
         for (j, (a, b)) in o.ndv.iter().zip(&l.ndv).enumerate() {
-            if plan.schema().field(j).data_type().is_floating() {
-                self.assert(a.le(b));
-            } else {
-                self.assert(a.eq(b));
+            if !plan.schema().field(j).data_type().is_floating() {
+                self.assert(a.ge(b));
             }
         }
     }
 
-    /// `o`'s rows are a subset of `l`'s.
-    pub fn subset_ndv(&self, o: &Rel, l: &Rel) {
-        for (a, b) in o.ndv.iter().zip(&l.ndv) {
-            self.assert(a.le(b));
-        }
-    }
-
-    /// Bounds output column `v`, computed by `e` over the rows of `input`.
+    /// Bounds output column `v`, computed by `e` over the rows of `input`, if
+    /// `e` is not a column: those the axioms relate.
     pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &Rel) {
-        if let Some(c) = key_column(input, e)
-            && let Ok(i) = input.schema().index_of_column(&c)
-        {
-            // The same values, or an injective image of them.
-            self.assert(v.eq(&l.ndv[i]));
-        } else if let Some(bound) = expr_bound(e, input, l, self.max_product) {
+        if let Some(bound) = expr_bound(e, input, l, self.max_product) {
             self.assert(v.le(bound));
         }
     }
 
-    /// Tightens the NDVs of `o`, the output of filtering `l` by `predicate`.
-    pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &Rel, l: &Rel) {
+    /// `ndv(a) = ndv(b)` on `o`, the output of filtering `input` by
+    /// `predicate`, for each `a = b` it holds.
+    pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &Rel) {
         // SQL equality on floats identifies values that are distinct as bits
         // (`-0.0 = 0.0`), so these rules skip float columns.
         let index = |e: &Expr| {
@@ -625,11 +590,15 @@ impl<'a> Analyzer<'a> {
             {
                 // Every surviving row has a = b (neither NULL).
                 self.assert(o.ndv[a].eq(&o.ndv[b]));
-                self.assert(o.ndv[a].le(&l.ndv[b]));
-                self.assert(o.ndv[b].le(&l.ndv[a]));
             }
         }
     }
+}
+
+/// `n` columns paired with the same positions of another relation's, from
+/// position `at` on: `(at + i, i)`.
+pub(crate) fn aligned(n: usize, at: usize) -> Vec<(usize, usize)> {
+    (0..n).map(|i| (at + i, i)).collect()
 }
 
 /// The size of each output column's domain in `facts`, if finite.
