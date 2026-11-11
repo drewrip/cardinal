@@ -5,7 +5,9 @@
 //! cardinality and, per output column, one bounding its number of distinct
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
-//! inputs', and the [axioms](crate::axioms) to what holds of any rows.
+//! inputs' and records the relation, and how its rows are its inputs', in
+//! the [`Analyzer`]'s ledger; once the walk is done, the
+//! [axioms](crate::axioms) pass asserts what holds of them.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -49,6 +51,8 @@ pub(crate) struct TableVar {
 /// least and greatest value; and what is known of its rows whatever the data.
 #[derive(Clone)]
 pub struct Rel {
+    /// Its record in [`Analyzer::relations`].
+    pub(crate) id: RelId,
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
     /// Per output column, the ends of an interval holding each of its
@@ -65,6 +69,46 @@ pub struct Rel {
     pub(crate) rows: Rows,
     /// The stored table this relation's rows are distinct rows of, if any.
     pub(crate) origin: Option<Origin>,
+}
+
+/// A relation's index in [`Analyzer::relations`].
+pub(crate) type RelId = usize;
+
+/// A relation as the [axioms](crate::axioms) read it: its final state, the
+/// operator that made it, and where it came from.
+pub(crate) struct Relation {
+    /// The relation once its rule is done with it ([`Analyzer::finish`]).
+    pub(crate) rel: Rel,
+    pub(crate) plan: LogicalPlan,
+    /// For a stored table's scan, before pushed-down filters: the scan,
+    /// whose declared keys bound it.
+    pub(crate) scan: Option<TableScan>,
+    /// The frame of the node it was made for, for [`crate::trace`].
+    pub(crate) frame: Option<usize>,
+    /// The node it is the output of: none for a scan's raw rows.
+    pub(crate) node: Option<usize>,
+}
+
+/// How a rule found one relation's rows are another's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkKind {
+    /// [`Analyzer::same_rows`].
+    SameRows,
+    /// [`Analyzer::subset`].
+    Subset,
+    /// [`Analyzer::wider`].
+    Wider,
+}
+
+/// That relation `o`'s rows are relation `l`'s, as `kind` says, with
+/// `columns` pairing a column of `o` with the column of `l` it holds.
+pub(crate) struct Link {
+    pub(crate) kind: LinkKind,
+    pub(crate) o: RelId,
+    pub(crate) l: RelId,
+    pub(crate) columns: Vec<(usize, usize)>,
+    /// The frame of the node whose rule found it.
+    pub(crate) frame: Option<usize>,
 }
 
 /// Facts about a relation's rows that also hold for any subset of them, so
@@ -106,10 +150,12 @@ impl Rows {
     }
 }
 
-/// The state of one analysis as it walks a plan: the Z3 solver and every
-/// variable and assertion so far. Each [rule](crate::rules) and
-/// [axiom](crate::axioms) is one of its methods. Made by
-/// [`Analysis`](crate::Analysis).
+/// The state of one analysis: the Z3 solver and every variable and
+/// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
+/// operator's [rule](crate::rules), which asserts what the operator adds
+/// and records its relations and links; the [axioms](crate::axioms) pass
+/// then asserts what holds of them. Each rule and axiom is one of its
+/// methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
     pub(crate) solver: Solver,
     pub(crate) resolve: &'a dyn Fn(&TableScan) -> ScanKind,
@@ -123,8 +169,13 @@ pub struct Analyzer<'a> {
     /// Every plan node, children before parents, so a validator can evaluate
     /// them bottom-up.
     pub(crate) nodes: Vec<Node>,
-    /// Every relation made of distinct rows of one stored table, by cardinality.
-    pub(crate) origins: Vec<(Int, Origin)>,
+    /// Every relation the rules made, by [`RelId`], for the axioms.
+    pub(crate) relations: Vec<Relation>,
+    /// Every link the rules found between relations, for the axioms.
+    pub(crate) links: RefCell<Vec<Link>>,
+    /// Every count variable (rows, distinct values, a table's size), with
+    /// the frame it was made in, for the axioms: none is negative.
+    pub(crate) counts: Vec<(Int, Option<usize>)>,
     /// Ids of visited nodes not yet claimed by a parent.
     pub(crate) frontier: Vec<usize>,
     pub(crate) counter: usize,
@@ -300,7 +351,9 @@ impl<'a> Analyzer<'a> {
             nodes: Vec::new(),
             frontier: Vec::new(),
             counter: 0,
-            origins: Vec::new(),
+            relations: Vec::new(),
+            links: RefCell::new(Vec::new()),
+            counts: Vec::new(),
             max_product,
             foreign_keys,
             trace,
@@ -328,17 +381,17 @@ impl<'a> Analyzer<'a> {
         v
     }
 
-    #[track_caller]
+    /// A variable counting something: rows or distinct values.
     pub(crate) fn new_var(&mut self, name: String) -> Int {
         let v = Int::new_const(name.as_str());
-        self.non_negative(&v);
+        self.counts.push((v.clone(), self.owners.last().copied()));
         self.vars.push((name, v.clone()));
         v
     }
 
     /// Creates a fresh relation for `plan`'s output: a cardinality variable
-    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, with the constraints
-    /// every relation satisfies.
+    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, recorded in
+    /// [`Self::relations`] for the axioms.
     pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> Rel {
         let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;
@@ -352,15 +405,7 @@ impl<'a> Analyzer<'a> {
         let ndv = fields
             .iter()
             .enumerate()
-            .map(|(j, t)| {
-                let v = self.new_var(format!("{base}_c{j}"));
-                self.ndv_within_rows(&v, &card);
-                self.nonempty_ndv(&v, &card);
-                if *t == DataType::Boolean {
-                    self.boolean_ndv(&v);
-                }
-                v
-            })
+            .map(|(j, _)| self.new_var(format!("{base}_c{j}")))
             .collect();
         let schema = plan.schema();
         let (mut min, mut max, mut units) = (vec![], vec![], vec![]);
@@ -371,6 +416,7 @@ impl<'a> Analyzer<'a> {
             units.push(u);
         }
         let rel = Rel {
+            id: self.relations.len(),
             card,
             ndv,
             min,
@@ -380,8 +426,30 @@ impl<'a> Analyzer<'a> {
             rows: Rows::default(),
             origin: None,
         };
-        self.key_ndv(plan, &rel);
+        self.relations.push(Relation {
+            rel: rel.clone(),
+            plan: plan.clone(),
+            scan: None,
+            frame: self.owners.last().copied(),
+            node: None,
+        });
         rel
+    }
+
+    /// Records `rel` as its rule leaves it, with the facts found of its
+    /// rows, for the axioms; with `node` if it is that node's output.
+    pub(crate) fn finish(&mut self, rel: &Rel, node: Option<usize>) {
+        let r = &mut self.relations[rel.id];
+        r.rel = rel.clone();
+        r.node = node;
+    }
+
+    /// Records that `o`'s rows are `l`'s as `kind` says, with `columns`
+    /// pairing their columns: [`Self::same_rows`], [`Self::subset`] or
+    /// [`Self::wider`], asserted by the axioms.
+    pub(crate) fn link(&self, o: &Rel, kind: LinkKind, l: &Rel, columns: &[(usize, usize)]) {
+        let frame = self.owners.last().copied();
+        self.links.borrow_mut().push(Link { kind, o: o.id, l: l.id, columns: columns.to_vec(), frame });
     }
 
     /// The unquoted name of a variable created by `new_var`.
@@ -412,7 +480,7 @@ impl<'a> Analyzer<'a> {
 
     /// Asserts `b`, an instance of axiom `rule`, for no node in particular.
     #[track_caller]
-    pub(crate) fn assert_named(&self, rule: &'static str, b: Bool) {
+    pub(crate) fn assert_axiom(&self, rule: &'static str, b: Bool) {
         if self.trace {
             self.log.borrow_mut().push(Logged { expr: b.clone(), frame: None, at: Location::caller(), rule: Some(rule) });
         }
@@ -427,7 +495,7 @@ impl<'a> Analyzer<'a> {
         // with operator variables (which start with `op`).
         let symbol = format!("T{}_{}", self.tables.len(), symbol(display));
         let var = Int::new_const(symbol.as_str());
-        self.non_negative(&var);
+        self.counts.push((var.clone(), self.owners.last().copied()));
         self.tables.insert(
             key.to_string(),
             TableVar {
@@ -456,12 +524,6 @@ impl<'a> Analyzer<'a> {
         self.owners.push(frame);
         let (out, raw_scan) = self.visit_node(plan);
         let (raw_min_vars, raw_max_vars) = std::mem::take(&mut self.raw_ranges);
-        self.apply_domains(plan, &out);
-        if let Some(o) = &out.origin
-            && o.informative()
-        {
-            self.origins.push((out.card.clone(), o.clone()));
-        }
         let inputs = self.frontier.split_off(mark);
         debug_assert_eq!(inputs.len(), plan.inputs().len());
         let var = self.name_of(&out.card);
@@ -479,6 +541,7 @@ impl<'a> Analyzer<'a> {
             dependencies: vec![],
         });
         self.node_at.insert(address(plan), self.nodes.len() - 1);
+        self.finish(&out, Some(self.nodes.len() - 1));
         // Those of plans not yet visited wait for them; those of plans never
         // visited (rewritten copies) are dropped at the end.
         for (at, d) in std::mem::take(&mut *self.relied.borrow_mut()) {
@@ -493,77 +556,6 @@ impl<'a> Analyzer<'a> {
         self.frontier.push(self.nodes.len() - 1);
         out
     }
-
-    /// What `rel`'s value domains and row facts give: the domain axioms,
-    /// and the bounds unique columns, summed columns and padded columns put
-    /// on its rows.
-    pub(crate) fn apply_domains(&self, plan: &LogicalPlan, rel: &Rel) {
-        let schema = plan.schema();
-        if rel.facts.contradictory() {
-            self.empty_domain(&rel.card);
-        }
-        for (j, v) in rel.ndv.iter().enumerate() {
-            let col = Expr::Column(Column::from(schema.qualified_field(j)));
-            match rel.facts.dom(&col, schema).size() {
-                Some(0) => self.empty_domain(&rel.card),
-                Some(n) if n <= u64::MAX as u128 => self.ndv_within_domain(v, n as u64),
-                _ => {}
-            }
-        }
-        self.range_within_domain(plan, rel);
-        // A unique set of columns has a distinct combination on every row,
-        // as do the columns of it that determine the rest. Columns with few
-        // possible values count as constants, which keeps the product linear
-        // where possible.
-        for key in &rel.rows.keys {
-            let positions: Option<Vec<usize>> = key
-                .iter()
-                .map(|e| match e {
-                    Expr::Column(c) => schema.index_of_column(c).ok(),
-                    _ => None,
-                })
-                .collect();
-            let Some(positions) = positions else { continue };
-            let sizes: Vec<Option<u128>> = positions.iter().map(|&i| rel.facts.dom(&key_col(plan, i), schema).size()).collect();
-            let mut constant: u128 = 1;
-            let mut factors: Vec<&Int> = vec![];
-            for i in self.determining(plan, &positions, &sizes) {
-                match rel.facts.dom(&key_col(plan, i), schema).size() {
-                    Some(k) => constant = constant.saturating_mul(k),
-                    None => factors.push(&rel.ndv[i]),
-                }
-            }
-            if constant > u64::MAX as u128 {
-                continue;
-            }
-            if let Some(p) = product(&factors, self.max_product) {
-                self.assert(rel.card.le(p * int(constant as u64)));
-            }
-        }
-        // Rows whose values are each at least `k` and sum to at most `bound`
-        // number at most `bound / k`.
-        for (c, bound) in &rel.rows.sums {
-            if let Some(k) = rel.facts.dom(c, schema).min()
-                && k >= 1
-                && k <= u64::MAX as i128
-            {
-                self.assert((&rel.card * int(k as u64)).le(bound));
-            }
-        }
-        for (c, nulls, values) in &rel.rows.nulls {
-            let d = rel.facts.dom(c, schema);
-            if d.is_null_only() {
-                self.assert(rel.card.le(nulls));
-            } else if d.never_null() {
-                self.assert(rel.card.le(values));
-            }
-        }
-    }
-}
-
-/// Output column `i` of `plan`, as an expression.
-fn key_col(plan: &LogicalPlan, i: usize) -> Expr {
-    Expr::Column(Column::from(plan.schema().qualified_field(i)))
 }
 
 /// The address of a plan node, which identifies it while the plan is

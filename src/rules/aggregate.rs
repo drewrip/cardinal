@@ -6,7 +6,7 @@ use datafusion::logical_expr::logical_plan::{Aggregate, LogicalPlan};
 use z3::ast::Int;
 
 use super::{col, column_index, determined, key_column, strip_alias, unproject};
-use crate::analysis::{Analyzer, Rel, int, product};
+use crate::analysis::{Analyzer, LinkKind, Rel, int, product};
 use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
 
@@ -73,7 +73,7 @@ impl<'a> Analyzer<'a> {
             }
             factors.push(&o.ndv[j]);
         }
-        self.wider(&o, &l, &columns);
+        self.link(&o, LinkKind::Wider, &l, &columns);
         if let Some(p) = product(&factors, self.max_product) {
             self.assert(o.card.le(p));
         }

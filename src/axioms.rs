@@ -8,13 +8,15 @@
 //!
 //! # Spec
 //!
-//! - **Input**: the quantities an analysis knows: each relation's rows,
-//!   `ndv`, `min` and `max` variables, the value domains its rules found,
-//!   and the declared keys.
+//! - **Input**: what the [rules](crate::rules) recorded as they visited the
+//!   plan: each relation, with its rows, `ndv`, `min` and `max` variables
+//!   and the value domains, keys and origin found of its rows; each link
+//!   between two relations; every count variable; the nodes; and the
+//!   declared keys.
 //! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
-//!   names the function that asserted it, or the axiom's name. No
-//!   quantifiers: Rust decides where an axiom applies, Z3 does the
-//!   arithmetic.
+//!   names the function that asserted it, or the axiom's name, and the node
+//!   it is about. No quantifiers: Rust decides where an axiom applies, Z3
+//!   does the arithmetic.
 //! - **Guarantees**: each axiom holds for any data; a schema axiom for any
 //!   data satisfying the declared keys. The tests deciding where an
 //!   axiom applies are conservative: missing a case loses an axiom, never
@@ -22,29 +24,33 @@
 //! - **Not done**: selectivities and match shares get no axioms; contexts
 //!   outside the relevant set are not related.
 //!
-//! Axioms come in two kinds, by when they are asserted. Both are asserted
-//! in every analysis.
+//! [`assert_all`] asserts every axiom, once the rules are done, before any
+//! fact. They are grouped by what they range over.
 //!
 //! # Axioms on each relation
 //!
-//! Asserted as the analysis makes each relation's variables, by a method of
-//! [`Analyzer`] each:
+//! One method of [`Analyzer`] each:
 //!
 //! | Axiom | Claim |
 //! |---|---|
-//! | `non-negative` | [`Analyzer::non_negative`] |
+//! | `non-negative` | [`Analyzer::non_negative`], of every count variable |
 //! | `ndv within rows` | [`Analyzer::ndv_within_rows`] |
 //! | `nonempty ndv` | [`Analyzer::nonempty_ndv`] |
 //! | `boolean ndv` | [`Analyzer::boolean_ndv`] |
+//! | `key ndv` | [`Analyzer::key_ndv`] |
+//! | `composite key` | [`Analyzer::composite_key`] |
 //! | `empty domain` | [`Analyzer::empty_domain`] |
 //! | `ndv within domain` | [`Analyzer::ndv_within_domain`] |
 //! | `range within domain` | [`Analyzer::range_within_domain`] |
-//! | `key ndv` | [`Analyzer::key_ndv`] |
-//! | `composite key` | [`Analyzer::composite_key`] |
-//! | `disjoint` | [`Analyzer::disjoint`] |
+//! | `unique columns` | `Analyzer::unique_columns` |
+//! | `bounded sum` | [`Analyzer::bounded_sum`] |
+//! | `nulls and values` | [`Analyzer::nulls_and_values`] |
 //!
-//! Three more relate a relation to an input, asserted by the rules that
-//! find them hold, which state only what the operator adds:
+//! # Axioms on each link
+//!
+//! A rule that finds its output's rows are an input's records a link
+//! (`Analyzer::link`); the axiom states what follows, so the rule states
+//! only what its operator adds:
 //!
 //! | Axiom | Claim |
 //! |---|---|
@@ -56,19 +62,25 @@
 //! Filter: subset(o, l)  ⇒  X ≤ l, ndv(c) ≤ ndv_l(c), c's range within l's
 //! ```
 //!
-//! These also hold between named rows, but rows need not be named to be
+//! These also hold between contexts, but rows need no context to be
 //! related: a filter on a subquery's value has no [`Context`].
 //!
-//! # Axioms between named rows
+//! # Axioms on one table's rows
 //!
-//! Once every operator is visited, [`Analyzer::named_rows`] names each
-//! operator's rows as a [`Context`] and collects the quantities of those
-//! rows in a [`Space`]. The functions below relate them, wherever terms for
-//! them exist, and each [`Axiom`] carries its name.
+//! | Axiom | Claim |
+//! |---|---|
+//! | `disjoint` | [`Analyzer::disjoint`] |
+//!
+//! # Axioms between contexts
+//!
+//! [`Analyzer::between_contexts`] gives each operator's rows its
+//! [`Context`], canonicalized, and collects the quantities of those
+//! contexts in a [`Space`]. The functions below relate them, wherever terms
+//! for them exist, and each [`Axiom`] carries its name.
 //!
 //! ```text
-//!  operators ──name──▶ Space: |C|, ndv(K | C), min, max ──axioms──▶ Z3
-//!                       of the relevant contexts
+//!  operators ──context──▶ Space: |C|, ndv(K | C), min, max ──axioms──▶ Z3
+//!                         of the relevant contexts
 //! ```
 //!
 //! | Axiom | Claim |
@@ -107,14 +119,16 @@
 //!   tables, atoms, conditions and predicates.
 
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{Column, Constraint, ScalarValue};
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use z3::ast::{Bool, Int};
 
-use crate::analysis::{Analyzer, Node, Rel, int, product};
+use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
@@ -124,8 +138,10 @@ use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
 
-/// [Axioms on each relation](self#axioms-on-each-relation), one function
-/// each, so a trace names the axiom a constraint is from.
+/// [Axioms on each relation](self#axioms-on-each-relation), on each
+/// [link](self#axioms-on-each-link) and on
+/// [one table's rows](self#axioms-on-one-tables-rows), one function each, so
+/// a trace names the axiom a constraint is from.
 impl<'a> Analyzer<'a> {
     /// `non-negative`.
     ///
@@ -257,7 +273,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `disjoint`, between relations. [`disjoint`](fn@disjoint) finds it
-    /// between named rows.
+    /// between contexts.
     ///
     /// - **Claim**: relations whose rows no row of the table is in both of
     ///   are apart: `|X| + |Y| ≤ |T|`.
@@ -273,29 +289,42 @@ impl<'a> Analyzer<'a> {
     /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
     /// ```
     pub fn disjoint(&mut self) {
-        let origins: Vec<Origin> = self.origins.iter().map(|(_, o)| o.clone()).collect();
+        // Nodes' outputs of distinct rows of one stored table, in node order.
+        let mut of: Vec<(usize, Int, Origin)> = self
+            .relations
+            .iter()
+            .filter_map(|r| {
+                let o = r.rel.origin.as_ref().filter(|o| o.informative())?;
+                Some((r.node?, r.rel.card.clone(), o.clone()))
+            })
+            .collect();
+        of.sort_by_key(|(node, _, _)| *node);
+        let (cards, origins): (Vec<Int>, Vec<Origin>) = of.into_iter().map(|(_, c, o)| (c, o)).unzip();
         let (classes, cliques) = origin::disjoint_classes(&origins, 64);
         let mut part: HashMap<usize, Int> = HashMap::new();
         for clique in cliques {
             let table = self.tables[&origins[classes[clique[0]][0]].table].var.clone();
             let mut sum = vec![];
             for c in clique {
-                if !part.contains_key(&c) {
-                    let v = self.new_var(format!("part{c}"));
-                    for &m in &classes[c] {
-                        self.assert(self.origins[m].0.le(&v));
+                let v = match part.entry(c) {
+                    Entry::Occupied(e) => e.get().clone(),
+                    Entry::Vacant(e) => {
+                        let v = self.new_var(format!("part{c}"));
+                        for &m in &classes[c] {
+                            self.assert(cards[m].le(&v));
+                        }
+                        self.assert(v.le(&table));
+                        e.insert(v).clone()
                     }
-                    self.assert(v.le(&table));
-                    part.insert(c, v);
-                }
-                sum.push(part[&c].clone());
+                };
+                sum.push(v);
             }
             self.assert(Int::add(&sum).le(&table));
         }
     }
 
     /// `same rows`, between relations. [`same_rows`](fn@same_rows) and
-    /// [`subset`](fn@subset) find it between named rows.
+    /// [`subset`](fn@subset) find it between contexts.
     ///
     /// - **Claim**: `X = l`; for each pair `(j, i)` of `columns`, `ndv(o.j)
     ///   = ndv(l.i)` and `o.j`'s range within `l.i`'s.
@@ -311,7 +340,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `subset`, between relations. [`subset`](fn@subset) finds it between
-    /// named rows.
+    /// contexts.
     ///
     /// - **Claim**: `X ≤ l`, and the claim of [`Self::wider`].
     /// - **When**: a rule finds `o`'s rows are among `l`'s, as many times or
@@ -322,7 +351,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// `wider rows`, between relations. [`wider`](fn@wider) finds it between
-    /// named rows.
+    /// contexts.
     ///
     /// - **Claim**: for each pair `(j, i)` of `columns`, `ndv(o.j) ≤
     ///   ndv(l.i)` and `o.j`'s range within `l.i`'s.
@@ -338,19 +367,181 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Every [axiom between named rows](self#axioms-between-named-rows)
+    /// Every [axiom on a relation](self#axioms-on-each-relation) of `r`,
+    /// but `non-negative` and `disjoint`. Returns the functional dependency
+    /// [`Self::unique_columns`] relied on, for `r`'s node to record.
+    fn on_relation(&self, r: &Relation) -> Vec<Dependency> {
+        let (rel, plan) = (&r.rel, &r.plan);
+        for (j, v) in rel.ndv.iter().enumerate() {
+            self.ndv_within_rows(v, &rel.card);
+            self.nonempty_ndv(v, &rel.card);
+            if plan.schema().field(j).data_type() == &DataType::Boolean {
+                self.boolean_ndv(v);
+            }
+        }
+        self.key_ndv(plan, rel);
+        if let Some(scan) = &r.scan {
+            self.composite_key(scan, rel);
+        }
+        let schema = plan.schema();
+        if rel.facts.contradictory() {
+            self.empty_domain(&rel.card);
+        }
+        for (j, v) in rel.ndv.iter().enumerate() {
+            match rel.facts.dom(&key_col(plan, j), schema).size() {
+                Some(0) => self.empty_domain(&rel.card),
+                Some(n) if n <= u64::MAX as u128 => self.ndv_within_domain(v, n as u64),
+                _ => {}
+            }
+        }
+        self.range_within_domain(plan, rel);
+        let dependencies = self.unique_columns(plan, rel);
+        self.bounded_sum(plan, rel);
+        self.nulls_and_values(plan, rel);
+        dependencies
+    }
+
+    /// `unique columns`.
+    ///
+    /// - **Claim**: `X ≤ Π ndv` of a set of columns the rules found unique
+    ///   together, or of those of it that determine the rest; a column whose
+    ///   domain holds `n` values counts as `n`, which keeps the product
+    ///   linear where it can.
+    /// - **Why**: each row has its own combination of their values.
+    ///
+    /// Returns the functional dependency it relied on to drop columns.
+    pub(crate) fn unique_columns(&self, plan: &LogicalPlan, rel: &Rel) -> Vec<Dependency> {
+        let schema = plan.schema();
+        let mut relied = vec![];
+        for key in &rel.rows.keys {
+            let positions: Option<Vec<usize>> = key
+                .iter()
+                .map(|e| match e {
+                    Expr::Column(c) => schema.index_of_column(c).ok(),
+                    _ => None,
+                })
+                .collect();
+            let Some(positions) = positions else { continue };
+            let sizes: Vec<Option<u128>> = positions.iter().map(|&i| rel.facts.dom(&key_col(plan, i), schema).size()).collect();
+            let (determining, dependency) = self.determining_with(plan, &positions, &sizes);
+            relied.extend(dependency);
+            let mut constant: u128 = 1;
+            let mut factors: Vec<&Int> = vec![];
+            for i in determining {
+                match rel.facts.dom(&key_col(plan, i), schema).size() {
+                    Some(k) => constant = constant.saturating_mul(k),
+                    None => factors.push(&rel.ndv[i]),
+                }
+            }
+            if constant > u64::MAX as u128 {
+                continue;
+            }
+            if let Some(p) = product(&factors, self.max_product) {
+                self.assert(rel.card.le(p * int(constant as u64)));
+            }
+        }
+        relied
+    }
+
+    /// `bounded sum`.
+    ///
+    /// - **Claim**: `k·X ≤ b` for a column of non-negative integers summing
+    ///   to at most `b` over the rows (a GROUP BY's counts), whose domain
+    ///   holds only values `≥ k ≥ 1`.
+    /// - **Why**: each row adds at least `k`.
+    pub fn bounded_sum(&self, plan: &LogicalPlan, rel: &Rel) {
+        for (c, bound) in &rel.rows.sums {
+            if let Some(k) = rel.facts.dom(c, plan.schema()).min()
+                && k >= 1
+                && k <= u64::MAX as i128
+            {
+                self.assert((&rel.card * int(k as u64)).le(bound));
+            }
+        }
+    }
+
+    /// `nulls and values`.
+    ///
+    /// - **Claim**: `X ≤ n` for a column at most `n` rows have NULL (an outer
+    ///   join's padded rows) if its domain holds only NULL; `X ≤ v` for one
+    ///   at most `v` rows have non-NULL if it is never NULL.
+    /// - **Why**: every row is one of those counted.
+    pub fn nulls_and_values(&self, plan: &LogicalPlan, rel: &Rel) {
+        for (c, nulls, values) in &rel.rows.nulls {
+            let d = rel.facts.dom(c, plan.schema());
+            if d.is_null_only() {
+                self.assert(rel.card.le(nulls));
+            } else if d.never_null() {
+                self.assert(rel.card.le(values));
+            }
+        }
+    }
+
+    /// Every [axiom between contexts](self#axioms-between-contexts)
     /// over the quantities of this analysis's own operators, each
-    /// operator's rows named as facts name them, among the
+    /// operator's rows given the context facts give them, among the
     /// [relevant contexts](self#relevant-contexts).
-    pub fn named_rows(&mut self) {
+    pub fn between_contexts(&mut self) {
         let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
         let logical = Logical::new(&self.nodes, &scans);
         let mut space = Space::default();
         let seeds = add_nodes(&mut space, &self.nodes, &logical);
         for a in space.axioms(&space.relevant(&seeds)) {
-            self.assert_named(a.rule, a.claim);
+            self.assert_axiom(a.rule, a.claim);
         }
     }
+
+    /// Runs `f` with `frame` as the node being visited, so a trace gives
+    /// what it asserts to that node.
+    fn in_frame<T>(&mut self, frame: Option<usize>, f: impl FnOnce(&Self) -> T) -> T {
+        let n = self.owners.len();
+        self.owners.extend(frame);
+        let out = f(self);
+        self.owners.truncate(n);
+        out
+    }
+}
+
+/// Asserts every axiom of `a`, once its rules have visited the plan: that
+/// no count is negative, those on each relation the rules made, on each
+/// link they found, on the rows of one table, and between contexts. Z3's
+/// time depends on the order: with the counts last, plan bounds took
+/// several times as long on some queries.
+pub fn assert_all(a: &mut Analyzer) {
+    for (v, frame) in std::mem::take(&mut a.counts) {
+        a.in_frame(frame, |a| a.non_negative(&v));
+    }
+    let relations = std::mem::take(&mut a.relations);
+    for r in &relations {
+        let relied = a.in_frame(r.frame, |a| a.on_relation(r));
+        if let Some(node) = r.node {
+            for d in relied {
+                if !a.nodes[node].dependencies.contains(&d) {
+                    a.nodes[node].dependencies.push(d);
+                }
+            }
+        }
+    }
+    for l in a.links.take() {
+        let (o, from) = (&relations[l.o].rel, &relations[l.l].rel);
+        a.in_frame(l.frame, |a| match l.kind {
+            LinkKind::SameRows => a.same_rows(o, from, &l.columns),
+            LinkKind::Subset => a.subset(o, from, &l.columns),
+            LinkKind::Wider => a.wider(o, from, &l.columns),
+        });
+    }
+    a.relations = relations;
+    a.disjoint();
+    // `disjoint`'s parts.
+    for (v, frame) in std::mem::take(&mut a.counts) {
+        a.in_frame(frame, |a| a.non_negative(&v));
+    }
+    a.between_contexts();
+}
+
+/// Output column `i` of `plan`, as an expression.
+fn key_col(plan: &LogicalPlan, i: usize) -> Expr {
+    Expr::Column(Column::from(plan.schema().qualified_field(i)))
 }
 
 /// Adds the quantities of `nodes`' rows, named by `logical`, to `space`.
@@ -413,7 +604,7 @@ pub struct Axiom {
     pub rule: &'static str,
 }
 
-/// The quantities of named rows (`|C|`, `ndv(K | C)`, `min`, `max`), each
+/// The quantities of contexts (`|C|`, `ndv(K | C)`, `min`, `max`), each
 /// with the Z3 terms it equals: the variables of the operators whose rows
 /// it is of.
 #[derive(Default)]
@@ -827,7 +1018,7 @@ pub fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant:
     out
 }
 
-/// `disjoint`, between named rows. [`Analyzer::disjoint`] finds it between
+/// `disjoint`, between contexts. [`Analyzer::disjoint`] finds it between
 /// relations.
 ///
 /// - **Claim**: rows that no row satisfies the conditions of both are apart

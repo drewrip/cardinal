@@ -11,8 +11,8 @@
 //!
 //! Every rule and axiom is stated in these terms.
 //!
-//! - `C`, `D`: [`Context`]s, sets of rows named by how they derive from the
-//!   base tables. An *SPJ* ([`Context::Spj`]) is the cross product of its
+//! - `C`, `D`: [`Context`]s, canonical relational expressions: sets of rows by
+//!   how they derive from the base tables. An *SPJ* ([`Context::Spj`]) is the cross product of its
 //!   tables and atoms, filtered by its predicates and its semi and anti join
 //!   conditions ([`Exists`]); any other operator's rows are
 //!   [`Context::Derived`]. Two SPJs have the *same inputs* if they have the

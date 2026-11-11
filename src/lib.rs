@@ -6,13 +6,44 @@
 //! prove on the root's cardinality `X` ([`Analysis::bounds`]), or on every
 //! operator's and their sum ([`Analysis::plan_bounds`]).
 //!
-//! The constraints come from three places:
+//! The constraints come from three passes, in order:
 //!
-//! - [`rules`]: each operator's output given its inputs, one rule per operator.
-//! - [`axioms`]: what holds of any rows whatever made them, on each relation and
-//!   between rows named the same way ([`rows`]), in every analysis.
-//! - [`facts`]: counts read off plans that ran, added as claims on the
-//!   query's operators ([`Analysis::with_facts`]).
+//! 1. [`rules`]: a walk over the plan, one rule per operator, asserting what
+//!    the operator adds and recording each relation it makes and how its
+//!    rows are its inputs'.
+//! 2. [`axioms`]: what holds of any rows whatever made them, asserted over
+//!    those records and between [contexts](rows), in every analysis.
+//! 3. [`facts`]: counts read off plans that ran, added as claims on the
+//!    query's operators ([`Analysis::with_facts`]) where consistent with the
+//!    first two.
+//!
+//! ```text
+//!                 SQL ──parse, optimize──▶ LogicalPlan
+//!                                               │
+//! ┌─ 1. rules: Analyzer::visit ─────────────────▼────────────┐
+//! │ bottom-up, one rule per operator                         │
+//! │   asserts what the operator adds   X ≤ l·r, X = Σ, …     │──┐
+//! │   records each relation            Relation: variables,  │  │
+//! │                                    domains, keys, origin │  │
+//! │   records how relations relate     Link: same rows,      │  │
+//! │                                    subset, wider rows    │  │
+//! └─────────────────────────────────────────────┬────────────┘  │
+//!                       relations, links, nodes │               │
+//! ┌─ 2. axioms: axioms::assert_all ─────────────▼────────────┐  │
+//! │ every count     ≥ 0                                      │  │
+//! │ each relation   ndv ≤ X, keys, domains, row facts        │  │
+//! │ each link       X ≤ l, ndv ≤ ndv_l, ranges within        │  ├─▶ Z3
+//! │ one table       disjoint filters split it                │  │
+//! │ contexts        ⊆, fewer, joins, semi + anti, …          │──┘
+//! └─────────────────────────────────────────────┬────────────┘
+//!                  Analysis: constraints, nodes │
+//! ┌─ 3. facts: Analysis::with_facts ────────────▼────────────┐
+//! │ observe ─▶ derive ─▶ apply                               │
+//! │ a claim on an operator, kept if consistent with 1, 2     │──▶ Z3
+//! └─────────────────────────────────────────────┬────────────┘
+//!                                               ▼
+//!                          bounds search: Analysis::bounds, plan_bounds
+//! ```
 
 pub mod analysis;
 pub mod axioms;
@@ -410,8 +441,7 @@ fn analyze_with(
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
     let root = a.visit(plan).card;
-    a.disjoint();
-    a.named_rows();
+    axioms::assert_all(&mut a);
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();
     let assertions = a.solver.get_assertions().len();

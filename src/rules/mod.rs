@@ -21,16 +21,19 @@
 //! - **Output**: the operator's relation. That is fresh variables (`X`, the
 //!   output cardinality; per column `ndv`, and `min` and `max` for integer,
 //!   date, timestamp and decimal columns some range or key reads, related
-//!   only between columns of one unit and scale) and Z3 assertions relating
-//!   them to the inputs' (`l`, `r`).
+//!   only between columns of one unit and scale), Z3 assertions relating
+//!   them to the inputs' (`l`, `r`), and records for the
+//!   [axioms](crate::axioms): the relation, with what is known of its rows,
+//!   and each link between it and an input.
 //! - **Guarantees**: every assertion holds for every execution of the
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
 //!   this against data).
-//! - **Not done**: what holds of every relation whatever its operator is
-//!   not here: `ndv ≤ X`, a key's `ndv = X`, value domains bounding `ndv`,
-//!   and disjoint filters over one table. Those are [axioms](crate::axioms).
-//!   Nor what follows from rows being another's: a rule finds that its
+//! - **Not done**: no axiom is asserted here. What holds of every relation
+//!   whatever its operator (`ndv ≤ X`, a key's `ndv = X`, value domains
+//!   bounding `ndv`, disjoint filters over one table) is asserted by the
+//!   [axioms](crate::axioms) pass once every rule is done. So is what
+//!   follows from rows being another's: a rule records a link, that its
 //!   output is the [same rows](Analyzer::same_rows) as an input, a
 //!   [subset](Analyzer::subset) of them, or [holds](Analyzer::wider) their
 //!   rows, and the axiom states what follows. The rule states only what the
@@ -66,9 +69,10 @@
 //! their variables. Their inputs are still visited, so their scans count.
 //!
 //! A trace names each constraint's rule by the function that asserted it:
-//! the rule's own, a part of it it calls ([`Analyzer::join_sides`],
-//! [`Analyzer::within`], ...), or an axiom it calls ([`Analyzer::subset`],
-//! ...).
+//! the rule's own, or a part of it it calls ([`Analyzer::join_sides`],
+//! [`Analyzer::within`], ...). An axiom asserted for a relation or link a
+//! rule recorded is given to that rule's node, under the axiom's function
+//! ([`Analyzer::subset`], ...).
 
 mod aggregate;
 pub(crate) mod join;
@@ -86,7 +90,7 @@ use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::Int;
 
-use crate::analysis::{Analyzer, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
+use crate::analysis::{Analyzer, LinkKind, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
@@ -192,7 +196,7 @@ impl<'a> Analyzer<'a> {
                 None => self.expr_ndv(&o.ndv[j], e, &p.input, &l),
             }
         }
-        self.same_rows(&o, &l, &columns);
+        self.link(&o, LinkKind::SameRows, &l, &columns);
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
         o.rows = l.rows.rename(&|c| passed_column(plan, &p.expr, c));
         o.origin = l.origin.as_ref().map(|origin| {
@@ -226,7 +230,7 @@ impl<'a> Analyzer<'a> {
     pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> Rel {
         let l = self.visit(&f.input);
         let mut o = self.fresh("Filter", plan);
-        self.subset(&o, &l, &aligned(l.ndv.len(), 0));
+        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
         self.filter_ndv(&f.predicate, &f.input, &o);
         self.range_pairs(&f.predicate, plan, &o);
         o.facts = l.facts.clone();
@@ -248,7 +252,7 @@ impl<'a> Analyzer<'a> {
         o.facts = l.facts.clone();
         o.rows = l.rows.clone();
         o.origin = l.origin.clone();
-        self.subset(&o, &l, &aligned(l.ndv.len(), 0));
+        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
         self.kept_values(plan, &o, &l);
         let all: Vec<&Int> = l.ndv.iter().collect();
@@ -315,10 +319,10 @@ impl<'a> Analyzer<'a> {
         o.rows = l.rows.clone();
         o.origin = l.origin.clone();
         match s.fetch {
-            None => self.same_rows(&o, &l, &columns),
+            None => self.link(&o, LinkKind::SameRows, &l, &columns),
             // Top-k: exactly the first n rows.
             Some(n) => {
-                self.subset(&o, &l, &columns);
+                self.link(&o, LinkKind::Subset, &l, &columns);
                 self.assert(o.card.eq(min(&int(n as u64), &l.card)));
             }
         }
@@ -336,7 +340,7 @@ impl<'a> Analyzer<'a> {
         o.facts = l.facts.clone();
         o.rows = l.rows.clone();
         o.origin = l.origin.clone();
-        self.subset(&o, &l, &aligned(l.ndv.len(), 0));
+        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
         let skip = match lim.get_skip_type() {
             Ok(SkipType::Literal(k)) => Some(k as u64),
             _ => None,
@@ -380,7 +384,7 @@ impl<'a> Analyzer<'a> {
         let cards: Vec<&Int> = inputs.iter().map(|r| &r.card).collect();
         self.assert(o.card.eq(Int::add(&cards)));
         for input in &inputs {
-            self.subset(input, &o, &aligned(o.ndv.len(), 0));
+            self.link(input, LinkKind::Subset, &o, &aligned(o.ndv.len(), 0));
         }
         for (j, v) in o.ndv.iter().enumerate() {
             let parts: Vec<&Int> = inputs.iter().map(|r| &r.ndv[j]).collect();
@@ -461,7 +465,7 @@ impl<'a> Analyzer<'a> {
                         s.facts.add(&col, Dom::non_null(), schema);
                     }
                 }
-                self.composite_key(scan, &s);
+                self.relations[s.id].scan = Some(scan.clone());
                 let name = self.name_of(&s.card);
                 self.scans.push((name.clone(), display, s.card.clone()));
                 s.origin = Some(Origin::scan(&key, schema).narrow(&s.facts, schema));
@@ -472,7 +476,6 @@ impl<'a> Analyzer<'a> {
                     raw.fetch = None;
                     raw_scan = Some((name, self.names_of(&s), LogicalPlan::TableScan(raw)));
                     self.raw_ranges = (range_names(&s.min), range_names(&s.max));
-                    self.range_within_domain(plan, &s);
                 }
                 s
             }
@@ -484,8 +487,9 @@ impl<'a> Analyzer<'a> {
         // and may return more (DataFusion keeps the Limit above), so it bounds
         // nothing.
         if !scan.filters.is_empty() {
+            self.finish(&out, None);
             let mut f = self.fresh("ScanFilter", plan);
-            self.subset(&f, &out, &aligned(out.ndv.len(), 0));
+            self.link(&f, LinkKind::Subset, &out, &aligned(out.ndv.len(), 0));
             f.facts = out.facts.clone();
             // Filters applied inexactly may let through rows that fail them.
             if !inexact_filters(scan) {
@@ -541,7 +545,7 @@ impl<'a> Analyzer<'a> {
     pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
         let mut o = self.fresh(kind, plan);
-        self.same_rows(&o, &l, &aligned(l.ndv.len(), 0));
+        self.link(&o, LinkKind::SameRows, &l, &aligned(l.ndv.len(), 0));
         o.facts = l.facts.by_position(input.schema(), plan.schema());
         let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;

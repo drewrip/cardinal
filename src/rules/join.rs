@@ -6,7 +6,7 @@ use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 use z3::ast::Int;
 
 use super::{aligned, child_column, col, column_index, exact_index, key_column, strip_alias};
-use crate::analysis::{Analyzer, Rel, Rows, ScanKind, int, min};
+use crate::analysis::{Analyzer, LinkKind, Rel, Rows, ScanKind, int, min};
 use crate::domain::Facts;
 
 impl<'a> Analyzer<'a> {
@@ -482,27 +482,27 @@ impl<'a> Analyzer<'a> {
         let (nl, nr) = (l.ndv.len(), r.ndv.len());
         match join.join_type {
             JoinType::Inner => {
-                self.wider(o, l, &aligned(nl, 0));
-                self.wider(o, r, &aligned(nr, nl));
+                self.link(o, LinkKind::Wider, l, &aligned(nl, 0));
+                self.link(o, LinkKind::Wider, r, &aligned(nr, nl));
             }
             JoinType::Left => {
-                self.wider(o, l, &aligned(nl, 0));
+                self.link(o, LinkKind::Wider, l, &aligned(nl, 0));
                 self.kept(o, l, 0);
                 self.padded(o, r, nl);
             }
             JoinType::Right => {
                 self.padded(o, l, 0);
-                self.wider(o, r, &aligned(nr, nl));
+                self.link(o, LinkKind::Wider, r, &aligned(nr, nl));
                 self.kept(o, r, nl);
             }
             JoinType::Full => {
                 self.padded(o, l, 0);
                 self.padded(o, r, nl);
             }
-            JoinType::LeftSemi | JoinType::LeftAnti => self.subset(o, l, &aligned(nl, 0)),
-            JoinType::RightSemi | JoinType::RightAnti => self.subset(o, r, &aligned(nr, 0)),
-            JoinType::LeftMark => self.same_rows(o, l, &aligned(nl, 0)),
-            JoinType::RightMark => self.same_rows(o, r, &aligned(nr, 0)),
+            JoinType::LeftSemi | JoinType::LeftAnti => self.link(o, LinkKind::Subset, l, &aligned(nl, 0)),
+            JoinType::RightSemi | JoinType::RightAnti => self.link(o, LinkKind::Subset, r, &aligned(nr, 0)),
+            JoinType::LeftMark => self.link(o, LinkKind::SameRows, l, &aligned(nl, 0)),
+            JoinType::RightMark => self.link(o, LinkKind::SameRows, r, &aligned(nr, 0)),
         }
         // Matched equi-key values exist on both sides.
         let semi = match join.join_type {
@@ -518,7 +518,7 @@ impl<'a> Analyzer<'a> {
                 Some(if semi { (ia, ib) } else { (ib, ia) })
             })
             .collect();
-        self.wider(o, if semi { r } else { l }, &keys);
+        self.link(o, LinkKind::Wider, if semi { r } else { l }, &keys);
     }
 
     /// `side`'s columns, from `o`'s position `at` on, keep every value of
