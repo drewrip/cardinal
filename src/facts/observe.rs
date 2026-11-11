@@ -624,7 +624,7 @@ pub fn observe_translated(catalog: &Catalog, plan: &ObservedPlan, options: &Opti
 /// Each analyzer node of `nodes` an operator of `plan` became, by `built`
 /// (each operator and the subplans it became), with the operator and
 /// whether its count is only a floor for the node's rows.
-fn counts(plan: &ObservedPlan, nodes: &[Node], built: &[(usize, LogicalPlan)]) -> Vec<(usize, usize, bool)> {
+pub(crate) fn counts(plan: &ObservedPlan, nodes: &[Node], built: &[(usize, LogicalPlan)]) -> Vec<(usize, usize, bool)> {
     let states = states(plan);
     let stopped = stopped(plan);
     // Whether a runtime or optional filter pruned at or below each operator:

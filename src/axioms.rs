@@ -39,6 +39,7 @@
 //! | `boolean ndv` | [`Analyzer::boolean_ndv`] |
 //! | `key ndv` | [`Analyzer::key_ndv`] |
 //! | `composite key` | [`Analyzer::composite_key`] |
+//! | `referenced size` | [`Analyzer::referenced_size`], for [`analyze_joint`](crate::joint::analyze_joint) only |
 //! | `empty domain` | [`Analyzer::empty_domain`] |
 //! | `ndv within domain` | [`Analyzer::ndv_within_domain`] |
 //! | `range within domain` | [`Analyzer::range_within_domain`] |
@@ -128,7 +129,7 @@ use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use z3::ast::{Bool, Int};
 
-use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, int, product};
+use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, ScanKind, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
@@ -233,6 +234,44 @@ impl<'a> Analyzer<'a> {
             let col = Column::from(schema.qualified_field(j));
             if self.covers_key(plan, &[col], Nulls::Equal) {
                 self.assert(rel.ndv[j].eq(&rel.card));
+            }
+        }
+    }
+
+    /// Creates the size variable of each table `scan`'s table references by
+    /// a foreign key, scanned or not, for [`Self::referenced_size`].
+    fn referenced_tables(&mut self, scan: &TableScan) {
+        let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
+        let refs: Vec<String> =
+            self.foreign_keys.iter().filter(|fk| fk.table == display).map(|fk| fk.references.clone()).collect();
+        for t in refs {
+            if let ScanKind::Base { key, display } = referenced(&t) {
+                self.table(&key, &display);
+            }
+        }
+    }
+
+    /// `referenced size`.
+    ///
+    /// - **Claim**: `ndv(c | R) ≤ |S|` for each column `c` of a foreign key
+    ///   `R(cols) → S`, on a scan of `R`.
+    /// - **When**: the analyzer's `referenced_sizes` is set, as
+    ///   [`analyze_joint`](crate::joint::analyze_joint) sets it; `S` need
+    ///   not be scanned. Not on a float column.
+    /// - **Why**: each row's `cols` equal the key of one row of `S`, so
+    ///   they take at most `|S|` combinations, and one column no more.
+    pub fn referenced_size(&self, scan: &TableScan, rel: &Rel) {
+        let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
+        let schema = &scan.projected_schema;
+        for fk in self.foreign_keys.iter().filter(|fk| fk.table == display) {
+            let ScanKind::Base { key, .. } = referenced(&fk.references) else { continue };
+            let Some(t) = self.tables.get(&key) else { continue };
+            for c in &fk.columns {
+                if let Some(j) = schema.fields().iter().position(|f| f.name() == c)
+                    && !schema.field(j).data_type().is_floating()
+                {
+                    self.assert(rel.ndv[j].le(&t.var));
+                }
             }
         }
     }
@@ -382,6 +421,9 @@ impl<'a> Analyzer<'a> {
         self.key_ndv(plan, rel);
         if let Some(scan) = &r.scan {
             self.composite_key(scan, rel);
+            if self.referenced_sizes {
+                self.referenced_size(scan, rel);
+            }
         }
         let schema = plan.schema();
         if rel.facts.contradictory() {
@@ -512,6 +554,17 @@ pub fn assert_all(a: &mut Analyzer) {
         a.in_frame(frame, |a| a.non_negative(&v));
     }
     let relations = std::mem::take(&mut a.relations);
+    if a.referenced_sizes {
+        for r in &relations {
+            if let Some(scan) = &r.scan {
+                a.referenced_tables(scan);
+            }
+        }
+        // The referenced tables' sizes.
+        for (v, frame) in std::mem::take(&mut a.counts) {
+            a.in_frame(frame, |a| a.non_negative(&v));
+        }
+    }
     for r in &relations {
         let relied = a.in_frame(r.frame, |a| a.on_relation(r));
         if let Some(node) = r.node {
@@ -537,6 +590,11 @@ pub fn assert_all(a: &mut Analyzer) {
         a.in_frame(frame, |a| a.non_negative(&v));
     }
     a.between_contexts();
+}
+
+/// The scan kind of the table a foreign key references, by its bare name.
+fn referenced(table: &str) -> ScanKind {
+    crate::base_kind(&datafusion::common::TableReference::bare(table), "datafusion", "public")
 }
 
 /// Output column `i` of `plan`, as an expression.

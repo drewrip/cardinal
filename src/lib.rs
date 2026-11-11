@@ -51,6 +51,7 @@ mod bounds;
 mod domain;
 mod keys;
 pub mod facts;
+pub mod joint;
 pub mod observed;
 mod origin;
 pub mod rows;

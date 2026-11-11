@@ -200,6 +200,9 @@ pub struct Analyzer<'a> {
     /// The names of the columns that get min and max variables
     /// ([`ranged_columns`]).
     pub(crate) ranged: BTreeSet<String>,
+    /// Whether to assert [`referenced size`](Self::referenced_size) on each
+    /// scan, for [`analyze_joint`](crate::joint::analyze_joint).
+    pub(crate) referenced_sizes: bool,
     /// The last base scan's raw min and max variables, for its node to take.
     pub(crate) raw_ranges: (Vec<Option<String>>, Vec<Option<String>>),
 }
@@ -364,6 +367,7 @@ impl<'a> Analyzer<'a> {
             node_at: HashMap::new(),
             relied: RefCell::new(Vec::new()),
             ranged: BTreeSet::new(),
+            referenced_sizes: false,
             raw_ranges: Default::default(),
         }
     }
