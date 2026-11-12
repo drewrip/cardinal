@@ -16,6 +16,8 @@
 //! 3. [`facts`]: counts read off plans that ran, added as claims on the
 //!    query's operators ([`Analysis::with_facts`]), assumed consistent with
 //!    the first two unless [`Options::check_facts`] asks to check.
+//! 4. [`postprocess`]: when bounds are searched for, constraints that
+//!    cannot move them are left out, if [`Options::postprocess`] asks.
 //!
 //! ```text
 //!                 SQL ──parse, optimize──▶ LogicalPlan
@@ -42,6 +44,8 @@
 //! │ a claim on an operator; checked against 1, 2 if asked    │──▶ Z3
 //! └─────────────────────────────────────────────┬────────────┘
 //!                                               ▼
+//!                  4. postprocess: dead columns left out, if asked
+//!                                               ▼
 //!                          bounds search: Analysis::bounds, plan_bounds
 //! ```
 
@@ -54,6 +58,7 @@ pub mod facts;
 pub mod joint;
 pub mod observed;
 mod origin;
+pub mod postprocess;
 pub mod rows;
 pub mod rules;
 pub mod trace;
@@ -61,6 +66,7 @@ mod validate;
 
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
 pub use facts::Facts;
+pub use postprocess::Postprocess;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
@@ -116,6 +122,11 @@ pub struct Analysis {
     nodes: Vec<Node>,
     /// [`Options::check_facts`].
     check_facts: bool,
+    /// [`Options::postprocess`].
+    postprocess: Postprocess,
+    /// Every assertion with its role, for [`postprocess`]; none for an
+    /// analysis it cannot read.
+    parts: Option<postprocess::Assertions>,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -219,15 +230,29 @@ impl Analysis {
         &self.constraints
     }
 
+    /// A search over the constraints, [postprocessed](postprocess) as
+    /// [`Options::postprocess`] asks.
     pub(crate) fn search(&self) -> Result<bounds::Search> {
-        let (search, parsed) = bounds::Search::new(&self.constraints, &self.root);
-        if parsed != self.assertions {
-            return Err(Error::Internal(format!(
-                "constraints parsed back to {parsed} assertions, expected {}",
-                self.assertions
-            )));
+        match &self.parts {
+            Some(parts) if self.postprocess.dead_columns => {
+                let (script, n) = parts.pruned();
+                search_of(&script, n, &self.root)
+            }
+            _ => self.search_all(),
         }
-        Ok(search)
+    }
+
+    /// Whether each constraint, in order, is solved with when
+    /// [`Options::postprocess`] leaves out dead columns; `None` if the
+    /// analysis cannot tell.
+    #[doc(hidden)]
+    pub fn kept_constraints(&self) -> Option<Vec<bool>> {
+        self.parts.as_ref().map(|p| p.kept())
+    }
+
+    /// A search over every constraint.
+    pub(crate) fn search_all(&self) -> Result<bounds::Search> {
+        search_of(&self.constraints, self.assertions, &self.root)
     }
 
     /// This analysis with what `facts` know among its constraints: every row
@@ -255,6 +280,15 @@ impl Analysis {
         };
         trace.explain(&trace::claims(&self.root, bounds))
     }
+}
+
+/// A search over `constraints`, checked to hold all `n` assertions.
+fn search_of(constraints: &str, n: usize, root: &str) -> Result<bounds::Search> {
+    let (search, parsed) = bounds::Search::new(constraints, root);
+    if parsed != n {
+        return Err(Error::Internal(format!("constraints parsed back to {parsed} assertions, expected {n}")));
+    }
+    Ok(search)
 }
 
 /// A foreign key: each row of `table` has `columns` never NULL and equal to
@@ -313,6 +347,9 @@ pub struct Options {
     /// constraints, one solver check per claim, and leave out those that
     /// contradict them. Off, facts are assumed consistent. Defaults to false.
     pub check_facts: bool,
+    /// Simplifications of the constraints before the bounds search. Defaults
+    /// to none.
+    pub postprocess: Postprocess,
 }
 
 impl Default for Options {
@@ -322,6 +359,7 @@ impl Default for Options {
             foreign_keys: Vec::new(),
             trace: false,
             check_facts: false,
+            postprocess: Postprocess::default(),
         }
     }
 }
@@ -454,6 +492,7 @@ fn analyze_with(
     let root_name = a.name_of(&root);
     let constraints = a.solver.to_string();
     let assertions = a.solver.get_assertions().len();
+    let parts = postprocess::Assertions::new(&a, &constraints);
 
     let mut tables: Vec<(String, String)> = a
         .tables
@@ -481,5 +520,7 @@ fn analyze_with(
         assertions,
         nodes: a.nodes,
         check_facts: options.check_facts,
+        postprocess: options.postprocess,
+        parts: Some(parts),
     }
 }

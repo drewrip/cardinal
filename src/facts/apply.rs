@@ -17,6 +17,7 @@ use z3::ast::{Bool, Int};
 
 use crate::analysis::{Node, Unit, unit};
 use crate::axioms::bases;
+use crate::postprocess::Role;
 use crate::facts::{Context, Fact, FactKind, FactSet, Term};
 use crate::rows::contain::{fewer, groups_among, renamed};
 use crate::rows::logical::Logical;
@@ -74,7 +75,7 @@ impl Facts {
 pub(crate) fn apply(analysis: &Analysis, facts: &Facts) -> Result<Analysis> {
     let logical = Logical::new(&analysis.nodes, &analysis.scans);
     let lookup = Lookup { nodes: &analysis.nodes, logical: &logical, facts: &facts.0.set, shared: &facts.0 };
-    let search = if analysis.check_facts { Some(analysis.search()?) } else { None };
+    let search = if analysis.check_facts { Some(analysis.search_all()?) } else { None };
     let mut claims: Vec<FactClaim> = vec![];
     let mut assume = |claim: Bool, node: usize, source: &str, fact: FactRef, value: String| {
         let kept = search.as_ref().is_none_or(|s| s.assume(&claim) == Some(true));
@@ -119,6 +120,9 @@ pub(crate) fn apply(analysis: &Analysis, facts: &Facts) -> Result<Analysis> {
     let mut out = analysis.clone();
     for c in &claims {
         out.constraints.push_str(&format!("(assert {})\n", c.claim));
+        if let Some(parts) = &mut out.parts {
+            parts.push(c.claim.to_string(), Role::Gen);
+        }
     }
     out.assertions += claims.len();
     out.trace = analysis.trace.as_ref().map(|t| t.with_facts(&claims));

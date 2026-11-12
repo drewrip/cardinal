@@ -9,6 +9,7 @@ use super::{col, column_index, determined, key_column, strip_alias, unproject};
 use crate::analysis::{Analyzer, LinkKind, Rel, int, product};
 use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
+use crate::postprocess::Role;
 
 impl<'a> Analyzer<'a> {
     /// `Aggregate`: one row per group. Notation as in
@@ -66,7 +67,7 @@ impl<'a> Analyzer<'a> {
                 Some(i) => {
                     columns.push((j, i));
                     if !plan.schema().field(j).data_type().is_floating() {
-                        self.assert(o.ndv[j].ge(&l.ndv[i]));
+                        self.assert_as(Role::Link, o.ndv[j].ge(&l.ndv[i]));
                     }
                 }
                 None => self.expr_ndv(&o.ndv[j], e, &agg.input, &l),

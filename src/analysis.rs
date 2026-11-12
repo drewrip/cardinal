@@ -27,6 +27,7 @@ use z3::{Params, Solver};
 use crate::ForeignKey;
 use crate::domain::{self, Facts};
 use crate::origin::Origin;
+use crate::postprocess::{Role, axiom_role};
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +188,8 @@ pub struct Analyzer<'a> {
     pub(crate) trace: bool,
     /// Every assertion, in order, if `trace` is set.
     pub(crate) log: RefCell<Vec<Logged>>,
+    /// Every assertion's role, in order ([`crate::postprocess`]).
+    pub(crate) roles: RefCell<Vec<Role>>,
     /// Frames of the nodes being visited, innermost last.
     pub(crate) owners: Vec<usize>,
     pub(crate) next_frame: usize,
@@ -361,6 +364,7 @@ impl<'a> Analyzer<'a> {
             foreign_keys,
             trace,
             log: RefCell::new(Vec::new()),
+            roles: RefCell::new(Vec::new()),
             owners: Vec::new(),
             next_frame: 0,
             frame_node: HashMap::new(),
@@ -469,8 +473,16 @@ impl<'a> Analyzer<'a> {
         rel.ndv.iter().map(|v| self.name_of(v)).collect()
     }
 
+    /// Asserts `b`, a [`Role::Gen`].
     #[track_caller]
     pub(crate) fn assert(&self, b: Bool) {
+        self.assert_as(Role::Gen, b);
+    }
+
+    /// Asserts `b`, with `role` in [liveness](crate::postprocess).
+    #[track_caller]
+    pub(crate) fn assert_as(&self, role: Role, b: Bool) {
+        self.roles.borrow_mut().push(role);
         if self.trace {
             self.log.borrow_mut().push(Logged {
                 expr: b.clone(),
@@ -485,6 +497,7 @@ impl<'a> Analyzer<'a> {
     /// Asserts `b`, an instance of axiom `rule`, for no node in particular.
     #[track_caller]
     pub(crate) fn assert_axiom(&self, rule: &'static str, b: Bool) {
+        self.roles.borrow_mut().push(axiom_role(rule));
         if self.trace {
             self.log.borrow_mut().push(Logged { expr: b.clone(), frame: None, at: Location::caller(), rule: Some(rule) });
         }

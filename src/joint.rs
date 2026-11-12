@@ -135,6 +135,9 @@ pub fn analyze_joint(
         assertions: solver.get_assertions().len(),
         nodes,
         check_facts: options.check_facts,
+        postprocess: options.postprocess.clone(),
+        // `solve-eqs` rewrote the assertions: their roles no longer apply.
+        parts: None,
     })
 }
 

@@ -94,6 +94,7 @@ use crate::analysis::{Analyzer, LinkKind, Rel, ScanKind, inexact_filters, int, m
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
+use crate::postprocess::Role;
 
 impl<'a> Analyzer<'a> {
     /// Every non-NULL value of `o`'s column `j` is one of `l`'s column `i`.
@@ -104,10 +105,10 @@ impl<'a> Analyzer<'a> {
             return;
         }
         if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
-            self.assert(a.ge(b));
+            self.assert_as(Role::Link, a.ge(b));
         }
         if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
-            self.assert(a.le(b));
+            self.assert_as(Role::Link, a.le(b));
         }
     }
 
@@ -128,14 +129,14 @@ impl<'a> Analyzer<'a> {
             let below = |x: usize, y: usize, strict: bool| {
                 let ((x_lo, x_hi), (y_lo, y_hi)) = (lo_hi(x), lo_hi(y));
                 let gap = int(strict as u64);
-                self.assert(y_lo.ge(x_lo + &gap));
-                self.assert(x_hi.le(y_hi - &gap));
+                self.assert_as(Role::Link, y_lo.ge(x_lo + &gap));
+                self.assert_as(Role::Link, x_hi.le(y_hi - &gap));
             };
             match op {
                 Operator::Eq => {
                     let ((a_lo, a_hi), (b_lo, b_hi)) = (lo_hi(a), lo_hi(b));
-                    self.assert(a_lo.eq(b_lo));
-                    self.assert(a_hi.eq(b_hi));
+                    self.assert_as(Role::Link, a_lo.eq(b_lo));
+                    self.assert_as(Role::Link, a_hi.eq(b_hi));
                 }
                 Operator::Lt => below(a, b, true),
                 Operator::LtEq => below(a, b, false),
@@ -562,7 +563,7 @@ impl<'a> Analyzer<'a> {
     pub fn kept_values(&self, plan: &LogicalPlan, o: &Rel, l: &Rel) {
         for (j, (a, b)) in o.ndv.iter().zip(&l.ndv).enumerate() {
             if !plan.schema().field(j).data_type().is_floating() {
-                self.assert(a.ge(b));
+                self.assert_as(Role::Link, a.ge(b));
             }
         }
     }
@@ -571,7 +572,7 @@ impl<'a> Analyzer<'a> {
     /// `e` is not a column: those the axioms relate.
     pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &Rel) {
         if let Some(bound) = expr_bound(e, input, l, self.max_product) {
-            self.assert(v.le(bound));
+            self.assert_as(Role::Link, v.le(bound));
         }
     }
 
@@ -593,7 +594,7 @@ impl<'a> Analyzer<'a> {
                 && let (Some(a), Some(b)) = (index(left), index(right))
             {
                 // Every surviving row has a = b (neither NULL).
-                self.assert(o.ndv[a].eq(&o.ndv[b]));
+                self.assert_as(Role::Link, o.ndv[a].eq(&o.ndv[b]));
             }
         }
     }

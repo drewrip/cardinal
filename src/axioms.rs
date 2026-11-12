@@ -138,6 +138,7 @@ use crate::rows::contain::{self, renamed, renamed_kind};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
+use crate::postprocess::Role;
 
 /// [Axioms on each relation](self#axioms-on-each-relation), on each
 /// [link](self#axioms-on-each-link) and on
@@ -149,14 +150,14 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: `v ≥ 0` for every row count and `ndv`, and each table's
     ///   size.
     pub fn non_negative(&self, v: &Int) {
-        self.assert(v.ge(int(0)));
+        self.assert_as(Role::Local, v.ge(int(0)));
     }
 
     /// `ndv within rows`.
     ///
     /// - **Claim**: `ndv ≤ X` for each column.
     pub fn ndv_within_rows(&self, ndv: &Int, rows: &Int) {
-        self.assert(ndv.le(rows));
+        self.assert_as(Role::Local, ndv.le(rows));
     }
 
     /// `nonempty ndv`.
@@ -164,14 +165,14 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: `X ≥ 1 ⇒ ndv ≥ 1`: a row has a value, NULL counting as
     ///   one.
     pub fn nonempty_ndv(&self, ndv: &Int, rows: &Int) {
-        self.assert(rows.ge(int(1)).implies(ndv.ge(int(1))));
+        self.assert_as(Role::Local, rows.ge(int(1)).implies(ndv.ge(int(1))));
     }
 
     /// `boolean ndv`.
     ///
     /// - **Claim**: `ndv ≤ 3` for a boolean column: true, false and NULL.
     pub fn boolean_ndv(&self, ndv: &Int) {
-        self.assert(ndv.le(int(3)));
+        self.assert_as(Role::Local, ndv.le(int(3)));
     }
 
     /// `empty domain`.
@@ -193,7 +194,7 @@ impl<'a> Analyzer<'a> {
     /// WHERE d BETWEEN 1 AND 7  ⇒  ndv(d) ≤ 7
     /// ```
     pub fn ndv_within_domain(&self, ndv: &Int, n: u64) {
-        self.assert(ndv.le(int(n)));
+        self.assert_as(Role::Local, ndv.le(int(n)));
     }
 
     /// `range within domain`.
@@ -209,16 +210,16 @@ impl<'a> Analyzer<'a> {
             let d = rel.facts.dom(&col, schema);
             let (from, to) = d.int_range();
             if let Some(from) = from.and_then(|v| i64::try_from(v).ok()) {
-                self.assert(lo.ge(Int::from_i64(from)));
+                self.assert_as(Role::Local, lo.ge(Int::from_i64(from)));
             }
             if let Some(to) = to.and_then(|v| i64::try_from(v).ok()) {
-                self.assert(hi.le(Int::from_i64(to)));
+                self.assert_as(Role::Local, hi.le(Int::from_i64(to)));
             }
             if d.never_null() {
-                self.assert(rel.card.ge(int(1)).implies(lo.le(hi)));
+                self.assert_as(Role::Local, rel.card.ge(int(1)).implies(lo.le(hi)));
             }
             let width = hi.ge(lo).ite(&(hi - lo + int(1)), &int(0));
-            self.assert(rel.ndv[j].le(width + int(!d.never_null() as u64)));
+            self.assert_as(Role::Local, rel.ndv[j].le(width + int(!d.never_null() as u64)));
         }
     }
 
@@ -373,7 +374,7 @@ impl<'a> Analyzer<'a> {
     pub fn same_rows(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
         self.assert(o.card.eq(&l.card));
         for &(j, i) in columns {
-            self.assert(o.ndv[j].eq(&l.ndv[i]));
+            self.assert_as(Role::Link, o.ndv[j].eq(&l.ndv[i]));
             self.within(o, j, l, i);
         }
     }
@@ -401,7 +402,7 @@ impl<'a> Analyzer<'a> {
     ///   not paired.
     pub fn wider(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
         for &(j, i) in columns {
-            self.assert(o.ndv[j].le(&l.ndv[i]));
+            self.assert_as(Role::Link, o.ndv[j].le(&l.ndv[i]));
             self.within(o, j, l, i);
         }
     }
