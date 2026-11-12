@@ -5,7 +5,8 @@
 //! rows, or of rows a containment relates to them ([`fewer`],
 //! [`groups_among`]), is then a claim on the operator's variables: its rows,
 //! a column's distinct values, least or greatest value. Each claim joins
-//! the constraints if it is consistent with them and those before it.
+//! the constraints; with [`Options::check_facts`](crate::Options::check_facts),
+//! only if it is consistent with them and those before it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::panic::Location;
@@ -67,16 +68,16 @@ impl Facts {
     }
 }
 
-/// `analysis` with every claim `facts` give that is consistent with its
-/// constraints among them. Claims that contradict them, or whose
-/// consistency is undecided, are left out.
+/// `analysis` with every claim `facts` give among its constraints. Checking
+/// ([`Options::check_facts`](crate::Options::check_facts)), claims that
+/// contradict them, or whose consistency is undecided, are left out.
 pub(crate) fn apply(analysis: &Analysis, facts: &Facts) -> Result<Analysis> {
     let logical = Logical::new(&analysis.nodes, &analysis.scans);
     let lookup = Lookup { nodes: &analysis.nodes, logical: &logical, facts: &facts.0.set, shared: &facts.0 };
-    let search = analysis.search()?;
+    let search = if analysis.check_facts { Some(analysis.search()?) } else { None };
     let mut claims: Vec<FactClaim> = vec![];
     let mut assume = |claim: Bool, node: usize, source: &str, fact: FactRef, value: String| {
-        let kept = search.assume(&claim) == Some(true);
+        let kept = search.as_ref().is_none_or(|s| s.assume(&claim) == Some(true));
         if kept {
             claims.push(fact_claim(claim, Some(node), source, vec![fact], value));
         }

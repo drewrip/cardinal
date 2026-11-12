@@ -76,7 +76,8 @@ async fn tighter_bound_needs_facts() {
 
 #[tokio::test]
 async fn contradicting_facts_are_left_out() {
-    let a = traced("q05").await;
+    let options = Options { trace: true, check_facts: true, foreign_keys: foreign_keys(), ..Default::default() };
+    let a = cardinal::analyze_sql(&context(), &query("tpch", "q05"), options).await.unwrap();
     // q05's facts, but with no suppliers: the joins with them can't then
     // have the rows the profile shows.
     let mut facts = FactSet::default();

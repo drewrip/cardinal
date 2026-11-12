@@ -24,7 +24,6 @@
 //!
 //! | Rule | Gives | Spec |
 //! |---|---|---|
-//! | `ratio` | `s(P \| C)` | [`ratio`] |
 //! | `product` | `\|C\|` | [`product`] |
 //! | `join` | `s(Q \| L × R)` | [`join`] |
 //! | `match` | `m(on \| K ⋉ O)` | [`match_share`] |
@@ -65,8 +64,7 @@ type Rule = fn(&FactSet) -> Vec<(FactKind, Ratio)>;
 
 /// One pass of every rule over `set`: each new fact with its rule's name.
 fn step(set: &FactSet) -> Vec<(FactKind, Ratio, &'static str)> {
-    let rules: [(Rule, &'static str); 6] = [
-        (ratio, "ratio"),
+    let rules: [(Rule, &'static str); 5] = [
         (product, "product"),
         (join, "join"),
         (match_share, "match"),
@@ -100,44 +98,6 @@ impl<'a> Sizes<'a> {
         }
         Sizes { cards, spj, by_inputs }
     }
-}
-
-/// `ratio`: a selectivity from two sizes.
-///
-/// - **Claim**: `s(P | C) = |C ∧ P| / |C|`.
-/// - **When**: both sizes are known; `C` and `C ∧ P` are SPJs with the same
-///   inputs and conditions, and `P` (the predicates only `C ∧ P` has) is not
-///   empty. Also for `C` a single atom `G`: `s(P | G) = |σP(G)| / |G|`.
-pub fn ratio(set: &FactSet) -> Vec<(FactKind, Ratio)> {
-    let sizes = Sizes::new(set);
-    let cards = &sizes.cards;
-    let spj = &sizes.spj;
-    let by_inputs = &sizes.by_inputs;
-    let mut out = vec![];
-    for group in by_inputs.values() {
-        for &i in group {
-            for &j in group {
-                let (((_, _, p1, e1), c1, v1), ((_, _, p2, e2), c2, v2)) = (&spj[i], &spj[j]);
-                if i == j || e1 != e2 || p1.len() > p2.len() || c1.filter(p2) != **c2 {
-                    continue;
-                }
-                let pred: BTreeSet<Term> = p2.difference(p1).cloned().collect();
-                if let (false, Some(s)) = (pred.is_empty(), v2.over(*v1)) {
-                    out.push((FactKind::Selectivity { pred, over: (*c1).clone() }, s));
-                }
-            }
-        }
-    }
-    // A filter over one atom: |σp(G)| / |G|.
-    for &((tables, atoms, preds, exists), _, v) in spj {
-        if tables.is_empty() && atoms.len() == 1 && exists.is_empty() && !preds.is_empty() {
-            let atom = atoms.first().unwrap();
-            if let Some(s) = cards.get(atom).and_then(|n| v.over(*n)) {
-                out.push((FactKind::Selectivity { pred: preds.clone(), over: atom.clone() }, s));
-            }
-        }
-    }
-    out
 }
 
 /// `product`: a size from a selectivity and a size.

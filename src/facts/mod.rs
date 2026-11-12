@@ -51,15 +51,16 @@
 //!    of operators whose rows were not counted ([`FactSet::unobserved`]),
 //!    which a query can count ([`FactKind::counted`]).
 //! 2. [`derive`](mod@derive) combines exact facts across plans until nothing new follows
-//!    ([`FactSet::close`]): a size from one plan over a size from another is
-//!    a selectivity, and a selectivity times a size another size. Bounds and
+//!    ([`FactSet::close`]): a selectivity times a size is another size, and
+//!    a join's size over its inputs' a selectivity. Bounds and
 //!    floors are carried along unchanged; one that an exact fact contradicts
 //!    is recorded in [`FactSet::conflicts`], as is a second value for one
 //!    fact. [`Facts::new`] closes a set once, for any number of analyses.
 //! 3. [`Analysis::with_facts`] puts each quantity a fact, bound or floor
 //!    gives of an operator's rows, or of rows related to them, among the
-//!    query's constraints as a claim on the operator's variable, where it is
-//!    consistent with them. The [`axioms`](crate::axioms) relate the
+//!    query's constraints as a claim on the operator's variable (with
+//!    [`Options::check_facts`](crate::Options::check_facts), only where it
+//!    is consistent with them). The [`axioms`](crate::axioms) relate the
 //!    operators' quantities in every analysis, so Z3 carries each claim to
 //!    the rest.
 //!

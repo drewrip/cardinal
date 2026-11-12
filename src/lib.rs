@@ -14,8 +14,8 @@
 //! 2. [`axioms`]: what holds of any rows whatever made them, asserted over
 //!    those records and between [contexts](rows), in every analysis.
 //! 3. [`facts`]: counts read off plans that ran, added as claims on the
-//!    query's operators ([`Analysis::with_facts`]) where consistent with the
-//!    first two.
+//!    query's operators ([`Analysis::with_facts`]), assumed consistent with
+//!    the first two unless [`Options::check_facts`] asks to check.
 //!
 //! ```text
 //!                 SQL ──parse, optimize──▶ LogicalPlan
@@ -39,7 +39,7 @@
 //!                  Analysis: constraints, nodes │
 //! ┌─ 3. facts: Analysis::with_facts ────────────▼────────────┐
 //! │ observe ─▶ derive ─▶ apply                               │
-//! │ a claim on an operator, kept if consistent with 1, 2     │──▶ Z3
+//! │ a claim on an operator; checked against 1, 2 if asked    │──▶ Z3
 //! └─────────────────────────────────────────────┬────────────┘
 //!                                               ▼
 //!                          bounds search: Analysis::bounds, plan_bounds
@@ -113,6 +113,8 @@ pub struct Analysis {
     assertions: usize,
     /// Every plan node, children before parents.
     nodes: Vec<Node>,
+    /// [`Options::check_facts`].
+    check_facts: bool,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -229,12 +231,13 @@ impl Analysis {
 
     /// This analysis with what `facts` know among its constraints: every row
     /// count, distinct count and least or greatest value they give of an
-    /// operator's rows, exact or a bound, as a claim on its variable. A claim
-    /// that contradicts the constraints, or whose consistency Z3 cannot
-    /// decide, is left out.
+    /// operator's rows, exact or a bound, as a claim on its variable.
     ///
     /// The facts must describe the data the bounds are for: a fact read off
-    /// a plan of other data gives bounds about that data.
+    /// a plan of other data gives bounds about that data. Claims are assumed
+    /// consistent with the constraints; an inconsistent set proves any
+    /// bound. With [`Options::check_facts`], a claim that contradicts them,
+    /// or whose consistency Z3 cannot decide, is left out instead.
     pub fn with_facts(&self, facts: &Facts) -> Result<Analysis> {
         facts::apply::apply(self, facts)
     }
@@ -305,6 +308,10 @@ pub struct Options {
     /// from ([`Analysis::trace`]), to inspect or explain the analysis.
     /// Defaults to false.
     pub trace: bool,
+    /// Check each claim [`Analysis::with_facts`] adds against the
+    /// constraints, one solver check per claim, and leave out those that
+    /// contradict them. Off, facts are assumed consistent. Defaults to false.
+    pub check_facts: bool,
 }
 
 impl Default for Options {
@@ -313,6 +320,7 @@ impl Default for Options {
             max_product: analysis::DEFAULT_MAX_PRODUCT,
             foreign_keys: Vec::new(),
             trace: false,
+            check_facts: false,
         }
     }
 }
@@ -471,5 +479,6 @@ fn analyze_with(
         constraints,
         assertions,
         nodes: a.nodes,
+        check_facts: options.check_facts,
     }
 }
