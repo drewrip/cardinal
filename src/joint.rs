@@ -10,7 +10,7 @@
 //!
 //! ```text
 //!  query ───────────┐
-//!                   ├─ rules ─ axioms ─ pins ─▶ Analysis
+//!                   ├─ rules ─ axioms ─ pins ─ solve-eqs ─▶ Analysis
 //!  profiles ─ select┘                 X = rows
 //! ```
 //!
@@ -26,18 +26,23 @@
 //!   tables' sizes, which the `referenced size` axiom
 //!   ([`Analyzer::referenced_size`]) bounds the referencing columns'
 //!   distinct counts by. Other subtrees share no context with the query's.
+//! - **Reduction**: each variable of the profiles' or the axioms' that an
+//!   assertion defines by others is substituted away (Z3's `solve-eqs`).
+//!   The query's variables and the tables' sizes all stay, with exactly
+//!   the values they had, so every bound and claim on them is as before.
 //! - **Not done**: no check that the pins are consistent with the
 //!   constraints. Facts of other data, or a wrong rule, make the set
 //!   unsatisfiable, and an unsatisfiable set proves any bound.
 //!   Slower than [`Analysis::with_facts`](crate::Analysis::with_facts):
-//!   the 46 DuckDB fixtures take about 8× as long in all.
+//!   the 46 DuckDB fixtures take about 5× as long in all.
 
 use std::collections::BTreeSet;
 
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::logical_plan::TableScan;
-use z3::ast::Int;
+use z3::ast::{Ast, Bool, Int};
+use z3::{FuncDecl, Goal, Solver, Sort, Tactic};
 
 use crate::analysis::{Analyzer, ranged_columns};
 use crate::observed::{Catalog, ObservedPlan};
@@ -69,7 +74,7 @@ pub fn analyze_joint(
         a.ranged.extend(ranged_columns(root));
     }
     let root = a.visit(&query).card;
-    let (own, own_scans) = (a.nodes.len(), a.scans.len());
+    let (own, own_scans, own_vars) = (a.nodes.len(), a.scans.len(), a.vars.len());
 
     let tables = tables_of(&query);
     let referenced: BTreeSet<String> = reachable(&tables, &options)
@@ -93,6 +98,18 @@ pub fn analyze_joint(
         let (v, n) = (Int::new_const(var.as_str()), Int::from_u64(rows));
         a.solver.assert(&if floor { v.ge(&n) } else { v.eq(&n) });
     }
+    // What may be read once the analysis is made: the query's variables,
+    // and the tables' sizes, which the referenced-size axiom may have
+    // made after the query's visit.
+    let kept: Vec<Int> = a.vars[..own_vars]
+        .iter()
+        .map(|(_, v)| v.clone())
+        .chain(a.tables.values().map(|t| t.var.clone()))
+        .collect();
+    let solver = Solver::new();
+    for f in solve_eqs(&a.solver.get_assertions(), &kept) {
+        solver.assert(&f);
+    }
 
     let root = a.name_of(&root);
     let scans = a.scans[..own_scans]
@@ -106,11 +123,56 @@ pub fn analyze_joint(
         scans,
         plan: query.display_indent().to_string(),
         trace: None,
-        constraints: a.solver.to_string(),
-        assertions: a.solver.get_assertions().len(),
+        constraints: solver.to_string(),
+        assertions: solver.get_assertions().len(),
         nodes,
         check_facts: options.check_facts,
     })
+}
+
+/// `assertions` with Z3's `solve-eqs` applied: each variable but `kept`
+/// that an assertion defines as a term of others (`y = t`, `y` not in
+/// `t`) is replaced by that term, and the definition dropped.
+///
+/// Lossless on `kept`: the result admits exactly the values of `kept`
+/// that `assertions` admit, since each such value extends to the
+/// eliminated variables by their definitions. `solve-eqs` eliminates only
+/// constants, so each kept variable is a function's application while it
+/// runs. If it fails, `assertions` are returned as they are.
+fn solve_eqs(assertions: &[Bool], kept: &[Int]) -> Vec<Bool> {
+    if assertions.is_empty() {
+        return vec![];
+    }
+    let hidden: Vec<Int> = kept
+        .iter()
+        .map(|v| {
+            let f = FuncDecl::new(format!("{v}!kept"), &[&Sort::int()], &Sort::int());
+            f.apply(&[&Int::from_i64(0)]).as_int().expect("an Int function")
+        })
+        .collect();
+    let hide: Vec<(&Int, &Int)> = kept.iter().zip(&hidden).collect();
+    let show: Vec<(&Int, &Int)> = hidden.iter().zip(kept).collect();
+    // One conjunction, so each substitution is one pass.
+    let goal = Goal::new(true, false, false);
+    goal.assert(&Bool::and(assertions).substitute(&hide));
+    let Ok(result) = Tactic::new("solve-eqs").apply(&goal, None) else {
+        return assertions.to_vec();
+    };
+    let goals: Vec<Goal> = result.list_subgoals().collect();
+    let [goal] = &goals[..] else {
+        return assertions.to_vec();
+    };
+    match &goal.get_formulas()[..] {
+        [] => vec![],
+        [f] => vec![f.substitute(&show)],
+        fs => {
+            let back: Vec<Bool> = Bool::and(fs).substitute(&show).children().iter().filter_map(|f| f.as_bool()).collect();
+            match back.len() == fs.len() {
+                true => back,
+                false => fs.iter().map(|f| f.substitute(&show)).collect(),
+            }
+        }
+    }
 }
 
 /// The base tables `plan` scans, subqueries included.
