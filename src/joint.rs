@@ -10,7 +10,7 @@
 //!
 //! ```text
 //!  query ───────────┐
-//!                   ├─ rules ─ axioms ─ pins ─ solve-eqs ─▶ Analysis
+//!                   ├─ rules ─ axioms ─ pins ─ solve-eqs ─ dedup ─▶ Analysis
 //!  profiles ─ select┘                 X = rows
 //! ```
 //!
@@ -27,16 +27,18 @@
 //!   ([`Analyzer::referenced_size`]) bounds the referencing columns'
 //!   distinct counts by. Other subtrees share no context with the query's.
 //! - **Reduction**: each variable of the profiles' or the axioms' that an
-//!   assertion defines by others is substituted away (Z3's `solve-eqs`).
-//!   The query's variables and the tables' sizes all stay, with exactly
-//!   the values they had, so every bound and claim on them is as before.
+//!   assertion defines by others is substituted away (Z3's `solve-eqs`),
+//!   and the assertions that then repeat are kept once. The query's
+//!   variables and the tables' sizes all stay, with exactly the values
+//!   they had, so every bound and claim on them is as before.
 //! - **Not done**: no check that the pins are consistent with the
 //!   constraints. Facts of other data, or a wrong rule, make the set
 //!   unsatisfiable, and an unsatisfiable set proves any bound.
 //!   Slower than [`Analysis::with_facts`](crate::Analysis::with_facts):
-//!   the 46 DuckDB fixtures take about 5× as long in all.
+//!   the 46 DuckDB fixtures take about 11× as long in all, nearly all of
+//!   it proving the bounds.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::logical_expr::LogicalPlan;
@@ -106,9 +108,15 @@ pub fn analyze_joint(
         .map(|(_, v)| v.clone())
         .chain(a.tables.values().map(|t| t.var.clone()))
         .collect();
+    // Substituted, a profile's copy of an operator the query has (a
+    // table's scan, most often) asserts what the query's does: each
+    // assertion once, the first kept in place.
     let solver = Solver::new();
+    let mut seen = HashSet::new();
     for f in solve_eqs(&a.solver.get_assertions(), &kept) {
-        solver.assert(&f);
+        if seen.insert(f.clone()) {
+            solver.assert(&f);
+        }
     }
 
     let root = a.name_of(&root);
