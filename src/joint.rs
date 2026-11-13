@@ -10,8 +10,8 @@
 //!
 //! ```text
 //!  query ───────────┐
-//!                   ├─ rules ─ axioms ─ pins ─ solve-eqs ─ dedup ─▶ Analysis
-//!  profiles ─ select┘                 X = rows
+//!                   ├─ rules ─ axioms ─ pins ─ dead columns ─ solve-eqs ─ dedup ─▶ Analysis
+//!  profiles ─ select┘                 X = rows  (if asked)
 //! ```
 //!
 //! # Spec
@@ -21,12 +21,14 @@
 //!   reads a translated plan's), and the options.
 //! - **Output**: an [`Analysis`] of the query, without a trace.
 //! - **Selection**: of each profile, the maximal subtrees that scan only
-//!   tables the query scans (`maximal`), and its unfiltered scans of the
-//!   tables those reference by foreign keys, transitively: those pin the
-//!   tables' sizes, which the `referenced size` axiom
+//!   tables the query scans or those reference by foreign keys,
+//!   transitively (`maximal`). Subtrees over a referenced table bound its
+//!   size, which the `referenced size` axiom
 //!   ([`Analyzer::referenced_size`]) bounds the referencing columns'
 //!   distinct counts by. Other subtrees share no context with the query's.
-//! - **Reduction**: each variable of the profiles' or the axioms' that an
+//! - **Reduction**: if [`Options::postprocess`] asks, the assertions over
+//!   dead columns are left out first ([`crate::postprocess`]), the pins
+//!   counting as [`Role::Gen`]. Then each variable of the profiles' or the axioms' that an
 //!   assertion defines by others is substituted away (Z3's `solve-eqs`),
 //!   and the assertions that then repeat are kept once. The query's
 //!   variables and the tables' sizes all stay, with exactly the values
@@ -47,6 +49,7 @@ use z3::ast::{Ast, Bool, Int};
 use z3::{FuncDecl, Goal, Solver, Sort, Tactic};
 
 use crate::analysis::{Analyzer, ranged_columns};
+use crate::postprocess::{self, Role};
 use crate::observed::{Catalog, ObservedPlan};
 use crate::{Analysis, Options, Result, axioms, base_kind};
 
@@ -79,14 +82,11 @@ pub fn analyze_joint(
     let (own, own_scans, own_vars) = (a.nodes.len(), a.scans.len(), a.vars.len());
 
     let tables = tables_of(&query);
-    let referenced: BTreeSet<String> = reachable(&tables, &options)
-        .difference(&tables)
-        .cloned()
-        .collect();
+    let within = reachable(&tables, &options);
     let mut pins = vec![];
     for (p, (root, built)) in &translated {
         let mut parts = vec![];
-        maximal(root, &tables, &referenced, &mut parts);
+        maximal(root, &within, &mut parts);
         for t in parts {
             let start = a.nodes.len();
             a.visit(t);
@@ -98,7 +98,12 @@ pub fn analyze_joint(
     axioms::assert_all(&mut a);
     for (var, rows, floor) in pins {
         let (v, n) = (Int::new_const(var.as_str()), Int::from_u64(rows));
-        a.solver.assert(&if floor { v.ge(&n) } else { v.eq(&n) });
+        a.assert_as(Role::Gen, if floor { v.ge(&n) } else { v.eq(&n) });
+    }
+    let mut assertions = a.solver.get_assertions();
+    if options.postprocess.dead_columns {
+        let kept = postprocess::Assertions::new(&a, &a.solver.to_string()).kept();
+        assertions = assertions.into_iter().zip(kept).filter_map(|(b, k)| k.then_some(b)).collect();
     }
     // What may be read once the analysis is made: the query's variables,
     // and the tables' sizes, which the referenced-size axiom may have
@@ -113,7 +118,7 @@ pub fn analyze_joint(
     // assertion once, the first kept in place.
     let solver = Solver::new();
     let mut seen = HashSet::new();
-    for f in solve_eqs(&a.solver.get_assertions(), &kept) {
+    for f in solve_eqs(&assertions, &kept) {
         if seen.insert(f.clone()) {
             solver.assert(&f);
         }
@@ -217,33 +222,15 @@ fn reachable(tables: &BTreeSet<String>, options: &Options) -> BTreeSet<String> {
 }
 
 /// Into `out`: the maximal subtrees of `plan` that scan only tables of
-/// `within` (and some), and its unfiltered scans of a table of `bare`.
-/// Going up a plan, the tables scanned only grow, so a subtree's are
-/// within if its parent's are.
-fn maximal<'p>(
-    plan: &'p LogicalPlan,
-    within: &BTreeSet<String>,
-    bare: &BTreeSet<String>,
-    out: &mut Vec<&'p LogicalPlan>,
-) {
-    // Translated, a scan is aliased by its instance.
-    let scan = match plan {
-        LogicalPlan::SubqueryAlias(a) => a.input.as_ref(),
-        p => p,
-    };
-    if let LogicalPlan::TableScan(s) = scan
-        && s.filters.is_empty()
-        && bare.contains(s.table_name.table())
-    {
-        out.push(plan);
-        return;
-    }
+/// `within` (and some). Going up a plan, the tables scanned only grow, so
+/// a subtree's are within if its parent's are.
+fn maximal<'p>(plan: &'p LogicalPlan, within: &BTreeSet<String>, out: &mut Vec<&'p LogicalPlan>) {
     let l = tables_of(plan);
     if !l.is_empty() && l.is_subset(within) {
         out.push(plan);
         return;
     }
     for c in plan.inputs() {
-        maximal(c, within, bare, out);
+        maximal(c, within, out);
     }
 }
