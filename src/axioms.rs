@@ -127,12 +127,15 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{Column, Constraint, ScalarValue};
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+use std::time::{Duration, Instant};
+
 use z3::ast::{Bool, Int};
 
 use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, ScanKind, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
+use crate::parity;
 use crate::rows::canonical::Renamed;
 use crate::rows::contain::{self, renamed, renamed_kind};
 use crate::rows::logical::Logical;
@@ -527,9 +530,18 @@ impl<'a> Analyzer<'a> {
     pub fn between_contexts(&mut self) {
         let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
         let logical = Logical::new(&self.nodes, &scans);
+        let start = Instant::now();
         let mut space = Space::default();
         let seeds = add_nodes(&mut space, &self.nodes, &logical);
-        for a in space.axioms(&space.relevant(&seeds)) {
+        let built = start.elapsed();
+        let start = Instant::now();
+        let relevant = space.relevant(&seeds);
+        let axioms = space.axioms(&relevant);
+        let between = start.elapsed();
+        if parity::recording() {
+            parity::push(space.snapshot(&relevant, &axioms, built, between));
+        }
+        for a in axioms {
             self.assert_axiom(a.rule, a.claim);
         }
     }
@@ -551,10 +563,12 @@ impl<'a> Analyzer<'a> {
 /// time depends on the order: with the counts last, plan bounds took
 /// several times as long on some queries.
 pub fn assert_all(a: &mut Analyzer) {
+    // The counts the rules made.
     for (v, frame) in std::mem::take(&mut a.counts) {
         a.in_frame(frame, |a| a.non_negative(&v));
     }
     let relations = std::mem::take(&mut a.relations);
+    // The sizes of the tables scans' foreign keys reference.
     if a.referenced_sizes {
         for r in &relations {
             if let Some(scan) = &r.scan {
@@ -566,6 +580,8 @@ pub fn assert_all(a: &mut Analyzer) {
             a.in_frame(frame, |a| a.non_negative(&v));
         }
     }
+    // Each relation's own axioms, recording the functional dependencies
+    // they relied on.
     for r in &relations {
         let relied = a.in_frame(r.frame, |a| a.on_relation(r));
         if let Some(node) = r.node {
@@ -576,6 +592,7 @@ pub fn assert_all(a: &mut Analyzer) {
             }
         }
     }
+    // Between relations the rules linked.
     for l in a.links.take() {
         let (o, from) = (&relations[l.o].rel, &relations[l.l].rel);
         a.in_frame(l.frame, |a| match l.kind {
@@ -585,11 +602,13 @@ pub fn assert_all(a: &mut Analyzer) {
         });
     }
     a.relations = relations;
+    // The rows of one table.
     a.disjoint();
     // `disjoint`'s parts.
     for (v, frame) in std::mem::take(&mut a.counts) {
         a.in_frame(frame, |a| a.non_negative(&v));
     }
+    // Between the contexts of the operators' rows.
     a.between_contexts();
 }
 
@@ -742,6 +761,39 @@ impl Space {
         out.extend(wider(self, &keys, relevant));
         out.extend(disjoint(self, relevant));
         out
+    }
+
+    /// What was decided, for [`parity`]: every pair of contexts over the
+    /// same tables that a relation holds of.
+    fn snapshot(&self, relevant: &BTreeSet<Context>, axioms: &[Axiom], built: Duration, between: Duration) -> parity::Snapshot {
+        let mut s = parity::Snapshot::default();
+        let key = parity::key;
+        for bucket in self.buckets().values() {
+            for a in bucket {
+                s.contexts.insert(key(a));
+                for b in bucket.iter().filter(|b| *b != a) {
+                    let pair = || (key(a), key(b));
+                    // Each implies the next; groups are only among groups.
+                    let sub = renamed(a, b, contain::subset);
+                    if sub {
+                        s.subset.insert(pair());
+                    }
+                    if sub || renamed(a, b, contain::fewer) {
+                        s.fewer.insert(pair());
+                    }
+                    let group = |c: &Context| matches!(c, Context::Derived { op, .. } if op == "group");
+                    if group(a) && group(b) && renamed(a, b, contain::groups_among) {
+                        s.groups_among.insert(pair());
+                    }
+                }
+            }
+        }
+        s.relevant = relevant.iter().map(key).collect();
+        for a in axioms {
+            s.axioms.entry(a.claim.to_string()).or_default().insert(a.rule.to_string());
+        }
+        s.timings = parity::Timings { build: parity::Timings::secs(built), between: parity::Timings::secs(between), ..Default::default() };
+        s
     }
 
     /// The contexts of every quantity, by the tables they draw on: only

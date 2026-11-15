@@ -58,6 +58,8 @@ pub mod facts;
 pub mod joint;
 pub mod observed;
 mod origin;
+#[doc(hidden)]
+pub mod parity;
 pub mod postprocess;
 pub mod rows;
 pub mod rules;
