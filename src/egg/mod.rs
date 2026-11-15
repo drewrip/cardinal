@@ -1,10 +1,14 @@
-//! Contexts in an egglog e-graph.
+//! The relations between contexts on egglog, an alternative to
+//! `rows::contain`'s pairwise tests ([`crate::Options::egglog`]).
 //!
-//! [`Graph`] holds contexts as terms of the schema in `rows.egg`, which
-//! mirrors [`Context`]: [`Graph::encode`] adds one and gives its e-class,
-//! [`Graph::extract`] reads one back. Sets stay canonical in Rust, and a
-//! [`Term`] is an opaque leaf keyed by its text, so equal contexts are one
-//! e-class.
+//! Contexts are terms of the schema in `rows.egg`, which mirrors
+//! [`Context`]. Sets stay canonical in Rust, and a [`Term`] is an opaque
+//! leaf keyed by its text, so equal contexts are one e-class. The rules of
+//! `contain.egg` derive which contexts are among, or have fewer rows than,
+//! which, asked only of pairs in play: Rust seeds what needs a term's
+//! meaning (renamed instances, outer joins' inner joins, which predicates
+//! imply which). The relevant contexts are those within reach of the
+//! query's over these relations.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -107,7 +107,9 @@
 //! ## Relations between contexts
 //!
 //! Each test holds up to renaming the instances of one table among
-//! themselves (`t@1`, `t@2`).
+//! themselves (`t@1`, `t@2`). With [`Options::egglog`](crate::Options),
+//! the relations and the relevant contexts come from egglog rules instead
+//! ([`crate::egg`]), which give the same pairs and may also chain them.
 //!
 //! - `A ⊆ B`: `A`'s rows are among `B`'s. `A = B`; or `B` is an outer join
 //!   and `A ⊆` its inner join; or both have the same tables and atoms, `A`
@@ -864,6 +866,7 @@ impl Space {
             }
         }
         s.relevant = relevant.iter().map(key).collect();
+        s.raw = self.terms.keys().map(over).collect::<BTreeSet<_>>().into_iter().cloned().collect();
         for a in axioms {
             s.axioms.entry(a.claim.to_string()).or_default().insert(a.rule.to_string());
         }

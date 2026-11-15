@@ -33,6 +33,15 @@ pub struct Snapshot {
     pub nodes: usize,
     #[serde(default)]
     pub tuples: usize,
+    /// The contexts themselves.
+    #[serde(skip)]
+    pub raw: Vec<Context>,
+}
+
+/// `c` with each column of a class of equal ones written as its least in
+/// every predicate and condition (`rows::rewrite::substituted`), canonical.
+pub fn substituted(c: &Context) -> Context {
+    crate::rows::rewrite::substituted(c).canonical()
 }
 
 /// Seconds spent, per stage.

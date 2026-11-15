@@ -213,3 +213,94 @@ async fn parity() {
     }
     assert!(lost.is_empty(), "lost {}:\n{}", lost.len(), lost.join("\n"));
 }
+
+/// Phase 4's gate: how many contexts a union of equal columns into every
+/// predicate would newly make equal, among the fixtures' contexts and the
+/// facts their profiles give, and how many of the query's contexts would
+/// newly match a fact's.
+#[tokio::test]
+#[ignore = "a measurement; prints what it finds"]
+async fn equality_gate() {
+    use cardinal::facts::FactKind;
+    use cardinal::rows::Context;
+    let ctx = context();
+    let catalog = catalog().await;
+    let mut profiles = vec![];
+    for dir in ["extra", "tpch"] {
+        profiles.extend(plans(dir).await.into_iter().map(|p| (dir, p)));
+    }
+    let mut set = FactSet::default();
+    for (_, p) in &profiles {
+        set.observe(p);
+    }
+    let over = |k: &FactKind| match k {
+        FactKind::Cardinality(c) => c.clone(),
+        FactKind::Selectivity { over, .. }
+        | FactKind::Distinct { over, .. }
+        | FactKind::Unique { over, .. }
+        | FactKind::Min { over, .. }
+        | FactKind::Max { over, .. } => over.clone(),
+        FactKind::Match { kept, .. } => kept.clone(),
+    };
+    let facts: BTreeSet<Context> = set.iter().map(|f| over(&f.kind)).collect();
+    let mut queries: BTreeMap<Context, String> = BTreeMap::new();
+    for (dir, plan) in &profiles {
+        parity::start();
+        let _ = cardinal::analyze_sql(&ctx, &query(dir, &plan.name), options()).await;
+        let _ = cardinal::analyze_observed(&catalog, plan, options());
+        for s in parity::take() {
+            for c in s.raw {
+                queries.entry(c).or_insert_with(|| plan.name.clone());
+            }
+        }
+    }
+    // And `tests/truth/queries.sql`, as DataFusion plans them.
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/truth/queries.sql")).unwrap();
+    for part in text.split("-- name: ").skip(1) {
+        let (name, sql) = part.split_once('\n').unwrap();
+        parity::start();
+        let _ = cardinal::analyze_sql(&ctx, sql, options()).await;
+        for s in parity::take() {
+            for c in s.raw {
+                queries.entry(c).or_insert_with(|| format!("w_{}", name.trim()));
+            }
+        }
+    }
+    // Each canonical, and with columns substituted.
+    let sub: BTreeMap<Context, Context> =
+        facts.iter().chain(queries.keys()).map(|c| (c.canonical(), parity::substituted(c))).collect();
+    let all: BTreeSet<&Context> = sub.keys().collect();
+    let merged: BTreeSet<&Context> = sub.values().collect();
+    let changed = sub.iter().filter(|(c, s)| c != s).count();
+    for (c, s) in sub.iter().filter(|(c, s)| c != s) {
+        println!("rewritten: {}\n  as {}", parity::key(c), parity::key(s));
+    }
+    println!("{} contexts ({} of facts, {} of queries); {changed} rewritten, {} classes after", all.len(), facts.len(), queries.len(), merged.len());
+    let fact_subs: BTreeMap<&Context, Vec<&Context>> = facts.iter().fold(BTreeMap::new(), |mut m, f| {
+        m.entry(&sub[&f.canonical()]).or_default().push(f);
+        m
+    });
+    let mut gained = 0;
+    let mut classes: BTreeMap<&Context, Vec<&Context>> = BTreeMap::new();
+    for (c, s) in &sub {
+        classes.entry(s).or_default().push(c);
+    }
+    for (s, cs) in classes.iter().filter(|(_, cs)| cs.len() > 1) {
+        println!("merged into {}:", parity::key(s));
+        for c in cs {
+            println!("  {}", parity::key(c));
+        }
+    }
+    let canonical: BTreeSet<Context> = facts.iter().map(Context::canonical).collect();
+    for (q, name) in &queries {
+        if canonical.contains(&q.canonical()) {
+            continue;
+        }
+        if let Some(fs) = fact_subs.get(&sub[&q.canonical()]) {
+            gained += 1;
+            println!("{name}: {}\n  now matches {}", parity::key(q), fs.iter().map(|f| parity::key(f)).collect::<Vec<_>>().join("\n  and "));
+        }
+    }
+    let matched = queries.keys().filter(|q| canonical.contains(&q.canonical())).count();
+    println!("query contexts with a fact: {matched}; newly: {gained}");
+}

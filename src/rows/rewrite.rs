@@ -360,6 +360,38 @@ pub(crate) fn delta(over: &Context, pred: &BTreeSet<Term>) -> BTreeSet<Term> {
     }
 }
 
+/// `c` with each column of a class of equal ones written as its class's
+/// least in every predicate and condition of each SPJ, not only in its
+/// equalities: on each of its rows the columns are equal and not NULL.
+/// Contexts are not built so; this measures what an e-graph's union of
+/// equal columns would merge.
+pub(crate) fn substituted(c: &Context) -> Context {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+    match c {
+        Context::Spj { tables, atoms, preds, exists } => {
+            let classes = Classes::of(preds);
+            let sub = |t: &Term| {
+                let e = t.expr.clone().transform(|e| {
+                    Ok(match classes.column(&e) {
+                        Some(least) => Transformed::yes(least.clone()),
+                        None => Transformed::no(e),
+                    })
+                });
+                Term::new(e.expect("substituting columns cannot fail").data)
+            };
+            let (equalities, rest): (BTreeSet<Term>, BTreeSet<Term>) = preds.iter().cloned().partition(|p| equality(&p.expr).is_some());
+            Spj {
+                tables: tables.clone(),
+                atoms: atoms.iter().map(substituted).collect(),
+                preds: equalities.into_iter().chain(rest.iter().map(sub)).collect(),
+                exists: exists.iter().map(|e| Exists { kind: e.kind, on: e.on.iter().map(sub).collect(), other: substituted(&e.other) }).collect(),
+            }
+            .build()
+        }
+        Context::Derived { op, args, inputs } => Context::Derived { op: op.clone(), args: args.clone(), inputs: inputs.iter().map(substituted).collect() },
+    }
+}
+
 /// The classes of columns that a set of predicates says are equal.
 struct Classes {
     /// Each column in a class of more than one, by its text, with itself and
