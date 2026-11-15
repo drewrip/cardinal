@@ -28,6 +28,11 @@ pub struct Snapshot {
     /// Each axiom's claim, with the rules that gave it.
     pub axioms: BTreeMap<String, BTreeSet<String>>,
     pub timings: Timings,
+    /// Tuples in the e-graph with the contexts, and once saturated.
+    #[serde(default)]
+    pub nodes: usize,
+    #[serde(default)]
+    pub tuples: usize,
 }
 
 /// Seconds spent, per stage.

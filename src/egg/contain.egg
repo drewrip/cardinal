@@ -1,0 +1,148 @@
+; Containment between contexts, as `rows::contain` decides it, read off
+; their terms.
+;
+; Rust seeds what needs a term's meaning: which contexts are in play
+; (`Top`), each with its instances renamed (`Renames`), the inner join of
+; each outer join (`Inner`), any other rows as an SPJ of them alone
+; (`Wraps`), and which predicate sets imply which (`PredsCover`, for each
+; pair the rules ask about in `CoverDemand`). It asks which pairs of
+; contexts in play over the same tables are related (`FewerDemand`,
+; `GroupDemand`), and the rules ask in turn only what those need: with
+; many instances of a table, its renamings are too many to relate all.
+; No rule makes a term, so the rules saturate.
+
+(relation Top (Rel))
+(relation Renames (Rel Rel))
+(relation Inner (Rel Rel))
+(relation Wraps (Rel Rel))
+(relation PredsCover (Terms Terms))
+
+; Pairs whose relation is asked.
+(relation FewerDemand (Rel Rel))
+(relation GroupDemand (Rel Rel))
+(relation SubDemand (Rel Rel))
+(relation CoverDemand (Terms Terms))
+(relation ExDemand (Exs Exs))
+(relation HasDemand (Exs Ex))
+
+; `a`'s rows are among `b`'s.
+(relation Sub (Rel Rel))
+; `|a| <= |b|`.
+(relation Fewer (Rel Rel))
+; GROUP BY `a` has no more groups than GROUP BY `b`.
+(relation GroupsAmong (Rel Rel))
+; Each up to renaming the instances of `a`, between contexts in play.
+(relation RSub (Rel Rel))
+(relation RFewer (Rel Rel))
+(relation RGroupsAmong (Rel Rel))
+; SPJs over the same inputs and conditions.
+(relation RSameInputs (Rel Rel))
+
+; Condition `f` of narrower rows is stricter than `e` of wider ones.
+(relation Stricter (Ex Ex))
+; Each condition of the second list has a stricter one in the first.
+(relation ExCover (Exs Exs))
+; The list has a condition stricter than the given one.
+(relation Has (Exs Ex))
+
+(ruleset contain)
+
+; Reflexive and transitive. Each rule but transitivity derives only what
+; is asked.
+(rule ((SubDemand a a)) ((Sub a a)) :ruleset contain)
+(rule ((Sub a b) (Sub b c)) ((Sub a c)) :ruleset contain)
+
+; Other rows are an SPJ of them alone.
+(rule ((SubDemand a d) (Wraps d w)) ((SubDemand a w)) :ruleset contain)
+(rule ((SubDemand d b) (Wraps d w)) ((SubDemand w b)) :ruleset contain)
+(rule ((SubDemand a d) (Wraps d w) (Sub a w)) ((Sub a d)) :ruleset contain)
+(rule ((SubDemand d b) (Wraps d w) (Sub w b)) ((Sub d b)) :ruleset contain)
+
+; An outer join's rows include its inner join's.
+(rule ((SubDemand a o) (Inner o i)) ((SubDemand a i)) :ruleset contain)
+(rule ((SubDemand a o) (Inner o i) (Sub a i)) ((Sub a o)) :ruleset contain)
+
+; More predicates or stricter conditions over the same inputs.
+(rule ((SubDemand a b) (= a (Spj t at p1 e1)) (= b (Spj t at p2 e2)))
+      ((CoverDemand p1 p2) (ExDemand e1 e2)) :ruleset contain)
+(rule ((SubDemand a b) (= a (Spj t at p1 e1)) (= b (Spj t at p2 e2)) (PredsCover p1 p2) (ExCover e1 e2))
+      ((Sub a b)) :ruleset contain)
+(rule ((= a (Spj t at p e))) ((PredsCover p p)) :ruleset contain)
+
+; Every condition of a list covered, one by one. A semi join is stricter
+; against fewer rows, an anti join or NOT IN against more.
+(rule ((ExDemand e1 (ECons x rest))) ((ExDemand e1 rest) (HasDemand e1 x)) :ruleset contain)
+(rule ((HasDemand (ECons f r) x)) ((HasDemand r x)) :ruleset contain)
+(rule ((HasDemand (ECons f r) e) (= f (Exist "semi" on o1)) (= e (Exist "semi" on o2))) ((SubDemand o1 o2)) :ruleset contain)
+(rule ((HasDemand (ECons f r) e) (= f (Exist "anti" on o1)) (= e (Exist "anti" on o2))) ((SubDemand o2 o1)) :ruleset contain)
+(rule ((HasDemand (ECons f r) e) (= f (Exist "not in" on o1)) (= e (Exist "not in" on o2))) ((SubDemand o2 o1)) :ruleset contain)
+(rule ((= f (Exist "semi" on o1)) (= e (Exist "semi" on o2)) (Sub o1 o2)) ((Stricter f e)) :ruleset contain)
+(rule ((= f (Exist "anti" on o1)) (= e (Exist "anti" on o2)) (Sub o2 o1)) ((Stricter f e)) :ruleset contain)
+(rule ((= f (Exist "not in" on o1)) (= e (Exist "not in" on o2)) (Sub o2 o1)) ((Stricter f e)) :ruleset contain)
+(rule ((HasDemand (ECons f r) x) (Stricter f x)) ((Has (ECons f r) x)) :ruleset contain)
+(rule ((HasDemand (ECons f r) x) (Has r x)) ((Has (ECons f r) x)) :ruleset contain)
+(rule ((ExDemand e1 (ENil))) ((ExCover e1 (ENil))) :ruleset contain)
+(rule ((ExDemand e1 (ECons x rest)) (Has e1 x) (ExCover e1 rest)) ((ExCover e1 (ECons x rest))) :ruleset contain)
+
+; Fewer rows: among the other's, or outer joins over narrower inputs. An
+; outer join emits each preserved row once per partner or once padded, and
+; a full join keeps a left join's rows.
+(rule ((FewerDemand a b)) ((SubDemand a b)) :ruleset contain)
+(rule ((FewerDemand a b) (Sub a b)) ((Fewer a b)) :ruleset contain)
+(rule ((Fewer a b) (Fewer b c)) ((Fewer a c)) :ruleset contain)
+(rule ((FewerDemand a b)
+       (= a (Derived oa on (RCons l1 (RCons r1 (RNil)))))
+       (= b (Derived ob on (RCons l2 (RCons r2 (RNil))))))
+      ((SubDemand l1 l2) (SubDemand r1 r2) (SubDemand l1 r2) (SubDemand r1 l2)) :ruleset contain)
+(rule ((FewerDemand a b) (= a (Derived "Left join" on (RCons l1 (RCons r1 (RNil)))))
+       (= b (Derived "Left join" on (RCons l2 (RCons r2 (RNil)))))
+       (Sub l1 l2) (Sub r1 r2))
+      ((Fewer a b)) :ruleset contain)
+(rule ((FewerDemand a b) (= a (Derived "Left join" on (RCons l1 (RCons r1 (RNil)))))
+       (= b (Derived "Full join" on (RCons l2 (RCons r2 (RNil)))))
+       (Sub l1 l2) (Sub r1 r2))
+      ((Fewer a b)) :ruleset contain)
+(rule ((FewerDemand a b) (= a (Derived "Left join" on (RCons l1 (RCons r1 (RNil)))))
+       (= b (Derived "Full join" on (RCons l2 (RCons r2 (RNil)))))
+       (Sub l1 r2) (Sub r1 l2))
+      ((Fewer a b)) :ruleset contain)
+(rule ((FewerDemand a b) (= a (Derived "Full join" on (RCons l1 (RCons r1 (RNil)))))
+       (= b (Derived "Full join" on (RCons l2 (RCons r2 (RNil)))))
+       (Sub l1 l2) (Sub r1 r2))
+      ((Fewer a b)) :ruleset contain)
+(rule ((FewerDemand a b) (= a (Derived "Full join" on (RCons l1 (RCons r1 (RNil)))))
+       (= b (Derived "Full join" on (RCons l2 (RCons r2 (RNil)))))
+       (Sub l1 r2) (Sub r1 l2))
+      ((Fewer a b)) :ruleset contain)
+
+; The same keys over rows among the other's input.
+(rule ((GroupDemand a b)
+       (= a (Derived "group" k (RCons i1 (RNil))))
+       (= b (Derived "group" k (RCons i2 (RNil)))))
+      ((SubDemand i1 i2)) :ruleset contain)
+(rule ((GroupDemand a b)
+       (= a (Derived "group" k (RCons i1 (RNil))))
+       (= b (Derived "group" k (RCons i2 (RNil))))
+       (Sub i1 i2))
+      ((GroupsAmong a b)) :ruleset contain)
+
+; Up to renaming, between contexts in play.
+(rule ((Top a)) ((Renames a a)) :ruleset contain)
+(rule ((Renames a r) (Sub r b) (Top b)) ((RSub a b)) :ruleset contain)
+(rule ((Renames a r) (Fewer r b) (Top b)) ((RFewer a b)) :ruleset contain)
+(rule ((Renames a r) (GroupsAmong r b) (Top b)) ((RGroupsAmong a b)) :ruleset contain)
+(rule ((Renames a r) (= r (Spj t at p1 e)) (= b (Spj t at p2 e)) (Top b)) ((RSameInputs a b)) :ruleset contain)
+
+; The contexts in play within `Limit` steps of a `Seed`, each step to a
+; context one is related to: either has fewer rows than the other, or
+; both are SPJs over the same inputs.
+(relation Seed (Rel))
+(function Limit () i64 :no-merge)
+(relation Related (Rel Rel))
+(function Reach (Rel) i64 :merge (min old new))
+
+(ruleset reach)
+(rule ((RFewer a b)) ((Related a b) (Related b a)) :ruleset reach)
+(rule ((RSameInputs a b)) ((Related a b)) :ruleset reach)
+(rule ((Seed a)) ((set (Reach a) 0)) :ruleset reach)
+(rule ((= d (Reach a)) (Related a b) (= l (Limit)) (< d l)) ((set (Reach b) (+ d 1))) :ruleset reach)

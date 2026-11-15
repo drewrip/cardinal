@@ -75,6 +75,10 @@ pub fn analyze_joint(
     let mut a = Analyzer::new(&resolve, options.max_product, &options.foreign_keys, false)
         .with_ranges(&query);
     a.referenced_sizes = true;
+    #[cfg(feature = "egglog")]
+    {
+        a.egglog = options.egglog;
+    }
     for (_, (root, _)) in &translated {
         a.ranged.extend(ranged_columns(root));
     }

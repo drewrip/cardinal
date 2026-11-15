@@ -48,7 +48,7 @@ pub(crate) fn subset(a: &Context, b: &Context) -> bool {
 /// `q`'s does. Those comparisons drop NULL, so a passing row has a value in
 /// their interval. Strings are compared only for equality, as their order
 /// is the collation's.
-fn implied(preds: &BTreeSet<Term>, q: &Term) -> bool {
+pub(crate) fn implied(preds: &BTreeSet<Term>, q: &Term) -> bool {
     let mut disjuncts = vec![];
     let mut todo = vec![&q.expr];
     while let Some(e) = todo.pop() {
@@ -188,7 +188,7 @@ fn stricter(f: &Exists, e: &Exists) -> bool {
 }
 
 /// The inner join of an outer join, whose rows are among its own.
-fn inner_part(c: &Context) -> Option<Context> {
+pub(crate) fn inner_part(c: &Context) -> Option<Context> {
     let Context::Derived { op, args, inputs } = c else { return None };
     if !matches!(op.as_str(), "Left join" | "Full join") || inputs.len() != 2 {
         return None;
@@ -231,6 +231,37 @@ pub(crate) fn renamed(a: &Context, b: &Context, test: impl Fn(&Context, &Context
         found = test(&renamed, b);
     });
     found
+}
+
+/// `a` with its instances of each table renamed among themselves every
+/// other way [`renamed`] tries; none past `MAX_ORDERS`.
+#[cfg_attr(not(feature = "egglog"), allow(dead_code))]
+pub(crate) fn renamings(a: &Context) -> Vec<Context> {
+    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    let tables = a.tables();
+    for t in &tables {
+        if let Some((table, _)) = t.split_once('@') {
+            groups.entry(table).or_default().push(t);
+        }
+    }
+    let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
+    let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
+    if groups.is_empty() || orders.is_none_or(|n| n > MAX_ORDERS) {
+        return vec![];
+    }
+    let mut out = vec![];
+    each_order(&groups, 0, &mut vec![], &mut |order| {
+        let names: BTreeMap<&str, &str> = groups
+            .iter()
+            .zip(order)
+            .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.as_str(), t.as_str())))
+            .filter(|(f, t)| f != t)
+            .collect();
+        if !names.is_empty() {
+            out.push(a.rename(&|r| names.get(r).map(|n| n.to_string())));
+        }
+    });
+    out
 }
 
 /// [`renamed`] for whole facts: true if `test(a, b)` holds with `a`'s

@@ -13,6 +13,7 @@
 //! written there. A run fails on a lost context, relation, relevant
 //! context, axiom or claim, or a looser bound, and lists the gained ones.
 //! Only q11 is analyzed jointly, unless `PARITY_JOINT=all` (an hour).
+//! `ONLY=q02,q11` records only those queries, and diffs only them.
 //! `PARITY_VERBOSE=1` prints each query's time. `PARITY_BOUNDS=1` also
 //! proves every analysis's bounds (minutes).
 //! `EGGLOG=1` (or `EGGLOG=fixpoint`) runs the analyses on egglog, with the
@@ -50,17 +51,7 @@ struct Record {
 }
 
 fn options() -> Options {
-    #[allow(unused_mut)]
-    let mut o = Options { foreign_keys: foreign_keys(), ..Default::default() };
-    #[cfg(feature = "egglog")]
-    {
-        o.egglog = match std::env::var("EGGLOG").as_deref() {
-            Ok("fixpoint") => Some(cardinal::egg::Reach::Fixpoint),
-            Ok("1") => Some(cardinal::egg::Reach::TwoSteps),
-            _ => None,
-        };
-    }
-    o
+    Options { foreign_keys: foreign_keys(), ..Default::default() }
 }
 
 /// The record of `a`, the one analysis made since [`parity::start`].
@@ -99,7 +90,11 @@ async fn record() -> Record {
     }
     let facts = Facts::new(set);
     let mut out = Record::default();
+    let only = std::env::var("ONLY").ok();
     for (dir, plan) in &profiles {
+        if only.as_ref().is_some_and(|o| !o.split(',').any(|n| n == plan.name)) {
+            continue;
+        }
         let t = Instant::now();
         let sql = query(dir, &plan.name);
         // DataFusion has no `AS MATERIALIZED`: some analyses are none.
@@ -129,7 +124,11 @@ async fn record() -> Record {
 /// What `new` lost and gained against `old`, as lines.
 fn diff(old: &Record, new: &Record) -> (Vec<String>, Vec<String>) {
     let (mut lost, mut gained) = (vec![], vec![]);
+    let only = std::env::var("ONLY").is_ok();
     for (name, o) in &old.cases {
+        if only && !new.cases.contains_key(name) {
+            continue;
+        }
         let Some(n) = new.cases.get(name) else {
             lost.push(format!("{name}: no analysis"));
             continue;

@@ -53,6 +53,8 @@ pub mod analysis;
 pub mod axioms;
 mod bounds;
 mod domain;
+#[cfg(feature = "egglog")]
+pub mod egg;
 mod keys;
 pub mod facts;
 pub mod joint;
@@ -352,6 +354,12 @@ pub struct Options {
     /// Simplifications of the constraints before the bounds search. Defaults
     /// to none.
     pub postprocess: Postprocess,
+    /// Relate contexts on egglog ([`egg`]), reaching relevant contexts as
+    /// far as given, rather than by the Rust tests of `rows::contain`.
+    /// Defaults to `EGGLOG` in the environment ([`egg::Reach::from_env`]),
+    /// so that the tests run either way.
+    #[cfg(feature = "egglog")]
+    pub egglog: Option<egg::Reach>,
 }
 
 impl Default for Options {
@@ -362,6 +370,8 @@ impl Default for Options {
             trace: false,
             check_facts: false,
             postprocess: Postprocess::default(),
+            #[cfg(feature = "egglog")]
+            egglog: egg::Reach::from_env(),
         }
     }
 }
@@ -489,6 +499,10 @@ fn analyze_with(
     options: Options,
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
+    #[cfg(feature = "egglog")]
+    {
+        a.egglog = options.egglog;
+    }
     let root = a.visit(plan).card;
     axioms::assert_all(&mut a);
     let root_name = a.name_of(&root);
