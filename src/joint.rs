@@ -1,112 +1,167 @@
-//! Facts as plans: a query analyzed together with the executed plans of
-//! other queries, each counted operator pinned to its rows.
+//! Reference plans: a query analyzed together with the executed plans of
+//! other queries ([`Builder::with_plans`](crate::Builder::with_plans)),
+//! each counted operator pinned to its rows.
 //!
-//! An alternative to [`Analysis::with_facts`](crate::Analysis::with_facts),
-//! and an experiment. No rules read facts off the plans, combine them, or
-//! match them to the query's operators: the profiles' operators get the
-//! constraints any operator does, the axioms between contexts
-//! ([`crate::axioms`]) relate them to the query's, and Z3 finds what
-//! follows.
+//! No rules read facts off the plans, combine them, or match them to the
+//! query's operators: the plans' operators get the constraints any
+//! operator does, the axioms between contexts ([`crate::axioms`]) relate
+//! them to the query's, and Z3 finds what follows.
 //!
 //! ```text
-//!  query ───────────┐
-//!                   ├─ rules ─ axioms ─ pins ─ dead columns ─ solve-eqs ─ dedup ─▶ Analysis
-//!  profiles ─ select┘                 X = rows  (if asked)
+//!  query ──────────┐
+//!                  ├─ rules ─ axioms ─ pins ─ dead columns ─ solve-eqs ─ dedup ─▶ Analysis
+//!  plans ─ select ─┘                 X = rows  (if asked)
 //! ```
 //!
 //! # Spec
 //!
 //! - **Input**: the query's plan, executed plans of other queries over the
-//!   same data (their counts read as [`observe`](crate::facts::observe)
-//!   reads a translated plan's), and the options.
-//! - **Output**: an [`Analysis`] of the query, without a trace.
-//! - **Selection**: of each profile, the maximal subtrees that scan only
+//!   same data, translated with a [`Catalog`], and the options.
+//! - **Selection**: of each plan, the maximal subtrees that scan only
 //!   tables the query scans or those reference by foreign keys,
 //!   transitively (`maximal`). Subtrees over a referenced table bound its
 //!   size, which the `referenced size` axiom
 //!   ([`Analyzer::referenced_size`]) bounds the referencing columns'
 //!   distinct counts by. Other subtrees share no context with the query's.
+//! - **Pins**: each operator the engine counted, and that did not stop
+//!   early, holds its node's rows: `X = rows`, or `X ≥ rows` where a
+//!   runtime filter pruned them (`counts`). Plans that were not run, or
+//!   do not translate, are left out.
 //! - **Reduction**: if [`Options::postprocess`] asks, the assertions over
 //!   dead columns are left out first ([`crate::postprocess`]), the pins
-//!   counting as [`Role::Gen`]. Then each variable of the profiles' or the axioms' that an
-//!   assertion defines by others is substituted away (Z3's `solve-eqs`),
-//!   and the assertions that then repeat are kept once. The query's
-//!   variables and the tables' sizes all stay, with exactly the values
-//!   they had, so every bound and claim on them is as before.
+//!   counting as [`Role::Gen`]. Then each variable of the plans' or the
+//!   axioms' that an assertion defines by others is substituted away (Z3's
+//!   `solve-eqs`), and the assertions that then repeat are kept once. The
+//!   query's variables and the tables' sizes all stay, with exactly the
+//!   values they had, so every bound and claim on them is as before.
+//! - **Trace**: with [`Options::trace`], every constraint before the
+//!   reduction, the plans' nodes named by their plan
+//!   ([`TraceNode::plan`](crate::TraceNode::plan)) and each pin as a fact
+//!   (`observed rows`, `observed floor`).
 //! - **Not done**: no check that the pins are consistent with the
-//!   constraints. Facts of other data, or a wrong rule, make the set
+//!   constraints. Plans of other data, or a wrong rule, make the set
 //!   unsatisfiable, and an unsatisfiable set proves any bound.
-//!   Slower than [`Analysis::with_facts`](crate::Analysis::with_facts):
-//!   the 46 DuckDB fixtures take about 11× as long in all, nearly all of
-//!   it proving the bounds.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
+use std::panic::Location;
 
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::logical_expr::logical_plan::TableScan;
 use z3::ast::{Ast, Bool, Int};
 use z3::{FuncDecl, Goal, Solver, Sort, Tactic};
 
-use crate::analysis::{Analyzer, ranged_columns};
+use crate::analysis::{Analyzer, Node, ranged_columns};
+use crate::facts::State;
+use crate::facts::state::{states, stopped};
+use crate::observed::{Catalog, ObservedPlan, Op};
 use crate::postprocess::{self, Role};
-use crate::observed::{Catalog, ObservedPlan};
-use crate::{Analysis, Options, Result, axioms, base_kind};
+use crate::trace::{FactClaim, FactInfo, FactRef};
+use crate::Options;
 
-/// `plan` analyzed together with the parts of `profiles` it could share
-/// rows with, each of their counted operators pinned to its rows (or, a
-/// runtime filter pruned its rows, bounded below by them).
-///
-/// The profiles must have run on the data the bounds are for. Plans that
-/// were not run, or do not translate, are left out.
-pub fn analyze_joint(
-    catalog: &Catalog,
-    plan: &ObservedPlan,
-    profiles: &[ObservedPlan],
-    options: Options,
-) -> Result<Analysis> {
-    let query = catalog.to_logical(plan)?;
-    let translated: Vec<_> = profiles
+/// A reference plan, translated: its root, and each operator with the
+/// subplans it became.
+pub(crate) struct Translated<'p> {
+    plan: &'p ObservedPlan,
+    root: LogicalPlan,
+    built: Vec<(usize, LogicalPlan)>,
+}
+
+/// The plans of `plans` that ran and translate with `catalog`.
+pub(crate) fn translate<'p>(catalog: &Catalog, plans: &[&'p ObservedPlan]) -> Vec<Translated<'p>> {
+    plans
         .iter()
         .filter(|p| p.counted)
-        .filter_map(|p| Some((p, catalog.to_logical_mapped(p).ok()?)))
-        .collect();
-    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
-    let mut a = Analyzer::new(&resolve, options.max_product, &options.foreign_keys, false)
-        .with_ranges(&query);
-    a.referenced_sizes = true;
-    #[cfg(feature = "egglog")]
-    {
-        a.egglog = options.egglog;
-    }
-    for (_, (root, _)) in &translated {
-        a.ranged.extend(ranged_columns(root));
-    }
-    let root = a.visit(&query).card;
-    let (own, own_scans, own_vars) = (a.nodes.len(), a.scans.len(), a.vars.len());
+        .filter_map(|p| {
+            let (root, built) = catalog.to_logical_mapped(p).ok()?;
+            Some(Translated { plan: p, root, built })
+        })
+        .collect()
+}
 
-    let tables = tables_of(&query);
-    let within = reachable(&tables, &options);
-    let mut pins = vec![];
-    for (p, (root, built)) in &translated {
+/// The columns of `plans` that get min and max variables, as the query's
+/// do ([`ranged_columns`]).
+pub(crate) fn ranged(plans: &[Translated]) -> BTreeSet<String> {
+    plans.iter().flat_map(|t| ranged_columns(&t.root)).collect()
+}
+
+/// One operator of a reference plan held to the rows it was counted with.
+pub(crate) struct Pin {
+    /// The analyzer node it became, and its variable.
+    node: usize,
+    var: String,
+    /// The plan, and the operator.
+    plan: String,
+    op: usize,
+    engine_op: String,
+    rows: u64,
+    /// Whether the rows are only a floor (a runtime filter pruned them).
+    floor: bool,
+}
+
+/// Visits each of `plans`' subtrees `query` could share rows with
+/// (`maximal`), after the query's own nodes. Returns each counted
+/// operator's pin, and the nodes each plan became, by its name.
+pub(crate) fn visit(
+    a: &mut Analyzer,
+    query: &LogicalPlan,
+    plans: &[Translated],
+    options: &Options,
+) -> (Vec<Pin>, Vec<(Range<usize>, String)>) {
+    let within = reachable(&tables_of(query), options);
+    let (mut pins, mut owners) = (vec![], vec![]);
+    for t in plans {
         let mut parts = vec![];
-        maximal(root, &within, &mut parts);
-        for t in parts {
+        maximal(&t.root, &within, &mut parts);
+        let first = a.nodes.len();
+        for part in parts {
             let start = a.nodes.len();
-            a.visit(t);
-            for (m, j, floor) in crate::facts::observe::counts(p, &a.nodes[start..], built) {
-                pins.push((a.nodes[start + m].var.clone(), p.nodes[j].rows, floor));
+            a.visit(part);
+            for (m, j, floor) in counts(t.plan, &a.nodes[start..], &t.built) {
+                let n = &t.plan.nodes[j];
+                pins.push(Pin {
+                    node: start + m,
+                    var: a.nodes[start + m].var.clone(),
+                    plan: t.plan.name.clone(),
+                    op: j,
+                    engine_op: n.engine_op.clone(),
+                    rows: n.rows,
+                    floor,
+                });
             }
         }
+        if a.nodes.len() > first {
+            owners.push((first..a.nodes.len(), t.plan.name.clone()));
+        }
     }
-    axioms::assert_all(&mut a);
-    for (var, rows, floor) in pins {
-        let (v, n) = (Int::new_const(var.as_str()), Int::from_u64(rows));
-        a.assert_as(Role::Gen, if floor { v.ge(&n) } else { v.eq(&n) });
+    (pins, owners)
+}
+
+/// Asserts each pin, and gives it as a fact for the trace.
+pub(crate) fn assert_pins(a: &Analyzer, pins: &[Pin]) -> Vec<FactClaim> {
+    let mut out = vec![];
+    for p in pins {
+        let (v, n) = (Int::new_const(p.var.as_str()), Int::from_u64(p.rows));
+        let (claim, source, op) = if p.floor { (v.ge(&n), "observed floor", ">=") } else { (v.eq(&n), "observed rows", "=") };
+        a.assert_untraced(Role::Gen, claim.clone());
+        let fact = FactRef { text: format!("|{}#{} {}|", p.plan, p.op, p.engine_op), origins: vec![format!("{}#{}", p.plan, p.op)] };
+        out.push(FactClaim {
+            claim,
+            node: Some(p.node),
+            info: FactInfo { source: source.to_string(), facts: vec![fact], value: format!("{op} {}", p.rows) },
+            at: Location::caller(),
+        });
     }
+    out
+}
+
+/// `a`'s assertions reduced (see the [spec](self#spec)): those over dead
+/// columns left out if `dead_columns`, then `solve-eqs` keeping the first
+/// `own_vars` variables and the tables' sizes, then each kept once.
+pub(crate) fn reduce(a: &Analyzer, own_vars: usize, dead_columns: bool) -> Solver {
     let mut assertions = a.solver.get_assertions();
-    if options.postprocess.dead_columns {
-        let kept = postprocess::Assertions::new(&a, &a.solver.to_string()).kept();
+    if dead_columns {
+        let kept = postprocess::Assertions::new(a, &a.solver.to_string()).kept();
         assertions = assertions.into_iter().zip(kept).filter_map(|(b, k)| k.then_some(b)).collect();
     }
     // What may be read once the analysis is made: the query's variables,
@@ -117,9 +172,9 @@ pub fn analyze_joint(
         .map(|(_, v)| v.clone())
         .chain(a.tables.values().map(|t| t.var.clone()))
         .collect();
-    // Substituted, a profile's copy of an operator the query has (a
-    // table's scan, most often) asserts what the query's does: each
-    // assertion once, the first kept in place.
+    // Substituted, a plan's copy of an operator the query has (a table's
+    // scan, most often) asserts what the query's does: each assertion
+    // once, the first kept in place.
     let solver = Solver::new();
     let mut seen = HashSet::new();
     for f in solve_eqs(&assertions, &kept) {
@@ -127,27 +182,49 @@ pub fn analyze_joint(
             solver.assert(&f);
         }
     }
+    solver
+}
 
-    let root = a.name_of(&root);
-    let scans = a.scans[..own_scans]
-        .iter()
-        .map(|(s, t, _)| (s.clone(), t.clone()))
-        .collect();
-    let mut nodes = a.nodes;
-    nodes.truncate(own);
-    Ok(Analysis {
-        root,
-        scans,
-        plan: query.display_indent().to_string(),
-        trace: None,
-        constraints: solver.to_string(),
-        assertions: solver.get_assertions().len(),
-        nodes,
-        check_facts: options.check_facts,
-        postprocess: options.postprocess.clone(),
-        // `solve-eqs` rewrote the assertions: their roles no longer apply.
-        parts: None,
-    })
+/// Each analyzer node of `nodes` an operator of `plan` became, by `built`
+/// (each operator and the subplans it became), with the operator and
+/// whether its count is only a floor for the node's rows.
+///
+/// An operator counts if the engine counted it and it did not stop early.
+/// Its count is the node's rows if no runtime or optional filter pruned at
+/// or below it (the translation leaves both out), or its state is clean; a
+/// floor if only runtime filters did ([`State::lower`]).
+fn counts(plan: &ObservedPlan, nodes: &[Node], built: &[(usize, LogicalPlan)]) -> Vec<(usize, usize, bool)> {
+    let states = states(plan);
+    let stopped = stopped(plan);
+    let mut pruned = vec![false; plan.nodes.len()];
+    for (j, n) in plan.nodes.iter().enumerate() {
+        let own = match &n.op {
+            Op::Scan { runtime_filters, filters, .. } => !runtime_filters.is_empty() || filters.iter().any(|f| f.optional),
+            _ => false,
+        };
+        pruned[j] = own || n.children.iter().any(|&c| pruned[c]);
+    }
+    let mut by_plan: HashMap<&LogicalPlan, Vec<usize>> = HashMap::new();
+    for (j, p) in built {
+        by_plan.entry(p).or_default().push(*j);
+    }
+    let mut out = vec![];
+    let mut done = BTreeSet::new();
+    for (m, node) in nodes.iter().enumerate() {
+        for &j in by_plan.get(&node.plan).into_iter().flatten() {
+            if !plan.nodes[j].counted || stopped[j] || !done.insert((m, j)) {
+                continue;
+            }
+            let floor = match &states[j] {
+                _ if !pruned[j] => false,
+                State::Clean(_) => false,
+                s if s.lower().is_some() => true,
+                _ => continue,
+            };
+            out.push((m, j, floor));
+        }
+    }
+    out
 }
 
 /// `assertions` with Z3's `solve-eqs` applied: each variable but `kept`

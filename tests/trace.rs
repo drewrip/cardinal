@@ -3,7 +3,7 @@
 
 mod common;
 
-use cardinal::{Analysis, Bounds, Options, Proof, ProofStatus, Trace, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, Options, Proof, ProofStatus, Trace};
 use datafusion::prelude::SessionContext;
 
 /// `users(id PRIMARY KEY, age)` and `orders(id PRIMARY KEY, user_id)`,
@@ -19,9 +19,13 @@ async fn shop() -> SessionContext {
     ctx
 }
 
-async fn traced(sql: &str) -> Analysis {
+async fn traced_query(sql: &str) -> Builder<'static> {
     let options = Options { trace: true, ..Default::default() };
-    analyze_sql(&shop().await, sql, options).await.unwrap()
+    Analysis::sql(&shop().await, sql).await.unwrap().options(options)
+}
+
+async fn traced(sql: &str) -> Analysis {
+    traced_query(sql).await.build().unwrap()
 }
 
 fn node_of<'a>(t: &'a Trace, kind: &str) -> usize {
@@ -30,7 +34,7 @@ fn node_of<'a>(t: &'a Trace, kind: &str) -> usize {
 
 #[tokio::test]
 async fn untraced_analysis_has_no_trace() {
-    let a = analyze_sql(&shop().await, "SELECT * FROM users", Options::default()).await.unwrap();
+    let a = Analysis::sql(&shop().await, "SELECT * FROM users").await.unwrap().build().unwrap();
     assert!(a.trace.is_none());
     assert!(a.explain(&Bounds::default()).is_err());
 }
@@ -71,8 +75,8 @@ async fn trace_round_trips_through_json() {
 
 /// `sql`, traced, with `users` holding 100 rows and `orders` 300.
 async fn traced_sized(sql: &str) -> Analysis {
-    let a = traced(sql).await;
-    a.with_facts(&common::table_sizes(&[("users", 100), ("orders", 300)])).unwrap()
+    let q = traced_query(sql).await;
+    q.with_facts(&common::table_sizes(&[("users", 100), ("orders", 300)])).build().unwrap()
 }
 
 /// Whether `proof`'s core has a constraint that a fact gave.

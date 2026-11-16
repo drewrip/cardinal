@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cardinal::Options;
-use cardinal_debug::{Dump, FactInput, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_facts};
+use cardinal_debug::{Dump, Informed, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_plans};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -82,24 +82,25 @@ struct Input {
     #[arg(long)]
     no_plan_bounds: bool,
     #[command(flatten)]
-    facts: Facts,
+    known: Known,
 }
 
-/// Facts to put in the analysis. Any of them adds a facts section.
+/// Reference plans and facts to put in the analysis. Any of them adds a
+/// section with them.
 #[derive(Args)]
-struct Facts {
-    /// A fact set, as JSON.
+struct Known {
+    /// Facts given by hand: a fact set, as JSON.
     #[arg(long)]
     facts: Option<PathBuf>,
-    /// Read facts off DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` profile in
-    /// this file; repeatable.
+    /// DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` profile of another query, as
+    /// a reference plan; repeatable.
     #[arg(long)]
     profile_duckdb: Vec<PathBuf>,
-    /// Read facts off PostgreSQL's `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)`
-    /// profile in this file; repeatable.
+    /// PostgreSQL's `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)` profile of
+    /// another query, as a reference plan; repeatable.
     #[arg(long)]
     profile_postgres: Vec<PathBuf>,
-    /// Read facts off every `*.json` profile in this directory.
+    /// Every `*.json` profile in this directory, as reference plans.
     #[arg(long)]
     profiles_dir: Option<PathBuf>,
     /// The engine whose profiles --profiles-dir holds.
@@ -109,7 +110,8 @@ struct Facts {
     /// others' profiles only.
     #[arg(long, value_name = "NAME", requires = "profiles_dir")]
     except: Option<String>,
-    /// Skip proving the bounds with facts again (and without them).
+    /// Skip proving the bounds with the plans and facts again (and without
+    /// them).
     #[arg(long)]
     no_explain: bool,
 }
@@ -134,9 +136,10 @@ struct Output {
     /// Hide constraints in the tree.
     #[arg(long, conflicts_with = "html")]
     brief: bool,
-    /// Show the analysis without its facts, as if none were given.
+    /// Show the analysis without its reference plans and facts, as if none
+    /// were given.
     #[arg(long)]
-    without_facts: bool,
+    plain: bool,
 }
 
 fn read(path: &PathBuf) -> Result<String, String> {
@@ -147,24 +150,24 @@ fn write(path: &PathBuf, text: &str) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Each profile `facts` names, by its file's stem.
-fn profiles(facts: &Facts) -> Result<Vec<Profile>, String> {
+/// Each profile `known` names, by its file's stem.
+fn profiles(known: &Known) -> Result<Vec<Profile>, String> {
     let stem = |p: &PathBuf| p.file_stem().map_or_else(|| p.display().to_string(), |s| s.to_string_lossy().into_owned());
     let mut out = vec![];
-    for (paths, postgres) in [(&facts.profile_duckdb, false), (&facts.profile_postgres, true)] {
+    for (paths, postgres) in [(&known.profile_duckdb, false), (&known.profile_postgres, true)] {
         for p in paths {
             out.push(Profile { name: stem(p), json: read(p)?, postgres });
         }
     }
-    if let Some(dir) = &facts.profiles_dir {
+    if let Some(dir) = &known.profiles_dir {
         let mut paths: Vec<PathBuf> = fs::read_dir(dir)
             .map_err(|e| format!("{}: {e}", dir.display()))?
             .filter_map(|e| Some(e.ok()?.path()))
             .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            .filter(|p| facts.except.as_deref().is_none_or(|x| stem(p) != x))
+            .filter(|p| known.except.as_deref().is_none_or(|x| stem(p) != x))
             .collect();
         paths.sort();
-        let postgres = matches!(facts.profiles_format, Engine::Postgres);
+        let postgres = matches!(known.profiles_format, Engine::Postgres);
         for p in paths {
             out.push(Profile { name: stem(&p), json: read(&p)?, postgres });
         }
@@ -190,32 +193,29 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
         options.max_product = n;
     }
     options.postprocess.dead_columns = input.dead_columns;
-    let profiles = profiles(&input.facts)?;
-    let facts = match &input.facts.facts {
-        Some(p) => Some(serde_json::from_str(&read(p)?).map_err(|e| format!("{}: {e}", p.display()))?),
+    let profiles = profiles(&input.known)?;
+    let facts = match &input.known.facts {
+        Some(p) => Some(cardinal::Facts::new(serde_json::from_str(&read(p)?).map_err(|e| format!("{}: {e}", p.display()))?)),
         None => None,
     };
-    let facts = if facts.is_some() || !profiles.is_empty() {
-        Some(FactInput {
-            facts: read_facts(&ctx, facts, &profiles).await?,
-            explain: !input.facts.no_explain,
-        })
+    let informed = if facts.is_some() || !profiles.is_empty() {
+        Some(Informed { plans: read_plans(&ctx, &profiles).await?, facts, explain: !input.known.no_explain })
     } else {
         None
     };
     let prove = Prove { bounds: !input.no_bounds, plan_bounds: !input.no_bounds && !input.no_plan_bounds };
-    dump(&ctx, &source, options, prove, facts.as_ref()).await
+    dump(&ctx, &source, options, prove, informed.as_ref()).await
 }
 
 fn show(d: &Dump, output: &Output) -> Result<(), String> {
     match &output.html {
         Some(path) => {
             if let Some(p) = &output.proof
-                && !d.proofs.iter().chain(d.facts.iter().flat_map(|f| &f.proofs)).any(|x| x.name == *p)
+                && !d.proofs.iter().chain(d.informed.iter().flat_map(|f| &f.proofs)).any(|x| x.name == *p)
             {
                 return Err(format!("no proof {p:?}"));
             }
-            write(path, &html::render(d, output.proof.as_deref(), output.without_facts))?;
+            write(path, &html::render(d, output.proof.as_deref(), output.plain))?;
             eprintln!("wrote {}", path.display());
         }
         None => {
@@ -223,7 +223,7 @@ fn show(d: &Dump, output: &Output) -> Result<(), String> {
                 proof: output.proof.clone(),
                 node: output.node,
                 brief: output.brief,
-                without_facts: output.without_facts,
+                plain: output.plain,
             };
             print!("{}", ascii::render(d, &view)?);
         }

@@ -39,7 +39,7 @@
 //! | `boolean ndv` | [`Analyzer::boolean_ndv`] |
 //! | `key ndv` | [`Analyzer::key_ndv`] |
 //! | `composite key` | [`Analyzer::composite_key`] |
-//! | `referenced size` | [`Analyzer::referenced_size`], for [`analyze_joint`](crate::joint::analyze_joint) only |
+//! | `referenced size` | [`Analyzer::referenced_size`], with reference plans ([`crate::joint`]) only |
 //! | `empty domain` | [`Analyzer::empty_domain`] |
 //! | `ndv within domain` | [`Analyzer::ndv_within_domain`] |
 //! | `range within domain` | [`Analyzer::range_within_domain`] |
@@ -262,9 +262,8 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `ndv(c | R) ≤ |S|` for each column `c` of a foreign key
     ///   `R(cols) → S`, on a scan of `R`.
-    /// - **When**: the analyzer's `referenced_sizes` is set, as
-    ///   [`analyze_joint`](crate::joint::analyze_joint) sets it; `S` need
-    ///   not be scanned. Not on a float column.
+    /// - **When**: the analysis has reference plans ([`crate::joint`]);
+    ///   `S` need not be scanned. Not on a float column.
     /// - **Why**: each row's `cols` equal the key of one row of `S`, so
     ///   they take at most `|S|` combinations, and one column no more.
     pub fn referenced_size(&self, scan: &TableScan, rel: &Rel) {
@@ -548,6 +547,10 @@ impl<'a> Analyzer<'a> {
         if parity::recording() {
             parity::push(space.snapshot(&relevant, &axioms, built, between));
         }
+        #[cfg(feature = "egglog")]
+        if let Some(r) = &space.egg {
+            self.egglog_stats = Some(r.stats.clone());
+        }
         for a in axioms {
             self.assert_axiom(a.rule, a.claim);
         }
@@ -621,7 +624,7 @@ pub fn assert_all(a: &mut Analyzer) {
 
 /// The scan kind of the table a foreign key references, by its bare name.
 fn referenced(table: &str) -> ScanKind {
-    crate::base_kind(&datafusion::common::TableReference::bare(table), "datafusion", "public")
+    crate::builder::base_kind(&datafusion::common::TableReference::bare(table), "datafusion", "public")
 }
 
 /// Output column `i` of `plan`, as an expression.

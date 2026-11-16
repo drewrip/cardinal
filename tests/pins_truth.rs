@@ -1,37 +1,37 @@
-//! Facts against the truth, on many queries run live.
+//! Reference plans against the truth, on many queries run live.
 //!
 //! Every query (TPC-H, the hand-written fixtures, the larger ones in
 //! `tests/truth/queries.sql`, and generated ones) runs in DuckDB, profiled
 //! with one thread and with four, so that plans and runtime filters differ;
 //! and in PostgreSQL, profiled as it plans them, with hash joins only, and
 //! with merge joins.
-//! Every fact derived from all the profiles is then counted from what its
-//! context means ([`FactKind::count_sql`]) and must equal its value, every
-//! bound must be at least the true count, every floor at most it, and no
-//! two plans may disagree.
-//! Last, each query DataFusion can plan is bounded with the facts, and each
-//! bound must hold its true row count.
+//! Each query DataFusion can plan is then bounded with its own profiles and
+//! the next queries' as reference plans
+//! ([`cardinal::Builder::with_plans`]): every operator they counted is
+//! pinned to its rows, so a pin that names other rows than the engine
+//! counted contradicts the constraints, or the truth. Each bound must hold
+//! the query's true row count.
 //!
 //! Needs the `duckdb` CLI, and for PostgreSQL a server with the database
 //! `scripts/postgres_fixtures.sh` loads; each is skipped without.
 //! `CARDINAL_TRUTH_N` sets the
 //! number of generated queries (default 120), `CARDINAL_TRUTH_SEED` their
-//! seed, and `CARDINAL_TRUTH_ONLY` (a substring of names) limits the queries.
+//! seed, `CARDINAL_TRUTH_ONLY` (a substring of names) limits the queries,
+//! and `CARDINAL_TRUTH_NEXT` how many next queries' profiles join each
+//! query's own (default 2).
 //!
 //! ```sh
-//! cargo test --release --test fact_truth -- --nocapture
+//! cargo test --release --test pins_truth -- --nocapture
 //! ```
 
 mod fixtures;
 mod live;
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use cardinal::facts::{Fact, FactKind, Ratio, derive_facts};
 use cardinal::observed::{Catalog, ObservedPlan};
-use cardinal::{Facts, Options};
-use fixtures::{DIR, catalog, context, foreign_keys};
+use cardinal::{Analysis, Options};
+use fixtures::{catalog, context, foreign_keys};
 use live::{Engine, Rng, TIMED_OUT};
 
 /// The hand-written larger queries, by name.
@@ -283,17 +283,8 @@ fn prefix(table: &str) -> &'static str {
     }
 }
 
-/// Whether `value` is what `counts` give for `kind`.
-fn agrees(kind: &FactKind, value: Ratio, n: u64, of: Option<u64>) -> bool {
-    match (kind, of) {
-        (FactKind::Unique { .. }, Some(of)) => n == of,
-        (_, Some(of)) => Ratio::new(n, of) == Some(value),
-        (_, None) => value.as_int() == Some(n),
-    }
-}
-
 #[tokio::test]
-async fn facts_are_true() {
+async fn pins_are_true() {
     match Engine::duckdb() {
         Some(engine) => truth(engine).await,
         None => eprintln!("skipped: no duckdb CLI"),
@@ -301,18 +292,20 @@ async fn facts_are_true() {
 }
 
 #[tokio::test]
-async fn facts_are_true_in_postgres() {
+async fn pins_are_true_in_postgres() {
     match Engine::postgres() {
         Some(engine) => truth(engine).await,
         None => eprintln!("skipped: no PostgreSQL with the fixtures' database"),
     }
 }
 
-/// Every query's facts, read off `engine`'s profiles, against its counts.
+/// Every query's bounds, with `engine`'s profiles as reference plans,
+/// against its true count.
 async fn truth(engine: Engine) {
     let catalog: Catalog = catalog().await;
     let n: usize = std::env::var("CARDINAL_TRUTH_N").ok().and_then(|n| n.parse().ok()).unwrap_or(120);
     let seed: u64 = std::env::var("CARDINAL_TRUTH_SEED").ok().and_then(|n| n.parse().ok()).unwrap_or(7);
+    let next: usize = std::env::var("CARDINAL_TRUTH_NEXT").ok().and_then(|n| n.parse().ok()).unwrap_or(2);
     let only = std::env::var("CARDINAL_TRUTH_ONLY").ok();
     let mut queries = fixture_queries();
     queries.extend(written());
@@ -343,124 +336,29 @@ async fn truth(engine: Engine) {
             }
         }
     }
-    let all: Vec<ObservedPlan> = plans.iter().map(|(.., p)| p.clone()).collect();
-    let mut facts = derive_facts(&all);
-    for c in &facts.conflicts {
-        failures.push(format!("conflict: {} = {} vs {}\n  {:?}\n  {:?}", c.kind, c.values.0, c.values.1, c.origins.0, c.origins.1));
-    }
-
-    // Every fact, bound and floor, counted: how the count may compare with
-    // each, `Less` for a bound and `Greater` for a floor.
-    let mut checks: Vec<(&Fact, Ordering, usize, Option<usize>)> = vec![];
-    let mut sql: Vec<String> = vec![];
-    let mut index: HashMap<String, usize> = HashMap::new();
-    let mut at = |q: String, sql: &mut Vec<String>| {
-        *index.entry(q.clone()).or_insert_with(|| {
-            sql.push(q);
-            sql.len() - 1
-        })
-    };
-    let mut unchecked = 0;
-    let mut uncountable: std::collections::BTreeMap<&str, usize> = Default::default();
-    let exact_facts = facts.iter().map(|f| (f, Ordering::Equal));
-    let bounds = facts.bounds().map(|f| (f, Ordering::Less));
-    let floors = facts.floors().map(|f| (f, Ordering::Greater));
-    for (f, bound) in exact_facts.chain(bounds).chain(floors) {
-        match f.kind.count_sql_in(&catalog, &facts, engine.dialect()) {
-            Some(c) => {
-                let v = at(c.value, &mut sql);
-                let of = c.of.map(|q| at(q, &mut sql));
-                checks.push((f, bound, v, of));
-            }
-            None => {
-                unchecked += 1;
-                let text = f.kind.to_string();
-                let why = if text.contains("Mark join") {
-                    "a mark join"
-                } else if text.contains("\"value\".") {
-                    "an aggregate's value"
-                } else if text.contains("top ") {
-                    "a top-n"
-                } else if text.contains("union(") {
-                    "a union"
-                } else {
-                    "other"
-                };
-                *uncountable.entry(why).or_default() += 1;
-                if why == "other" || std::env::var("CARDINAL_TRUTH_SHOW").is_ok() {
-                    eprintln!("not countable: {text}");
-                }
-            }
-        }
-    }
-    let counted = engine.values(&sql);
-    let (mut exact, mut bounded, mut floored) = (0, 0, 0);
-    for (f, bound, v, of) in &checks {
-        let (n, of) = match (&counted[*v], of.map(|o| &counted[o])) {
-            (Ok(n), None) => (*n, None),
-            (Ok(n), Some(Ok(o))) => (*n, Some(*o)),
-            (Err(e), _) | (_, Some(Err(e))) if e == TIMED_OUT => {
-                slow += 1;
-                continue;
-            }
-            (Err(e), _) | (_, Some(Err(e))) => {
-                failures.push(format!("{}: does not count: {e}\n  {}", f.kind, sql[*v]));
-                continue;
-            }
-        };
-        if *bound == Ordering::Less {
-            bounded += 1;
-            if f.value.as_int().is_none_or(|b| b < n) {
-                failures.push(format!("{} <= {} but is {n}, from {:?}", f.kind, f.value, f.origins));
-            }
-        } else if *bound == Ordering::Greater {
-            floored += 1;
-            if f.value.as_int().is_none_or(|b| b > n) {
-                failures.push(format!("{} >= {} but is {n}, from {:?}", f.kind, f.value, f.origins));
-            }
-        } else {
-            exact += 1;
-            if !agrees(&f.kind, f.value, n, of) {
-                failures.push(format!("{} = {} but is {n}{}, from {:?}", f.kind, f.value, of.map(|o| format!("/{o}")).unwrap_or_default(), f.origins));
-            }
-        }
-    }
-
-    // What the profiles did not count, counted: it must agree with what
-    // they did, and bound the queries as well.
-    let (observed, conflicts) = (facts.len(), facts.conflicts.len());
-    let (filled, unfilled) = engine.fill(&catalog, &mut facts);
-    for c in &facts.conflicts[conflicts..] {
-        failures.push(format!("conflict, once counted: {} = {} vs {}\n  {:?}\n  {:?}", c.kind, c.values.0, c.values.1, c.origins.0, c.origins.1));
-    }
-
-    // Bounds with the facts hold each query's true count.
+    // Each query bounded with its own profiles and the next queries'.
     let ctx = context();
-    let mut analyzed = 0;
-    let all = Facts::new(facts.clone());
-    let first = format!("/{}", variants[0]);
-    for (name, sql, plan) in plans.iter().filter(|(_, _, p)| p.name.ends_with(&first)) {
-        let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
-        let Ok(a) = cardinal::analyze_sql(&ctx, sql, options).await else { continue };
-        let truth = plan.nodes[plan.root].rows;
+    let (mut analyzed, mut pinned) = (0, 0);
+    let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
+    for (i, (name, sql)) in queries.iter().enumerate() {
+        let names: Vec<&str> = queries[i..].iter().take(next + 1).map(|(n, _)| n.as_str()).collect();
+        let references: Vec<&ObservedPlan> = plans.iter().filter(|(n, ..)| names.contains(&n.as_str())).map(|(.., p)| p).collect();
+        let Some(own) = references.iter().find(|p| p.name.starts_with(&format!("{name}/"))) else { continue };
+        let truth = own.nodes[own.root].rows;
+        let Ok(query) = Analysis::sql(&ctx, sql).await else { continue };
         analyzed += 1;
-        match a.with_facts(&all).and_then(|a| a.bounds()) {
+        pinned += references.len();
+        match query.options(options.clone()).with_plans(references.iter().copied()).build().and_then(|a| a.bounds()) {
             Ok(b) if !b.holds(truth) => failures.push(format!("{name}: {b}, not {truth}\n  {sql}")),
             Ok(_) => {}
             Err(e) => failures.push(format!("{name}: {e}")),
         }
     }
     println!(
-        "{}: {} queries, {} plans: {observed} facts and {} bounds and {} floors; {exact} facts, {bounded} bounds and {floored} floors counted, {unchecked} not countable; \
-         {filled} facts the profiles did not count counted since ({unfilled} not), {} with what follows; \
-         {analyzed} queries bounded; {slow} timed out; not countable: {uncountable:?}",
+        "{}: {} queries, {} plans; {analyzed} queries bounded with {pinned} reference plans in all; {slow} timed out",
         engine.name(),
         queries.len(),
         plans.len(),
-        facts.bounds().count(),
-        facts.floors().count(),
-        facts.len(),
     );
-    let _ = DIR;
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }

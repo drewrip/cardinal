@@ -4,7 +4,7 @@
 
 mod common;
 
-use cardinal::{Analysis, Bounds, PlanBounds, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, PlanBounds};
 use datafusion::prelude::SessionContext;
 
 const SIZES: &[(&str, u64)] = &[("users", 100), ("orders", 300), ("products", 50), ("order_items", 1000)];
@@ -23,13 +23,13 @@ fn shop() -> SessionContext {
     common::shop_datasets().remove(0).context(true)
 }
 
-async fn analyze(ctx: &SessionContext, sql: &str) -> Analysis {
-    analyze_sql(ctx, sql, Default::default()).await.unwrap()
+async fn query(ctx: &SessionContext, sql: &str) -> Builder<'static> {
+    Analysis::sql(ctx, sql).await.unwrap()
 }
 
 /// `sql`'s plan bounds with the shop's tables held to [`SIZES`].
 async fn sized(sql: &str) -> PlanBounds {
-    let a = analyze(&shop(), sql).await.with_facts(&common::table_sizes(SIZES)).unwrap();
+    let a = query(&shop(), sql).await.with_facts(&common::table_sizes(SIZES)).build().unwrap();
     let p = a.plan_bounds().unwrap();
     println!("{sql}");
     for (i, n) in p.nodes.iter().enumerate() {
@@ -84,11 +84,12 @@ async fn real_executions_stay_within_every_range() {
     for dataset in common::shop_datasets().into_iter().filter(|d| d.unique_keys) {
         let ctx = dataset.context(true);
         for sql in QUERIES {
-            let a = analyze(&ctx, sql).await;
+            let query = query(&ctx, sql).await;
+            let a = query.clone().build().unwrap();
             let v = a.validate(&ctx).await.unwrap();
             assert!(v.violation.is_none(), "{sql}: {:?}", v.violation);
             let sizes: Vec<(&str, u64)> = a.scans.iter().map(|(s, t)| (t.as_str(), v.rows[s])).collect();
-            let p = a.with_facts(&common::table_sizes(&sizes)).unwrap().plan_bounds().unwrap();
+            let p = query.with_facts(&common::table_sizes(&sizes)).build().unwrap().plan_bounds().unwrap();
             let failures = common::check_plan_bounds(&p, &v);
             assert!(failures.is_empty(), "{sql}: {failures:?}");
         }

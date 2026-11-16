@@ -6,24 +6,44 @@
 //! prove on the root's cardinality `X` ([`Analysis::bounds`]), or on every
 //! operator's and their sum ([`Analysis::plan_bounds`]).
 //!
-//! The constraints come from three passes, in order:
+//! An analysis is made by a [`Builder`]: the query to bound
+//! ([`Analysis::sql`], [`Analysis::plan`], ...), then what is known of the
+//! data it runs on: executed plans of other queries
+//! ([`Builder::with_plans`]) and facts given by hand
+//! ([`Builder::with_facts`]).
 //!
-//! 1. [`rules`]: a walk over the plan, one rule per operator, asserting what
-//!    the operator adds and recording each relation it makes and how its
-//!    rows are its inputs'.
+//! ```ignore
+//! let a = Analysis::sql(&ctx, sql).await?
+//!     .options(options)
+//!     .with_plans(&profiles)
+//!     .with_facts(&facts)
+//!     .build()?;
+//! ```
+//!
+//! The constraints come from these passes, in order:
+//!
+//! 1. [`rules`]: a walk over the plan, and over the reference plans' parts
+//!    the query could share rows with ([`joint`]), one rule per operator,
+//!    asserting what the operator adds and recording each relation it makes
+//!    and how its rows are its inputs'.
 //! 2. [`axioms`]: what holds of any rows whatever made them, asserted over
-//!    those records and between [contexts](rows), in every analysis.
-//! 3. [`facts`]: counts read off plans that ran, added as claims on the
-//!    query's operators ([`Analysis::with_facts`]), assumed consistent with
-//!    the first two unless [`Options::check_facts`] asks to check.
-//! 4. [`postprocess`]: when bounds are searched for, constraints that
+//!    those records and between [contexts](rows), in every analysis. The
+//!    contexts are related on egglog ([`egg`]) unless [`Options::egglog`]
+//!    says otherwise.
+//! 3. [`joint`]: each operator of a reference plan pinned to the rows it
+//!    was counted with; the plans' own variables then substituted away.
+//! 4. [`facts`]: facts given by hand, added as claims on the query's
+//!    operators, assumed consistent with the rest unless
+//!    [`Options::check_facts`] asks to check.
+//! 5. [`postprocess`]: when bounds are searched for, constraints that
 //!    cannot move them are left out, if [`Options::postprocess`] asks.
 //!
 //! ```text
-//!                 SQL ──parse, optimize──▶ LogicalPlan
-//!                                               │
-//! ┌─ 1. rules: Analyzer::visit ─────────────────▼────────────┐
-//! │ bottom-up, one rule per operator                         │
+//!       query: SQL ─parse, optimize─▶ LogicalPlan      reference plans
+//!                                               │      (ObservedPlan)
+//! ┌─ 1. rules: Analyzer::visit ─────────────────▼──────────▼─┐
+//! │ bottom-up, one rule per operator, the query's, then the  │
+//! │ plans' parts over its tables                             │
 //! │   asserts what the operator adds   X ≤ l·r, X = Σ, …     │──┐
 //! │   records each relation            Relation: variables,  │  │
 //! │                                    domains, keys, origin │  │
@@ -36,15 +56,18 @@
 //! │ each relation   ndv ≤ X, keys, domains, row facts        │  │
 //! │ each link       X ≤ l, ndv ≤ ndv_l, ranges within        │  ├─▶ Z3
 //! │ one table       disjoint filters split it                │  │
-//! │ contexts        ⊆, fewer, joins, semi + anti, …          │──┘
+//! │ contexts        ⊆, fewer, joins, semi + anti, … (egglog) │  │
+//! └─────────────────────────────────────────────┬────────────┘  │
+//! ┌─ 3. pins: joint ────────────────────────────▼────────────┐  │
+//! │ a counted operator X = rows (≥ where a runtime filter    │  │
+//! │ pruned); dead columns, then the plans' variables, out    │──┘
 //! └─────────────────────────────────────────────┬────────────┘
 //!                  Analysis: constraints, nodes │
-//! ┌─ 3. facts: Analysis::with_facts ────────────▼────────────┐
-//! │ observe ─▶ derive ─▶ apply                               │
-//! │ a claim on an operator; checked against 1, 2 if asked    │──▶ Z3
+//! ┌─ 4. facts: Builder::with_facts ─────────────▼────────────┐
+//! │ a claim on an operator; checked against 1–3 if asked     │──▶ Z3
 //! └─────────────────────────────────────────────┬────────────┘
 //!                                               ▼
-//!                  4. postprocess: dead columns left out, if asked
+//!                  5. postprocess: dead columns left out, if asked
 //!                                               ▼
 //!                          bounds search: Analysis::bounds, plan_bounds
 //! ```
@@ -52,6 +75,7 @@
 pub mod analysis;
 pub mod axioms;
 mod bounds;
+mod builder;
 mod domain;
 #[cfg(feature = "egglog")]
 pub mod egg;
@@ -65,28 +89,23 @@ pub mod parity;
 pub mod postprocess;
 pub mod rows;
 pub mod rules;
+mod stats;
 pub mod trace;
 mod validate;
 
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
+pub use builder::Builder;
+pub use stats::{EgglogStats, RuleStats};
 pub use facts::Facts;
 pub use postprocess::Postprocess;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use datafusion::catalog::TableProvider;
-use datafusion::common::TableReference;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::datasource::cte_worktable::CteWorkTable;
-use datafusion::datasource::source_as_provider;
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::prelude::SessionContext;
 use z3::ast::Int;
 
-use analysis::{Analyzer, Node, ScanKind};
+use analysis::Node;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -101,6 +120,10 @@ pub enum Error {
     /// An engine's plan profile that could not be read.
     #[error("unreadable plan profile: {0}")]
     Observed(String),
+    /// Reference plans given for a query with no catalog to read them
+    /// against ([`Analysis::logical`]).
+    #[error("reference plans need a catalog: make the query with Analysis::sql or Analysis::plan")]
+    NoCatalog,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -118,6 +141,9 @@ pub struct Analysis {
     /// Every constraint with the plan node and analyzer line it comes from,
     /// if [`Options::trace`] is set.
     pub trace: Option<Trace>,
+    /// What relating the contexts on egglog took and found, if they were
+    /// ([`Options::egglog`]).
+    pub egglog: Option<EgglogStats>,
     /// The constraint set `S`, and how many assertions it holds (to check
     /// that it parses back completely).
     constraints: String,
@@ -259,19 +285,6 @@ impl Analysis {
         search_of(&self.constraints, self.assertions, &self.root)
     }
 
-    /// This analysis with what `facts` know among its constraints: every row
-    /// count, distinct count and least or greatest value they give of an
-    /// operator's rows, exact or a bound, as a claim on its variable.
-    ///
-    /// The facts must describe the data the bounds are for: a fact read off
-    /// a plan of other data gives bounds about that data. Claims are assumed
-    /// consistent with the constraints; an inconsistent set proves any
-    /// bound. With [`Options::check_facts`], a claim that contradicts them,
-    /// or whose consistency Z3 cannot decide, is left out instead.
-    pub fn with_facts(&self, facts: &Facts) -> Result<Analysis> {
-        facts::apply::apply(self, facts)
-    }
-
     /// Proves each side of `bounds` again, with a minimal set of the
     /// constraints that proves it: which operators, rules and facts a bound
     /// comes from. Needs [`Options::trace`].
@@ -347,7 +360,7 @@ pub struct Options {
     /// from ([`Analysis::trace`]), to inspect or explain the analysis.
     /// Defaults to false.
     pub trace: bool,
-    /// Check each claim [`Analysis::with_facts`] adds against the
+    /// Check each claim [`Builder::with_facts`] adds against the
     /// constraints, one solver check per claim, and leave out those that
     /// contradict them. Off, facts are assumed consistent. Defaults to false.
     pub check_facts: bool,
@@ -355,9 +368,10 @@ pub struct Options {
     /// to none.
     pub postprocess: Postprocess,
     /// Relate contexts on egglog ([`egg`]), reaching relevant contexts as
-    /// far as given, rather than by the Rust tests of `rows::contain`.
-    /// Defaults to `EGGLOG` in the environment ([`egg::Reach::from_env`]),
-    /// so that the tests run either way.
+    /// far as given; `None` relates them by the Rust tests of
+    /// `rows::contain`. Defaults to two steps, unless `EGGLOG` in the
+    /// environment says otherwise ([`egg::Reach::from_env`]), so that the
+    /// tests run either way.
     #[cfg(feature = "egglog")]
     pub egglog: Option<egg::Reach>,
 }
@@ -373,170 +387,5 @@ impl Default for Options {
             #[cfg(feature = "egglog")]
             egglog: egg::Reach::from_env(),
         }
-    }
-}
-
-/// Parses and optimizes `sql` with `ctx`, then analyzes the resulting plan.
-///
-/// A scan counts as a base table only if its provider is the one registered in
-/// `ctx`'s catalog under that name. Every spelling of a table's name
-/// (`users`, `public.users`, ...) therefore maps to one variable, and work tables
-/// and table functions such as `generate_series` are not counted as input.
-pub async fn analyze_sql(ctx: &SessionContext, sql: &str, options: Options) -> Result<Analysis> {
-    let state = ctx.state();
-    let plan = state.create_logical_plan(sql).await?;
-    let plan = state.optimize(&plan)?;
-
-    let catalog = state.config().options().catalog.clone();
-    let (default_catalog, default_schema) = (catalog.default_catalog, catalog.default_schema);
-
-    let mut scans = Vec::new();
-    plan.apply_with_subqueries(|p| {
-        if let LogicalPlan::TableScan(scan) = p {
-            scans.push(scan.clone());
-        }
-        Ok(TreeNodeRecursion::Continue)
-    })?;
-    let mut base = HashMap::new();
-    for scan in scans {
-        let Ok(registered) = ctx.table_provider(scan.table_name.clone()).await else {
-            continue;
-        };
-        let Ok(scanned) = source_as_provider(&scan.source) else {
-            continue;
-        };
-        if provider_ptr(&registered) == provider_ptr(&scanned) {
-            let kind = base_kind(&scan.table_name, &default_catalog, &default_schema);
-            base.insert(provider_ptr(&scanned), kind);
-        }
-    }
-
-    let resolve = |scan: &TableScan| {
-        source_as_provider(&scan.source)
-            .ok()
-            .and_then(|p| base.get(&provider_ptr(&p)).cloned())
-            .unwrap_or(ScanKind::NonBase)
-    };
-    Ok(analyze_with(&plan, &resolve, options))
-}
-
-/// Analyzes an already-built logical plan.
-///
-/// With no catalog to consult, every scan except a recursive CTE's work table
-/// counts as a base table, and names are resolved against DataFusion's default
-/// catalog and schema (`datafusion.public`).
-pub fn analyze_plan(plan: &LogicalPlan, options: Options) -> Analysis {
-    let resolve = |scan: &TableScan| {
-        let is_work_table = source_as_provider(&scan.source)
-            .map(|p| p.downcast_ref::<CteWorkTable>().is_some())
-            .unwrap_or(false);
-        if is_work_table {
-            ScanKind::NonBase
-        } else {
-            base_kind(&scan.table_name, "datafusion", "public")
-        }
-    };
-    analyze_with(plan, &resolve, options)
-}
-
-/// Analyzes `plan`, the plan an engine chose for a query, in place of the
-/// plan DataFusion would choose. Its operators keep the engine's order, so
-/// their rows are the ones the engine's profiles count: see
-/// [`observed::Catalog::to_logical`]. The plan's row counts, if any, are not
-/// read.
-pub fn analyze_observed(catalog: &observed::Catalog, plan: &observed::ObservedPlan, options: Options) -> Result<Analysis> {
-    let plan = catalog.to_logical(plan)?;
-    // Every scan is of a table in the catalog, by its bare name.
-    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
-    Ok(analyze_with(&plan, &resolve, options))
-}
-
-/// [`analyze_observed`] on DuckDB's plan for `sql`, as printed by `EXPLAIN
-/// (FORMAT JSON)` (or by `EXPLAIN (ANALYZE, FORMAT JSON)`).
-pub fn analyze_duckdb(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
-    let plan = observed::from_duckdb_explain(catalog, "", json, sql)?;
-    analyze_observed(catalog, &plan, options)
-}
-
-/// [`analyze_observed`] on PostgreSQL's plan for `sql`, as printed by
-/// `EXPLAIN (VERBOSE, FORMAT JSON)` (or with `ANALYZE`, too).
-pub fn analyze_postgres(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
-    let plan = observed::from_postgres_explain(catalog, "", json, sql)?;
-    analyze_observed(catalog, &plan, options)
-}
-
-/// Identity of a provider object. An address, not a pointer, so futures holding
-/// it stay `Send`.
-fn provider_ptr(p: &Arc<dyn TableProvider>) -> usize {
-    Arc::as_ptr(p) as *const () as usize
-}
-
-/// Canonical identity and display name for a base table reference.
-fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str) -> ScanKind {
-    let r = name.clone().resolve(default_catalog, default_schema);
-    let key = format!("{}\0{}\0{}", r.catalog, r.schema, r.table);
-    let display = if *r.catalog == *default_catalog && *r.schema == *default_schema {
-        r.table.to_string()
-    } else {
-        r.to_string()
-    };
-    ScanKind::Base { key, display }
-}
-
-/// The analyzer's nodes for `plan`, and each base-table scan as (scan
-/// variable, table name), as [`analyze_observed`] builds them.
-pub(crate) fn nodes(plan: &LogicalPlan, options: &Options) -> (Vec<Node>, Vec<(String, String)>) {
-    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
-    let mut a = Analyzer::new(&resolve, options.max_product, &options.foreign_keys, false).with_ranges(plan);
-    a.visit(plan);
-    let scans = a.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
-    (a.nodes, scans)
-}
-
-fn analyze_with(
-    plan: &LogicalPlan,
-    resolve: &dyn Fn(&TableScan) -> ScanKind,
-    options: Options,
-) -> Analysis {
-    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
-    #[cfg(feature = "egglog")]
-    {
-        a.egglog = options.egglog;
-    }
-    let root = a.visit(plan).card;
-    axioms::assert_all(&mut a);
-    let root_name = a.name_of(&root);
-    let constraints = a.solver.to_string();
-    let assertions = a.solver.get_assertions().len();
-    let parts = postprocess::Assertions::new(&a, &constraints);
-
-    let mut tables: Vec<(String, String)> = a
-        .tables
-        .values()
-        .map(|t| (t.display.clone(), t.symbol.clone()))
-        .collect();
-    tables.sort();
-
-    let scans: Vec<(String, String)> = a
-        .scans
-        .iter()
-        .map(|(s, t, _)| (s.clone(), t.clone()))
-        .collect();
-    let trace = options.trace.then(|| Trace::build(&a, &constraints, &root_name, &scans, &tables));
-    if let Some(t) = &trace {
-        assert_eq!(t.constraints.len(), assertions, "every assertion is traced");
-    }
-
-    Analysis {
-        root: root_name,
-        scans,
-        plan: plan.display_indent().to_string(),
-        trace,
-        constraints,
-        assertions,
-        nodes: a.nodes,
-        check_facts: options.check_facts,
-        postprocess: options.postprocess,
-        parts: Some(parts),
     }
 }

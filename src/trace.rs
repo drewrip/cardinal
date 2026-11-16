@@ -8,6 +8,7 @@
 //! rules that give it.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::panic::Location;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,8 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trace {
     /// Every plan node, children before parents; a node's id is its index.
+    /// The query's come first, then each reference plan's
+    /// ([`TraceNode::plan`]).
     pub nodes: Vec<TraceNode>,
     /// Every constraint, in the order Z3 was given them; a constraint's id is
     /// its index.
@@ -51,6 +54,10 @@ pub struct TraceNode {
     pub inputs: Vec<usize>,
     /// For a scan with pushed-down filters: the unfiltered scan's variable.
     pub raw_var: Option<String>,
+    /// The reference plan the node is of ([`crate::Builder::with_plans`]);
+    /// `None` for the query's own.
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 /// One constraint given to Z3.
@@ -72,7 +79,8 @@ pub struct Constraint {
     pub code: String,
     /// The variables the constraint mentions.
     pub vars: Vec<String>,
-    /// For a constraint a fact gave ([`crate::Analysis::with_facts`]): which, and
+    /// For a constraint a fact gave ([`crate::Builder::with_facts`]), or a
+    /// reference plan's count ([`crate::Builder::with_plans`]): which, and
     /// what it says. `None` for the analyzer's own.
     #[serde(default)]
     pub fact: Option<FactInfo>,
@@ -82,7 +90,8 @@ pub struct Constraint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactInfo {
     /// What kind of claim it is: `pinned rows`, `pinned ndv`, `ndv cap`,
-    /// `range floor`, `range cap`, `row cap` or `floor`.
+    /// `range floor`, `range cap`, `row cap` or `floor` of a fact, or
+    /// `observed rows` or `observed floor` of a reference plan.
     pub source: String,
     /// The facts it is read from.
     pub facts: Vec<FactRef>,
@@ -90,7 +99,8 @@ pub struct FactInfo {
     pub value: String,
 }
 
-/// One fact, by its text, and where it was read.
+/// One fact, by its text, and where it was read: for a reference plan's
+/// count, `|plan#operator engine operator|`, and `plan#operator`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactRef {
     /// The fact without its value, e.g. `|lineitem|`.
@@ -105,7 +115,7 @@ impl FactRef {
     }
 }
 
-/// A claim a fact gave, as [`crate::Analysis::with_facts`] asserts it.
+/// A claim a fact or a reference plan gave, as asserted.
 pub(crate) struct FactClaim {
     pub claim: Bool,
     /// The plan node whose variable it holds.
@@ -164,6 +174,7 @@ impl Trace {
         root: &str,
         scans: &[(String, String)],
         tables: &[(String, String)],
+        plans: &[(Range<usize>, String)],
     ) -> Trace {
         let declarations: String = constraints
             .lines()
@@ -171,7 +182,12 @@ impl Trace {
             .map(|l| format!("{l}\n"))
             .collect();
         let declared = declared(&declarations);
-        let nodes = a.nodes.iter().enumerate().map(|(id, n)| node(id, n)).collect();
+        let nodes = a
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, n)| TraceNode { plan: plans.iter().find(|(r, _)| r.contains(&id)).map(|(_, p)| p.clone()), ..node(id, n) })
+            .collect();
         let sources: Vec<(&str, Vec<&str>)> = SOURCES.iter().map(|(p, s)| (*p, s.lines().collect())).collect();
         let constraints = a
             .log
@@ -234,7 +250,8 @@ impl Trace {
         trace
     }
 
-    /// This trace with only the analyzer's constraints, none from facts.
+    /// This trace with only the analyzer's constraints, none from facts or
+    /// reference plans' counts.
     pub fn without_facts(&self) -> Trace {
         let mut trace = self.clone();
         trace.constraints.retain(|c| c.fact.is_none());
@@ -407,6 +424,7 @@ fn node(id: usize, n: &Node) -> TraceNode {
         columns,
         inputs: n.inputs.clone(),
         raw_var: n.raw_scan.as_ref().map(|(v, _, _)| v.clone()),
+        plan: None,
     }
 }
 

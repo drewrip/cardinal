@@ -73,22 +73,16 @@ fn unknown_proof_is_an_error() {
 }
 
 const PROFILES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/duckdb/tpch");
-const Q05: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/tpch/q05.sql");
-const Q05_FKS: [&str; 6] = [
-    "lineitem(l_orderkey)->orders(o_orderkey)",
-    "lineitem(l_suppkey)->supplier(s_suppkey)",
-    "orders(o_custkey)->customer(c_custkey)",
-    "customer(c_nationkey)->nation(n_nationkey)",
-    "supplier(s_nationkey)->nation(n_nationkey)",
-    "nation(n_regionkey)->region(r_regionkey)",
-];
+const Q04: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/tpch/q04.sql");
+const Q04_FKS: [&str; 2] = ["lineitem(l_orderkey)->orders(o_orderkey)", "orders(o_custkey)->customer(c_custkey)"];
 
-/// `dump` of TPC-H Q5 with the other queries' profiles' facts, with
+/// `dump` of TPC-H Q4 with its own profile as a reference plan, with
 /// `extra` arguments.
-fn dump_q05(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
+fn dump_q04(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
     let json = temp(name);
-    let mut args = vec!["dump", "--schema", SCHEMA, "--sql", Q05, "--profiles-dir", PROFILES, "--except", "q05"];
-    for fk in &Q05_FKS {
+    let profile = format!("{PROFILES}/q04.json");
+    let mut args = vec!["dump", "--schema", SCHEMA, "--sql", Q04, "--profile-duckdb", &profile];
+    for fk in &Q04_FKS {
         args.extend(["--fk", fk]);
     }
     args.extend(extra);
@@ -99,59 +93,83 @@ fn dump_q05(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
 }
 
 #[test]
-fn facts_from_profiles() {
-    let (json, dump) = dump_q05("q05.json", &[]);
-    let facts = dump.facts.as_ref().expect("a facts section");
-    assert!(facts.explained && !facts.proofs.is_empty());
-    assert_eq!(facts.proofs.len(), facts.base_proofs.len());
-    let base = dump.trace.constraints.len();
-    assert_eq!(facts.trace.constraints[..base], dump.trace.constraints[..]);
-    assert!(facts.trace.constraints[base..].iter().all(|c| c.fact.is_some()));
-    assert!(facts.trace.constraints[base..].iter().any(|c| c.fact.as_ref().unwrap().source == "pinned rows"));
-    // Some bound holds only with the facts, and its proof names them.
-    let tighter = facts.proofs.iter().zip(&facts.base_proofs).find(|(w, wo)| {
+fn reference_plans_from_profiles() {
+    let (json, dump) = dump_q04("q04.json", &[]);
+    let informed = dump.informed.as_ref().expect("an informed section");
+    assert_eq!(informed.plans, ["q04"]);
+    assert!(informed.explained && !informed.proofs.is_empty());
+    assert_eq!(informed.proofs.len(), informed.base_proofs.len());
+    let t = &informed.trace;
+    // The query's nodes, then the plan's.
+    assert_eq!(t.nodes.iter().filter(|n| n.plan.is_none()).count(), dump.trace.nodes.len());
+    assert!(t.nodes.iter().any(|n| n.plan.as_deref() == Some("q04")));
+    assert!(t.constraints.iter().any(|c| c.fact.as_ref().is_some_and(|f| f.source == "observed rows")));
+    assert!(dump.egglog.is_some() && informed.egglog.is_some());
+    // Some bound holds only with the plan, and its proof names a pin.
+    let tighter = informed.proofs.iter().zip(&informed.base_proofs).find(|(w, wo)| {
         w.status == cardinal::ProofStatus::Proven && wo.status != cardinal::ProofStatus::Proven
     });
-    let (with, _) = tighter.expect("a bound only the facts prove");
-    assert!(with.core.iter().any(|&c| facts.trace.constraints[c].fact.is_some()));
+    let (with, _) = tighter.expect("a bound only the plan proves");
+    assert!(with.core.iter().any(|&c| t.constraints[c].fact.is_some()));
 
     let path = json.to_str().unwrap();
     let text = run(&["view", path]);
-    for want in ["With facts: ", "Facts:   ", "◆ [", "fact: pinned rows", "Proofs (without facts / with facts)", "Facts used"] {
+    for want in ["Informed: ", "Plans:   1 reference plans", "Reference plan q04:", "◆ [", "fact: observed rows", "Proofs (plain / informed)", "Pins and facts used", "egglog (two steps"] {
         assert!(text.contains(want), "no {want:?} in {text}");
     }
     let proof = run(&["view", path, "--proof", &with.name]);
     assert!(proof.contains(&format!("Proof {}", with.name)) && proof.contains("fact: "), "{proof}");
-    let without = run(&["view", path, "--without-facts"]);
-    assert!(!without.contains("With facts") && !without.contains("◆"), "{without}");
+    let plain = run(&["view", path, "--plain"]);
+    assert!(!plain.contains("Informed") && !plain.contains("◆") && !plain.contains("Reference plan"), "{plain}");
 
-    let html = temp("q05.html");
+    let html = temp("q04.html");
     run(&["view", path, "--html", html.to_str().unwrap()]);
     let page = std::fs::read_to_string(&html).unwrap();
-    assert!(page.contains("Without facts") && page.contains("\"source\":\"pinned rows\""));
+    assert!(page.contains("Plain") && page.contains("\"source\":\"observed rows\"") && page.contains("egglog-rules"));
 }
 
 #[test]
-fn facts_without_explaining() {
-    let (_, dump) = dump_q05("q05-quick.json", &["--no-explain"]);
-    let facts = dump.facts.expect("a facts section");
-    assert!(!facts.explained && facts.proofs.is_empty() && facts.base_proofs.is_empty());
-    assert!(facts.bounds.is_some());
+fn facts_by_hand() {
+    use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio};
+    let mut set = FactSet::default();
+    set.insert(Fact { kind: FactKind::Cardinality(Context::table("nation")), value: Ratio::int(25), origins: vec![Origin::Counted] });
+    let facts = temp("facts.json");
+    std::fs::write(&facts, serde_json::to_string(&set).unwrap()).unwrap();
+    let json = temp("hand.json");
+    run(&["dump", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--facts", facts.to_str().unwrap(), "-o", json.to_str().unwrap()]);
+    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let informed = dump.informed.expect("an informed section");
+    assert!(informed.plans.is_empty());
+    assert_eq!(informed.bounds.as_deref(), Some("X = 25"));
+    assert!(informed.trace.constraints.iter().any(|c| c.fact.as_ref().is_some_and(|f| f.source == "pinned rows")));
+}
+
+#[test]
+fn reference_plans_without_explaining() {
+    let (_, dump) = dump_q04("q04-quick.json", &["--no-explain"]);
+    let informed = dump.informed.expect("an informed section");
+    assert!(!informed.explained && informed.proofs.is_empty() && informed.base_proofs.is_empty());
+    assert!(informed.bounds.is_some());
 }
 
 #[test]
 fn dumps_without_facts_still_load() {
     let json = temp("old.json");
     run(&["dump", "--schema", SCHEMA, "--query", QUERY, "-o", json.to_str().unwrap()]);
-    // A dump from before facts: no `facts`, and no `fact` on its constraints.
+    // A dump from before facts and egglog: no `informed` or `egglog`, and no
+    // `fact` on its constraints or `plan` on its nodes.
     let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
-    v.as_object_mut().unwrap().remove("facts");
+    v.as_object_mut().unwrap().remove("informed");
+    v.as_object_mut().unwrap().remove("egglog");
     for c in v["trace"]["constraints"].as_array_mut().unwrap() {
         c.as_object_mut().unwrap().remove("fact");
     }
+    for n in v["trace"]["nodes"].as_array_mut().unwrap() {
+        n.as_object_mut().unwrap().remove("plan");
+    }
     std::fs::write(&json, v.to_string()).unwrap();
     let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
-    assert!(dump.facts.is_none() && dump.trace.constraints.iter().all(|c| c.fact.is_none()));
+    assert!(dump.informed.is_none() && dump.trace.constraints.iter().all(|c| c.fact.is_none()));
     let text = run(&["view", json.to_str().unwrap()]);
-    assert!(!text.contains("With facts"), "{text}");
+    assert!(!text.contains("Informed") && text.contains("egglog: not used"), "{text}");
 }

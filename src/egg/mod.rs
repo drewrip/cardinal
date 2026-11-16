@@ -1,4 +1,4 @@
-//! The relations between contexts on egglog, an alternative to
+//! The relations between contexts on egglog, by default in place of
 //! `rows::contain`'s pairwise tests ([`crate::Options::egglog`]).
 //!
 //! Contexts are terms of the schema in `rows.egg`, which mirrors
@@ -31,13 +31,13 @@ pub enum Reach {
 }
 
 impl Reach {
-    /// `EGGLOG=1` is two steps, `EGGLOG=fixpoint` the fixpoint; anything
-    /// else, none.
+    /// The default reach: two steps, unless `EGGLOG` says otherwise
+    /// (`fixpoint`, or `0` for none, relating contexts in Rust).
     pub fn from_env() -> Option<Reach> {
         match std::env::var("EGGLOG").as_deref() {
-            Ok("1") => Some(Reach::TwoSteps),
+            Ok("0") => None,
             Ok("fixpoint") => Some(Reach::Fixpoint),
-            _ => None,
+            _ => Some(Reach::TwoSteps),
         }
     }
 }

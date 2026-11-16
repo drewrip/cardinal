@@ -25,8 +25,9 @@ use crate::rows::logical::Logical;
 use crate::trace::{FactClaim, FactInfo, FactRef};
 use crate::{Analysis, Result};
 
-/// A [`FactSet`] made ready for analyses ([`Analysis::with_facts`]): closed
-/// once, with what every analysis looks up in it indexed. Clones share it,
+/// A [`FactSet`] made ready for analyses
+/// ([`Builder::with_facts`](crate::Builder::with_facts)): checked once,
+/// with what every analysis looks up in it indexed. Clones share it,
 /// so one set of facts serves many analyses without being rebuilt.
 #[derive(Debug, Clone)]
 pub struct Facts(Arc<Shared>);
@@ -52,9 +53,10 @@ struct Shared {
 }
 
 impl Facts {
-    /// `set`, closed ([`FactSet::close`]). Pass facts as observed or closed.
+    /// `set`, with each bound or floor an exact fact contradicts recorded
+    /// as a conflict ([`FactSet::conflicts`]).
     pub fn new(mut set: FactSet) -> Facts {
-        set.close();
+        set.check_bounds();
         let conflicted = set.conflicts.iter().map(|c| c.kind.clone()).collect();
         let bounded = tables_of(set.bounds().filter_map(|f| match &f.kind {
             FactKind::Distinct { keys, over } if keys.len() == 1 => Some(over),
@@ -67,7 +69,7 @@ impl Facts {
         Facts(Arc::new(Shared { set, conflicted, bounded, ranged, canonical: Mutex::default(), canonicals: Mutex::default() }))
     }
 
-    /// The closed facts.
+    /// The facts.
     pub fn set(&self) -> &FactSet {
         &self.0.set
     }

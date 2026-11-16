@@ -14,7 +14,7 @@
 
 mod common;
 
-use cardinal::analyze_sql;
+use cardinal::Analysis;
 use common::{Rng, check_bounds, shop_datasets};
 use datafusion::prelude::SessionContext;
 
@@ -352,9 +352,11 @@ async fn check_mode(
         if df.collect().await.is_err() {
             return None;
         }
-        let a = match analyze_sql(ctx, sql, Default::default()).await {
-            Ok(a) => a,
-            Err(_) => return None,
+        let Ok(query) = Analysis::sql(ctx, sql).await else {
+            return None;
+        };
+        let Ok(a) = query.clone().build() else {
+            return None;
         };
         // Bounds without facts depend only on the query; compute them once
         // per mode.
@@ -389,14 +391,14 @@ async fn check_mode(
             }
         }
         if v.violation.is_none() {
-            let sized = common::sized(&a, &sizes);
+            let sized = common::sized(&query, &sizes);
             for f in check_bounds(&sized, &a, &v) {
                 failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
             }
             if v.rows.get(&a.root).is_some_and(|&n| sized.lower == n && sized.upper == Some(n)) {
                 stats.exact += 1;
             }
-            let plan = a.with_facts(&common::table_sizes(&sizes)).unwrap().plan_bounds().unwrap();
+            let plan = query.with_facts(&common::table_sizes(&sizes)).build().unwrap().plan_bounds().unwrap();
             for f in common::check_plan_bounds(&plan, &v) {
                 failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
             }

@@ -1,8 +1,8 @@
 //! Parity of the relations between contexts, old path against new. For
 //! every DuckDB fixture, analyzed as DataFusion plans it, as DuckDB did,
 //! and jointly with the other profiles, it records the contexts, the
-//! relations between them, the relevant ones, the axioms, and the claims
-//! facts give ([`cardinal::parity`]).
+//! relations between them, the relevant ones, and the axioms
+//! ([`cardinal::parity`]).
 //!
 //! ```sh
 //! PARITY_WRITE=1 cargo test --release --test egglog_parity   # write the baseline
@@ -11,22 +11,21 @@
 //!
 //! The baseline is `target/egglog/baseline.json`; without one, a run is
 //! written there. A run fails on a lost context, relation, relevant
-//! context, axiom or claim, or a looser bound, and lists the gained ones.
+//! context or axiom, or a looser bound, and lists the gained ones.
 //! Only q11 is analyzed jointly, unless `PARITY_JOINT=all` (an hour).
 //! `ONLY=q02,q11` records only those queries, and diffs only them.
 //! `PARITY_VERBOSE=1` prints each query's time. `PARITY_BOUNDS=1` also
 //! proves every analysis's bounds (minutes).
-//! `EGGLOG=1` (or `EGGLOG=fixpoint`) runs the analyses on egglog, with the
-//! `egglog` feature.
+//! The analyses relate contexts on egglog by default; `EGGLOG=0` runs the
+//! Rust path, and `EGGLOG=fixpoint` reaches as far as the relations go.
 
 mod fixtures;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use cardinal::facts::FactSet;
 use cardinal::parity::{self, Snapshot};
-use cardinal::{Analysis, Facts, Options};
+use cardinal::{Analysis, Options};
 use fixtures::{catalog, context, foreign_keys, plans, query};
 use serde::{Deserialize, Serialize};
 
@@ -37,8 +36,6 @@ const RUN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/egglog/run.json")
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Case {
     snapshot: Snapshot,
-    /// The claims every fact gives, each once.
-    claims: BTreeSet<String>,
     /// `(lower, upper)`, with `PARITY_BOUNDS`.
     bounds: Option<(u64, Option<u64>)>,
     /// Seconds proving them.
@@ -55,26 +52,24 @@ fn options() -> Options {
 }
 
 /// The record of `a`, the one analysis made since [`parity::start`].
-fn case(a: Option<Analysis>, facts: &Facts) -> Option<Case> {
+fn case(a: Option<Analysis>) -> Option<Case> {
     let mut snapshots = parity::take();
     let t = Instant::now();
     let a = a?;
     assert_eq!(snapshots.len(), 1, "one analysis relates contexts once");
     let snapshot = snapshots.pop().unwrap();
-    let with = a.with_facts(facts).unwrap();
-    let claims = with.constraints()[a.constraints().len()..].lines().map(str::to_string).collect();
     let (bounds, z3) = match std::env::var("PARITY_BOUNDS").is_ok_and(|v| v == "1") {
         true => {
             let t = Instant::now();
-            let b = with.bounds().unwrap();
+            let b = a.bounds().unwrap();
             (Some((b.lower, b.upper)), Some(t.elapsed().as_secs_f64()))
         }
         false => (None, None),
     };
     if std::env::var("PARITY_VERBOSE").is_ok() {
-        eprintln!("  with facts {:.2} s; build {:.2} between {:.2}", t.elapsed().as_secs_f64(), snapshot.timings.build, snapshot.timings.between);
+        eprintln!("  bounds {:.2} s; build {:.2} between {:.2}", t.elapsed().as_secs_f64(), snapshot.timings.build, snapshot.timings.between);
     }
-    Some(Case { snapshot, claims, bounds, z3 })
+    Some(Case { snapshot, bounds, z3 })
 }
 
 async fn record() -> Record {
@@ -84,11 +79,6 @@ async fn record() -> Record {
     for dir in ["extra", "tpch"] {
         profiles.extend(plans(dir).await.into_iter().map(|p| (dir, p)));
     }
-    let mut set = FactSet::default();
-    for (_, p) in &profiles {
-        set.observe(p);
-    }
-    let facts = Facts::new(set);
     let mut out = Record::default();
     let only = std::env::var("ONLY").ok();
     for (dir, plan) in &profiles {
@@ -99,19 +89,22 @@ async fn record() -> Record {
         let sql = query(dir, &plan.name);
         // DataFusion has no `AS MATERIALIZED`: some analyses are none.
         parity::start();
-        let df = cardinal::analyze_sql(&ctx, &sql, options()).await.ok();
-        if let Some(c) = case(df, &facts) {
+        let df = match Analysis::sql(&ctx, &sql).await {
+            Ok(q) => q.options(options()).build().ok(),
+            Err(_) => None,
+        };
+        if let Some(c) = case(df) {
             out.cases.insert(format!("{dir}/{} datafusion", plan.name), c);
         }
         parity::start();
-        let c = case(cardinal::analyze_observed(&catalog, plan, options()).ok(), &facts).unwrap();
+        let c = case(Analysis::plan(&catalog, plan).options(options()).build().ok()).unwrap();
         out.cases.insert(format!("{dir}/{} duckdb", plan.name), c);
-        // A joint analysis takes up to a minute: by default, only q11's,
-        // which `joint_facts` checks.
+        // An analysis with the other plans takes up to a minute: by
+        // default, only q11's, which `reference_plans` checks.
         if std::env::var("PARITY_JOINT").is_ok_and(|v| v == "all") || plan.name == "q11" {
-            let others: Vec<_> = profiles.iter().filter(|(_, p)| p.name != plan.name).map(|(_, p)| p.clone()).collect();
+            let others = profiles.iter().filter(|(_, p)| p.name != plan.name).map(|(_, p)| p);
             parity::start();
-            let c = case(cardinal::joint::analyze_joint(&catalog, plan, &others, options()).ok(), &facts).unwrap();
+            let c = case(Analysis::plan(&catalog, plan).options(options()).with_plans(others).build().ok()).unwrap();
             out.cases.insert(format!("{dir}/{} joint", plan.name), c);
         }
         if std::env::var("PARITY_VERBOSE").is_ok() {
@@ -142,7 +135,6 @@ fn diff(old: &Record, new: &Record) -> (Vec<String>, Vec<String>) {
         sets("relevant", &os.relevant, &ns.relevant);
         let claims = |s: &Snapshot| s.axioms.keys().cloned().collect::<BTreeSet<_>>();
         sets("axiom", &claims(os), &claims(ns));
-        sets("claim", &o.claims, &n.claims);
         let pairs = |s: &BTreeSet<(String, String)>| s.iter().map(|(a, b)| format!("{a}  <=  {b}")).collect::<BTreeSet<_>>();
         sets("subset", &pairs(&os.subset), &pairs(&ns.subset));
         sets("fewer", &pairs(&os.fewer), &pairs(&ns.fewer));
@@ -212,95 +204,4 @@ async fn parity() {
         println!("  + {g}");
     }
     assert!(lost.is_empty(), "lost {}:\n{}", lost.len(), lost.join("\n"));
-}
-
-/// Phase 4's gate: how many contexts a union of equal columns into every
-/// predicate would newly make equal, among the fixtures' contexts and the
-/// facts their profiles give, and how many of the query's contexts would
-/// newly match a fact's.
-#[tokio::test]
-#[ignore = "a measurement; prints what it finds"]
-async fn equality_gate() {
-    use cardinal::facts::FactKind;
-    use cardinal::rows::Context;
-    let ctx = context();
-    let catalog = catalog().await;
-    let mut profiles = vec![];
-    for dir in ["extra", "tpch"] {
-        profiles.extend(plans(dir).await.into_iter().map(|p| (dir, p)));
-    }
-    let mut set = FactSet::default();
-    for (_, p) in &profiles {
-        set.observe(p);
-    }
-    let over = |k: &FactKind| match k {
-        FactKind::Cardinality(c) => c.clone(),
-        FactKind::Selectivity { over, .. }
-        | FactKind::Distinct { over, .. }
-        | FactKind::Unique { over, .. }
-        | FactKind::Min { over, .. }
-        | FactKind::Max { over, .. } => over.clone(),
-        FactKind::Match { kept, .. } => kept.clone(),
-    };
-    let facts: BTreeSet<Context> = set.iter().map(|f| over(&f.kind)).collect();
-    let mut queries: BTreeMap<Context, String> = BTreeMap::new();
-    for (dir, plan) in &profiles {
-        parity::start();
-        let _ = cardinal::analyze_sql(&ctx, &query(dir, &plan.name), options()).await;
-        let _ = cardinal::analyze_observed(&catalog, plan, options());
-        for s in parity::take() {
-            for c in s.raw {
-                queries.entry(c).or_insert_with(|| plan.name.clone());
-            }
-        }
-    }
-    // And `tests/truth/queries.sql`, as DataFusion plans them.
-    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/truth/queries.sql")).unwrap();
-    for part in text.split("-- name: ").skip(1) {
-        let (name, sql) = part.split_once('\n').unwrap();
-        parity::start();
-        let _ = cardinal::analyze_sql(&ctx, sql, options()).await;
-        for s in parity::take() {
-            for c in s.raw {
-                queries.entry(c).or_insert_with(|| format!("w_{}", name.trim()));
-            }
-        }
-    }
-    // Each canonical, and with columns substituted.
-    let sub: BTreeMap<Context, Context> =
-        facts.iter().chain(queries.keys()).map(|c| (c.canonical(), parity::substituted(c))).collect();
-    let all: BTreeSet<&Context> = sub.keys().collect();
-    let merged: BTreeSet<&Context> = sub.values().collect();
-    let changed = sub.iter().filter(|(c, s)| c != s).count();
-    for (c, s) in sub.iter().filter(|(c, s)| c != s) {
-        println!("rewritten: {}\n  as {}", parity::key(c), parity::key(s));
-    }
-    println!("{} contexts ({} of facts, {} of queries); {changed} rewritten, {} classes after", all.len(), facts.len(), queries.len(), merged.len());
-    let fact_subs: BTreeMap<&Context, Vec<&Context>> = facts.iter().fold(BTreeMap::new(), |mut m, f| {
-        m.entry(&sub[&f.canonical()]).or_default().push(f);
-        m
-    });
-    let mut gained = 0;
-    let mut classes: BTreeMap<&Context, Vec<&Context>> = BTreeMap::new();
-    for (c, s) in &sub {
-        classes.entry(s).or_default().push(c);
-    }
-    for (s, cs) in classes.iter().filter(|(_, cs)| cs.len() > 1) {
-        println!("merged into {}:", parity::key(s));
-        for c in cs {
-            println!("  {}", parity::key(c));
-        }
-    }
-    let canonical: BTreeSet<Context> = facts.iter().map(Context::canonical).collect();
-    for (q, name) in &queries {
-        if canonical.contains(&q.canonical()) {
-            continue;
-        }
-        if let Some(fs) = fact_subs.get(&sub[&q.canonical()]) {
-            gained += 1;
-            println!("{name}: {}\n  now matches {}", parity::key(q), fs.iter().map(|f| parity::key(f)).collect::<Vec<_>>().join("\n  and "));
-        }
-    }
-    let matched = queries.keys().filter(|q| canonical.contains(&q.canonical())).count();
-    println!("query contexts with a fact: {matched}; newly: {gained}");
 }

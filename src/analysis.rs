@@ -204,13 +204,15 @@ pub struct Analyzer<'a> {
     /// ([`ranged_columns`]).
     pub(crate) ranged: BTreeSet<String>,
     /// Whether to assert [`referenced size`](Self::referenced_size) on each
-    /// scan, for [`analyze_joint`](crate::joint::analyze_joint).
+    /// scan, with reference plans ([`crate::joint`]).
     pub(crate) referenced_sizes: bool,
     /// The last base scan's raw min and max variables, for its node to take.
     pub(crate) raw_ranges: (Vec<Option<String>>, Vec<Option<String>>),
     /// [`crate::Options::egglog`].
     #[cfg(feature = "egglog")]
     pub(crate) egglog: Option<crate::egg::Reach>,
+    /// What relating the contexts on egglog took and found, once done.
+    pub(crate) egglog_stats: Option<crate::stats::EgglogStats>,
 }
 
 /// One assertion: the frame of the node it was made for (none for
@@ -378,6 +380,7 @@ impl<'a> Analyzer<'a> {
             raw_ranges: Default::default(),
             #[cfg(feature = "egglog")]
             egglog: None,
+            egglog_stats: None,
         }
     }
 
@@ -496,6 +499,13 @@ impl<'a> Analyzer<'a> {
                 rule: None,
             });
         }
+        self.solver.assert(b);
+    }
+
+    /// Asserts `b`, with `role`, kept out of the trace's log: the caller
+    /// traces it itself.
+    pub(crate) fn assert_untraced(&self, role: Role, b: Bool) {
+        self.roles.borrow_mut().push(role);
         self.solver.assert(b);
     }
 

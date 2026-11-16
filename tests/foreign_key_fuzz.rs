@@ -10,7 +10,7 @@
 
 mod common;
 
-use cardinal::{ForeignKey, Options, analyze_sql};
+use cardinal::{Analysis, ForeignKey, Options};
 use common::Rng;
 use datafusion::prelude::SessionContext;
 
@@ -193,7 +193,7 @@ async fn constraints_hold_on_data() {
         let ctx = dataset(&mut r).await;
         let sql = query(&mut r);
         let options = Options { foreign_keys: keys(), ..Default::default() };
-        let a = match analyze_sql(&ctx, &sql, options).await {
+        let a = match Analysis::sql(&ctx, &sql).await.and_then(|q| q.options(options).build()) {
             Ok(a) => a,
             Err(e) => {
                 println!("{i}: not analyzed: {e}\n  {sql}");

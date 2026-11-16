@@ -1,11 +1,11 @@
-//! Facts: numbers known exactly from having watched queries run.
+//! Facts: numbers known of the data, given by hand
+//! ([`Builder::with_facts`](crate::Builder::with_facts)): measured outside,
+//! or known to be true, like `|lineitem| = 60175` or
+//! `ndv(l_suppkey | lineitem) ≤ 100`. Each holds for one input [`Context`].
 //!
-//! An executed plan tells how many rows each operator output. Read against
-//! the rows each operator consumed, those counts are facts about the data:
-//! `|lineitem| = 60175`, `s(l_quantity < 10 | lineitem) = 10816/60175`, or
-//! `ndv(l_suppkey | lineitem) = 100`. Each holds for one input [`Context`],
-//! and [`derive_facts`] combines what several plans show into everything
-//! that follows from it.
+//! Executed plans are not read into facts: they are analyzed with the
+//! query as reference plans
+//! ([`Builder::with_plans`](crate::Builder::with_plans), [`crate::joint`]).
 //!
 //! # Notation
 //!
@@ -35,50 +35,37 @@
 //!
 //! # Pipeline
 //!
-//! Three steps turn executed plans into constraints on a query:
-//!
 //! ```text
-//!  ObservedPlan ─[observe]─▶ FactSet ─[derive]─▶ Facts ─[apply]─▶ Analysis::with_facts
-//!                              facts   = v        (closed,
-//!                              bounds  ≤ v         shared)
-//!                              floors  ≥ v
-//!                              unobserved
+//!  FactSet ─[Facts::new]─▶ Facts ─[apply]─▶ Builder::with_facts
+//!   facts   = v             (checked,
+//!   bounds  ≤ v              shared)
+//!   floors  ≥ v
 //! ```
 //!
-//! 1. [`observe`] reads each operator of one executed plan
-//!    ([`FactSet::observe`], and [`FactSet::observe_translated`] for the
-//!    rows only a query names). Out come facts, bounds, floors, and the kinds
-//!    of operators whose rows were not counted ([`FactSet::unobserved`]),
-//!    which a query can count ([`FactKind::counted`]).
-//! 2. [`derive`](mod@derive) combines exact facts across plans until nothing new follows
-//!    ([`FactSet::close`]): a selectivity times a size is another size, and
-//!    a join's size over its inputs' a selectivity. Bounds and
-//!    floors are carried along unchanged; one that an exact fact contradicts
-//!    is recorded in [`FactSet::conflicts`], as is a second value for one
-//!    fact. [`Facts::new`] closes a set once, for any number of analyses.
-//! 3. [`Analysis::with_facts`] puts each quantity a fact, bound or floor
-//!    gives of an operator's rows, or of rows related to them, among the
-//!    query's constraints as a claim on the operator's variable (with
+//! 1. A [`FactSet`] keeps one fact per kind, and the least bound and
+//!    greatest floor; a second value for one fact, or a bound or floor an
+//!    exact fact contradicts, is recorded in [`FactSet::conflicts`] and
+//!    left out. [`Facts::new`] checks a set once, for any number of
+//!    analyses.
+//! 2. [`Builder::with_facts`](crate::Builder::with_facts) puts each
+//!    quantity a fact, bound or floor gives of an operator's rows, or of
+//!    rows related to them, among the query's constraints as a claim on the
+//!    operator's variable (with
 //!    [`Options::check_facts`](crate::Options::check_facts), only where it
 //!    is consistent with them). The [`axioms`](crate::axioms) relate the
 //!    operators' quantities in every analysis, so Z3 carries each claim to
 //!    the rest.
 //!
-//! Each fact records the rule it came from ([`Origin`]), by the name the
-//! rule tables of [`observe`] and [`derive`](mod@derive) list it under.
-//!
-//! [`Analysis::with_facts`]: crate::Analysis::with_facts
+//! A fact's queries ([`FactKind::count_sql_in`]) count it on an engine, to
+//! check it or to give it ([`FactKind::counted`]).
 
 pub(crate) mod apply;
-pub mod derive;
-pub mod observe;
 mod sql;
-mod state;
+pub(crate) mod state;
 
 pub use crate::rows::{Context, Exists, ExistsKind, Term};
 pub use state::{Pending, State, Taint, Value, states};
 pub use apply::Facts;
-pub use observe::{FactRule, Observation, RULES};
 pub use sql::{CountDialect, Counts};
 
 use std::borrow::Cow;
@@ -87,8 +74,6 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::Options;
-use crate::observed::{Catalog, ObservedPlan};
 use crate::rows::canonical::Canonicals;
 use crate::rows::join;
 
@@ -263,8 +248,6 @@ impl fmt::Display for FactKind {
 pub enum Origin {
     /// Read off operator `node` of plan `query` by `rule`.
     Observed { query: String, node: usize, rule: Cow<'static, str> },
-    /// Inferred from other facts by `rule`.
-    Derived { rule: Cow<'static, str> },
     /// Counted by a query of its own (see [`FactKind::counted`]).
     Counted,
 }
@@ -273,7 +256,6 @@ impl fmt::Display for Origin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Origin::Observed { query, node, rule } => write!(f, "{query}#{node} ({rule})"),
-            Origin::Derived { rule } => write!(f, "derived ({rule})"),
             Origin::Counted => write!(f, "counted"),
         }
     }
@@ -327,9 +309,6 @@ pub struct FactSet {
     /// What each aggregate value the facts read is, by name.
     #[serde(serialize_with = "serialize_values", deserialize_with = "values")]
     values: BTreeMap<String, Value>,
-    /// The facts of operators whose rows were not counted.
-    #[serde(deserialize_with = "unobserved")]
-    unobserved: BTreeSet<FactKind>,
     pub conflicts: Vec<Conflict>,
 }
 
@@ -401,56 +380,6 @@ impl FactSet {
         }
     }
 
-    /// Adds every fact and bound the rules read off `plan`, and notes the
-    /// facts it could not give a value (see [`FactSet::unobserved`]).
-    pub fn observe(&mut self, plan: &ObservedPlan) {
-        let observed = observe::observe(plan);
-        for fact in observed.facts {
-            self.insert(fact);
-        }
-        for bound in observed.bounds {
-            self.insert_bound(bound);
-        }
-        for floor in observed.floors {
-            self.insert_floor(floor);
-        }
-        for value in observed.values {
-            self.insert_value(value);
-        }
-        self.unobserved.extend(observed.unobserved);
-    }
-
-    /// Adds the facts `plan`'s counts give the rows of its operators as a
-    /// query names them, once translated with `catalog` (rule
-    /// [`translated`](observe::observe_translated)): rows the other rules
-    /// may not name. A plan that does not translate adds none.
-    pub fn observe_translated(&mut self, catalog: &Catalog, plan: &ObservedPlan, options: &Options) {
-        for (fact, floor) in observe::observe_translated(catalog, plan, options) {
-            if floor {
-                self.insert_floor(fact);
-            } else {
-                self.insert(fact);
-            }
-        }
-    }
-
-    /// The facts the observed plans have and did not count, that nothing
-    /// here gives either: of operators an engine stopped early or ran
-    /// several times, and of every operator of a plan that was not run.
-    /// Each is of rows its plan names, so a query can count it
-    /// ([`FactKind::count_sql_in`]), and its count be added
-    /// ([`FactKind::counted`], then [`FactSet::insert`] and
-    /// [`FactSet::close`]).
-    pub fn unobserved(&self) -> impl Iterator<Item = &FactKind> {
-        self.unobserved.iter().filter(|k| !self.facts.contains_key(*k))
-    }
-
-    /// Adds everything that follows from the facts, until nothing new does.
-    pub fn close(&mut self) {
-        derive::close(self);
-        self.check_bounds();
-    }
-
     pub fn get(&self, kind: &FactKind) -> Option<&Fact> {
         self.facts.get(kind)
     }
@@ -491,7 +420,7 @@ impl FactSet {
     /// Records as a conflict each bound below its kind's exact value, and
     /// each floor above it: the rows were named wrongly, or the data
     /// changed.
-    fn check_bounds(&mut self) {
+    pub(crate) fn check_bounds(&mut self) {
         let bounds = self.bounds.iter().map(|b| (b, std::cmp::Ordering::Greater));
         let floors = self.floors.iter().map(|f| (f, std::cmp::Ordering::Less));
         for ((kind, bound), wrong) in bounds.chain(floors) {
@@ -571,27 +500,12 @@ fn floors<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D
     Ok(set.floors)
 }
 
-fn unobserved<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeSet<FactKind>, D::Error> {
-    let mut canonicals = Canonicals::default();
-    Ok(BTreeSet::<FactKind>::deserialize(d)?.into_iter().map(|k| k.recanonical_in(&mut canonicals)).collect())
-}
-
 fn values<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Value>, D::Error> {
     let mut set = FactSet::default();
     for value in Vec::<Value>::deserialize(d)? {
         set.insert_value(value);
     }
     Ok(set.values)
-}
-
-/// Every fact `plans` show, and every fact that follows from them.
-pub fn derive_facts(plans: &[ObservedPlan]) -> FactSet {
-    let mut set = FactSet::default();
-    for p in plans {
-        set.observe(p);
-    }
-    set.close();
-    set
 }
 
 /// A map's values, written as a list.

@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use cardinal::{Analysis, Bounds, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -19,12 +19,12 @@ fn shop() -> SessionContext {
 /// table it comes from.
 const SIZES: &[(&str, u64)] = &[("users", 100), ("orders", 300), ("products", 50), ("order_items", 1000)];
 
-async fn analyze(ctx: &SessionContext, sql: &str) -> Analysis {
-    analyze_sql(ctx, sql, Default::default()).await.unwrap()
+async fn query(ctx: &SessionContext, sql: &str) -> Builder<'static> {
+    Analysis::sql(ctx, sql).await.unwrap()
 }
 
 async fn bounds_in(ctx: &SessionContext, sql: &str) -> Bounds {
-    let b = analyze(ctx, sql).await.bounds().unwrap();
+    let b = query(ctx, sql).await.build().unwrap().bounds().unwrap();
     println!("{sql}\n  {b}");
     b
 }
@@ -35,7 +35,7 @@ async fn bounds(sql: &str) -> Bounds {
 
 /// `sql`'s bounds with its tables held to `sizes`.
 async fn sized_in(ctx: &SessionContext, sql: &str, sizes: &[(&str, u64)]) -> Bounds {
-    let b = common::sized(&analyze(ctx, sql).await, sizes);
+    let b = common::sized(&query(ctx, sql).await, sizes);
     println!("{sql}\n  with {sizes:?}: {b}");
     b
 }
@@ -242,9 +242,7 @@ async fn product_cap_is_configurable() {
     assert_eq!(b.upper, None);
     let b = sized_in(&ctx, sql, &[("wide", 1000)]).await;
     assert_eq!(b, at_most(1000));
-    let a = analyze_sql(&ctx, sql, Options { max_product: 4, ..Default::default() })
-        .await
-        .unwrap();
+    let a = query(&ctx, sql).await.options(Options { max_product: 4, ..Default::default() }).build().unwrap();
     assert_eq!(a.bounds().unwrap().upper, Some(16));
     // Columns pinned to one value are the same on every row: no key is
     // needed to tell the groups apart, so there is at most one.
@@ -495,7 +493,7 @@ async fn full_join_keeps_rows_with_null_keys() {
     for data in common::shop_datasets() {
         let name = data.name.clone();
         let ctx = data.context(false);
-        let a = analyze(&ctx, sql).await;
+        let a = query(&ctx, sql).await.build().unwrap();
         let v = a.validate(&ctx).await.unwrap();
         assert_eq!(v.violation, None, "{name}");
     }
@@ -527,7 +525,7 @@ async fn a_scalar_subquerys_padded_count_reads_as_its_own_column() {
         let name = data.name.clone();
         let keys = data.unique_keys;
         let ctx = data.context(keys);
-        let a = analyze(&ctx, sql).await;
+        let a = query(&ctx, sql).await.build().unwrap();
         let v = a.validate(&ctx).await.unwrap();
         assert_eq!(v.violation, None, "{name}");
     }
@@ -550,7 +548,7 @@ async fn ranges() -> SessionContext {
 /// `sql`'s bounds over [`ranges`], checked against its data.
 async fn ranged(sql: &str) -> Bounds {
     let ctx = ranges().await;
-    let a = analyze(&ctx, sql).await;
+    let a = query(&ctx, sql).await.build().unwrap();
     assert_eq!(a.validate(&ctx).await.unwrap().violation, None, "{sql}");
     let b = a.bounds().unwrap();
     println!("{sql}\n  {b}");

@@ -1,12 +1,14 @@
-//! A dump as text: the plan tree with each node's constraints under it, then
-//! each proof and the constraints it needs, and with facts, which were used.
+//! A dump as text: the plan tree with each node's constraints under it (and
+//! the reference plans' beside it), then each proof and the constraints it
+//! needs, with reference plans or facts which pins and facts were used, and
+//! what relating the contexts on egglog took.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use cardinal::{Constraint, Proof, ProofStatus, Trace};
+use cardinal::{Constraint, EgglogStats, Proof, ProofStatus, Trace};
 
-use crate::{Dump, FactsDump, PlanDump, readable, roots};
+use crate::{Dump, InformedDump, PlanDump, readable, roots};
 
 /// What to show.
 #[derive(Debug, Clone, Default)]
@@ -17,15 +19,14 @@ pub struct View {
     pub node: Option<usize>,
     /// Hide constraints in the tree; show how many each node has.
     pub brief: bool,
-    /// Show the analysis without its facts, as if none were given.
-    pub without_facts: bool,
+    /// Show the analysis without its reference plans and facts, as if none
+    /// were given.
+    pub plain: bool,
 }
 
 pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
-    let facts = dump.facts.as_ref().filter(|_| !view.without_facts);
+    let facts = dump.informed.as_ref().filter(|_| !view.plain);
     let t = facts.map_or(&dump.trace, |f| &f.trace);
-    // Without the proofs with facts, the base ones: their constraints come
-    // first in the trace with facts too.
     let proofs: &[Proof] = match facts {
         Some(f) if f.explained => &f.proofs,
         _ => &dump.proofs,
@@ -40,14 +41,18 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
         let _ = writeln!(w, "Total:   {}", p.total);
     }
     if let Some(f) = facts {
-        let n = t.constraints.iter().filter(|c| c.fact.is_some()).count();
-        let _ = writeln!(w, "With facts: {}", f.bounds.as_deref().unwrap_or("not computed"));
+        let pins = t.constraints.iter().filter(|c| c.fact.as_ref().is_some_and(|f| f.source.starts_with("observed"))).count();
+        let n = t.constraints.iter().filter(|c| c.fact.is_some()).count() - pins;
+        let _ = writeln!(w, "Informed: {}", f.bounds.as_deref().unwrap_or("not computed"));
         if let Some(p) = &f.plan_bounds {
-            let _ = writeln!(w, "Total with facts: {}", p.total);
+            let _ = writeln!(w, "Total informed: {}", p.total);
+        }
+        if !f.plans.is_empty() {
+            let _ = writeln!(w, "Plans:   {} reference plans, {pins} pins", f.plans.len());
         }
         let _ = writeln!(w, "Facts:   {n} fact constraints");
     }
-    // The operators' bounds the tree shows: with facts if they are shown.
+    // The operators' bounds the tree shows: informed if that is shown.
     let plan = facts.map_or(dump.plan_bounds.as_ref(), |f| f.plan_bounds.as_ref());
     let _ = writeln!(w, "Root:    {}   ({} nodes, {} constraints)", t.root, t.nodes.len(), t.constraints.len());
 
@@ -84,12 +89,16 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
         let _ = writeln!(w, "\nProof {}: {}  [{}]  {} constraints", p.name, p.claim, status(&p.status), p.core.len());
     }
     let _ = writeln!(w, "\nPlan and constraints:");
-    let rs = roots(t);
-    for (i, &r) in rs.iter().enumerate() {
-        if i + 1 < rs.len() {
-            let _ = writeln!(w, "(subquery)");
+    for (of, rs) in roots(t) {
+        if let Some(name) = of {
+            let _ = writeln!(w, "\nReference plan {name}:");
         }
-        tree(w, t, facts, plan, r, "", true, &marked, &shown, view.brief);
+        for (i, &r) in rs.iter().enumerate() {
+            if of.is_none() && i + 1 < rs.len() {
+                let _ = writeln!(w, "(subquery)");
+            }
+            tree(w, t, facts, plan, r, "", true, &marked, &shown, view.brief);
+        }
     }
     let partitions: Vec<&Constraint> = t.constraints.iter().filter(|c| c.node.is_none() && shown(c)).collect();
     if !partitions.is_empty() {
@@ -101,21 +110,21 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     if proof.is_none()
         && let Some(f) = facts.filter(|f| f.explained)
     {
-        let _ = writeln!(w, "\nProofs (without facts / with facts):");
+        let _ = writeln!(w, "\nProofs (plain / informed):");
         for (i, p) in f.proofs.iter().enumerate() {
             let without = f.base_proofs.get(i).map_or("—".to_string(), needs);
             let k = p.core.iter().filter(|&&c| t.constraints[c].fact.is_some()).count();
             let with = match p.status {
-                ProofStatus::Proven => format!("{} ({k} fact{})", needs(p), if k == 1 { "" } else { "s" }),
+                ProofStatus::Proven => format!("{} ({k} ◆)", needs(p)),
                 _ => needs(p),
             };
             let _ = writeln!(w, "  {:<16} {:<24} {:<26} {}", p.name, p.claim, without, with);
         }
-        let _ = writeln!(w, "  (--proof NAME shows one proof's constraints; --without-facts the analysis without facts)");
+        let _ = writeln!(w, "  (--proof NAME shows one proof's constraints; --plain the analysis without plans or facts)");
     } else if proof.is_none() {
         let _ = writeln!(w, "\nProofs:");
         if facts.is_some() {
-            let _ = writeln!(w, "  (without facts: the proofs with facts were skipped)");
+            let _ = writeln!(w, "  (plain: the informed proofs were skipped)");
         }
         for p in &dump.proofs {
             let mut nodes: Vec<usize> = p.core.iter().filter_map(|&c| t.constraints[c].node).collect();
@@ -136,6 +145,11 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     if let Some(f) = facts {
         facts_sections(w, t, f);
     }
+    let egglog = match facts {
+        Some(f) => f.egglog.as_ref(),
+        None => dump.egglog.as_ref(),
+    };
+    egglog_section(w, egglog);
     Ok(out)
 }
 
@@ -147,9 +161,31 @@ fn needs(p: &Proof) -> String {
     }
 }
 
-/// Which facts were used, and which conflict.
-fn facts_sections(w: &mut String, t: &Trace, f: &FactsDump) {
-    let _ = writeln!(w, "\nFacts used (marked ◆ in the tree):");
+/// What relating the contexts on egglog took and found.
+fn egglog_section(w: &mut String, e: Option<&EgglogStats>) {
+    let Some(e) = e else {
+        let _ = writeln!(w, "\negglog: not used (contexts related in Rust)");
+        return;
+    };
+    let _ = writeln!(w, "\negglog ({}, {} graph):", e.reach, if e.fresh_graph { "a fresh" } else { "the thread's" });
+    let _ = writeln!(w, "  contexts   {} ({} seeds, {} reached), {} renamings", e.contexts, e.seeds, e.reached, e.renamings);
+    let _ = writeln!(w, "  asked      {} pairs; {} predicate sets compared, {} cover", e.asked, e.cover_checks, e.covers);
+    let _ = writeln!(w, "  related    {} subset, {} fewer, {} groups among", e.subset, e.fewer, e.groups_among);
+    let _ = writeln!(w, "  e-graph    {} tuples with the contexts, {} saturated, {} iterations", e.nodes, e.tuples, e.iterations);
+    let _ = writeln!(w, "  time       encode {:.4}s, saturate {:.4}s, extract {:.4}s", e.encode_secs, e.saturate_secs, e.extract_secs);
+    for r in e.rules.iter().take(10) {
+        let rule = r.rule.split_whitespace().collect::<Vec<_>>().join(" ");
+        let rule = if rule.chars().count() > 90 { format!("{}…", rule.chars().take(90).collect::<String>()) } else { rule };
+        let _ = writeln!(w, "  {:>8} matches {:>8.4}s  {rule}", r.matches, r.secs);
+    }
+    if e.rules.len() > 10 {
+        let _ = writeln!(w, "  ({} more rules matched)", e.rules.len() - 10);
+    }
+}
+
+/// Which pins and facts were used, and which facts conflict.
+fn facts_sections(w: &mut String, t: &Trace, f: &InformedDump) {
+    let _ = writeln!(w, "\nPins and facts used (marked ◆ in the tree):");
     let used: Vec<&Constraint> = t.constraints.iter().filter(|c| c.fact.is_some()).collect();
     if used.is_empty() {
         let _ = writeln!(w, "  (none)");
@@ -186,7 +222,7 @@ fn status(s: &ProofStatus) -> String {
 fn tree(
     w: &mut String,
     t: &Trace,
-    facts: Option<&FactsDump>,
+    facts: Option<&InformedDump>,
     plan: Option<&PlanDump>,
     id: usize,
     prefix: &str,
@@ -222,7 +258,7 @@ fn tree(
     }
 }
 
-/// The row counts facts pin or cap node `n`'s variables to, e.g.
+/// The row counts facts or pins hold node `n`'s variables to, e.g.
 /// `  op3_Scan_lineitem = 6001215`, if `facts` are shown.
 fn values(n: &cardinal::TraceNode, t: &Trace, facts: bool) -> String {
     if !facts {
@@ -232,7 +268,7 @@ fn values(n: &cardinal::TraceNode, t: &Trace, facts: bool) -> String {
     let mut out = String::new();
     for c in t.of_node(n.id) {
         if let Some(f) = &c.fact
-            && matches!(f.source.as_str(), "pinned rows" | "row cap")
+            && matches!(f.source.as_str(), "pinned rows" | "row cap" | "observed rows" | "observed floor")
             && let [v] = &c.vars[..]
             && vars.contains(&v.as_str())
         {

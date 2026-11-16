@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio};
-use cardinal::{Analysis, Bounds, Facts, PlanBounds, Validation, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, Facts, PlanBounds, Validation};
 use datafusion::arrow::array::{ArrayRef, Date32Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -712,13 +712,14 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
         let mut bounds: Option<Bounds> = None;
         let mut sized_bounds = vec![];
         for (dname, ctx) in &ctxs {
-            let a = match analyze_sql(ctx, case.sql, Default::default()).await {
-                Ok(a) => a,
+            let query = match Analysis::sql(ctx, case.sql).await {
+                Ok(q) => q,
                 Err(e) => {
                     failures.push(format!("{}: analysis failed: {e}", case.name));
                     break;
                 }
             };
+            let a = query.clone().build().unwrap();
             // Bounds without facts depend only on the query; compute them once.
             if bounds.is_none() {
                 bounds = Some(a.bounds().unwrap());
@@ -761,7 +762,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                 }
             }
             if v.violation.is_none() {
-                let b = sized(&a, &sizes);
+                let b = sized(&query, &sizes);
                 for f in check_bounds(&b, &a, &v) {
                     failures.push(format!("{}: on {dname} with its table sizes, {f}", case.name));
                 }
@@ -817,9 +818,9 @@ pub fn table_sizes(sizes: &[(&str, u64)]) -> Facts {
     Facts::new(set)
 }
 
-/// `a`'s bounds with each of `sizes`' tables held to its row count.
-pub fn sized(a: &Analysis, sizes: &[(&str, u64)]) -> Bounds {
-    a.with_facts(&table_sizes(sizes)).unwrap().bounds().unwrap()
+/// `query`'s bounds with each of `sizes`' tables held to its row count.
+pub fn sized(query: &Builder, sizes: &[(&str, u64)]) -> Bounds {
+    query.clone().with_facts(&table_sizes(sizes)).build().unwrap().bounds().unwrap()
 }
 
 /// Checks `p` against one real execution: every operator's actual rows

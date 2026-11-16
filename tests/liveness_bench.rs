@@ -1,6 +1,8 @@
 //! Plan bounds with and without leaving out dead columns
 //! ([`cardinal::postprocess`]): whether they agree, and how long each takes,
-//! on the DuckDB fixtures, with and without facts of the other queries.
+//! on the DuckDB fixtures, with and without the other queries' plans.
+//! With the plans, dead columns are left out before `solve-eqs`
+//! ([`cardinal::joint`]); compare the bounds themselves.
 //!
 //! ```sh
 //! cargo test --release --test liveness_bench -- --ignored --nocapture
@@ -10,8 +12,7 @@ mod fixtures;
 
 use std::time::{Duration, Instant};
 
-use cardinal::facts::FactSet;
-use cardinal::{Analysis, Facts, Options, Postprocess};
+use cardinal::{Analysis, Options, Postprocess};
 use fixtures::{catalog, context, foreign_keys, plans, query};
 
 fn options(dead_columns: bool) -> Options {
@@ -44,47 +45,22 @@ async fn liveness_bench() {
     for dir in ["extra", "tpch"] {
         for plan in plans(dir).await {
             let sql = query(dir, &plan.name);
-            let mut observed = FactSet::default();
-            observed.observe(&plan);
-            cases.push((dir, plan, sql, observed));
+            cases.push((dir, plan, sql));
         }
     }
     let (mut off, mut on, mut same, mut differ) = (Duration::ZERO, Duration::ZERO, 0, 0);
-    for (dir, plan, sql, _) in &cases {
-        let mut set = FactSet::default();
-        for (_, p, _, o) in &cases {
-            if p.name != plan.name {
-                for f in o.iter() {
-                    set.insert(f.clone());
-                }
-                for b in o.bounds() {
-                    set.insert_bound(b.clone());
-                }
-                for f in o.floors() {
-                    set.insert_floor(f.clone());
-                }
-            }
+    for (dir, plan, sql) in &cases {
+        let others: Vec<_> = cases.iter().map(|(_, p, _)| p).filter(|p| p.name != plan.name).collect();
+        let mut queries = vec![];
+        if let Ok(q) = Analysis::sql(&ctx, sql).await {
+            queries.push(("df", q));
         }
-        let facts = Facts::new(set);
-        let mut pairs = vec![];
-        if let (Ok(a), Ok(b)) = (
-            cardinal::analyze_sql(&ctx, sql, options(false)).await,
-            cardinal::analyze_sql(&ctx, sql, options(true)).await,
-        ) {
-            pairs.push(("df", a, b));
-        }
-        pairs.push((
-            "duck",
-            cardinal::analyze_observed(&catalog, plan, options(false)).unwrap(),
-            cardinal::analyze_observed(&catalog, plan, options(true)).unwrap(),
-        ));
-        for (planner, a, b) in pairs {
-            for with_facts in [false, true] {
-                let (a, b) = if with_facts {
-                    (a.with_facts(&facts).unwrap(), b.with_facts(&facts).unwrap())
-                } else {
-                    (a.clone(), b.clone())
-                };
+        queries.push(("duck", Analysis::plan(&catalog, plan)));
+        for (planner, q) in queries {
+            for with_plans in [false, true] {
+                let plans = if with_plans { others.clone() } else { vec![] };
+                let a = q.clone().options(options(false)).with_plans(plans.iter().copied()).build().unwrap();
+                let b = q.clone().options(options(true)).with_plans(plans.iter().copied()).build().unwrap();
                 let ((x, tx), (y, ty)) = (timed(&a), timed(&b));
                 off += tx;
                 on += ty;
@@ -93,12 +69,12 @@ async fn liveness_bench() {
                 } else {
                     differ += 1;
                     println!(
-                        "DIFFER {dir}/{} {planner} facts={with_facts}\n  off {x}\n  on  {y}",
+                        "DIFFER {dir}/{} {planner} plans={with_plans}\n  off {x}\n  on  {y}",
                         plan.name
                     );
                 }
                 println!(
-                    "{dir}/{} {planner} facts={with_facts}: off {:.2}s on {:.2}s",
+                    "{dir}/{} {planner} plans={with_plans}: off {:.2}s on {:.2}s",
                     plan.name,
                     tx.as_secs_f64(),
                     ty.as_secs_f64()

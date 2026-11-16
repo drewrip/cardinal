@@ -3,7 +3,8 @@
 //!
 //! Rows that are not a reproducible function of the data (a scan cut short
 //! by a `LIMIT`, or pruned by a join's runtime filter) get no context at
-//! all, so they yield no facts.
+//! all: a reference plan pins them only from below, if at all
+//! ([`crate::joint`]).
 
 use std::collections::BTreeSet;
 
@@ -286,17 +287,6 @@ impl Values<'_> {
         };
         let aggregate = keys.into_iter().next().unwrap();
         Some(Value { name: format!("{aggregate} of {over}"), aggregate, over })
-    }
-
-    /// Every value an aggregate of the plan outputs.
-    pub(crate) fn definitions(&self) -> Vec<Value> {
-        let mut out = vec![];
-        for (k, node) in self.plan.nodes.iter().enumerate() {
-            if let Op::Aggregate { .. } = node.op {
-                out.extend(node.columns.iter().filter_map(|c| self.definition(k, &c.name)));
-            }
-        }
-        out
     }
 
     /// Resolved, deterministic predicates, or why not.

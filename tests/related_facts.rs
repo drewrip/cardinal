@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio, Term};
-use cardinal::{Analysis, Bounds, Facts, Options, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, Facts, Options};
 use datafusion::arrow::array::AsArray;
 use datafusion::arrow::datatypes::Int64Type;
 use datafusion::common::JoinType;
@@ -39,10 +39,10 @@ async fn count(sql: &str) -> u64 {
     batches[0].column(0).as_primitive::<Int64Type>().value(0) as u64
 }
 
-async fn analyze(sql: &str) -> Analysis {
+async fn analyze(sql: &str) -> Builder<'static> {
     let ctx = context().await;
     let options = Options { trace: true, ..Default::default() };
-    analyze_sql(&ctx, sql, options).await.unwrap()
+    Analysis::sql(&ctx, sql).await.unwrap().options(options)
 }
 
 fn terms(exprs: impl IntoIterator<Item = Expr>) -> BTreeSet<Term> {
@@ -95,7 +95,7 @@ async fn sizes(tables: &[&str]) -> FactSet {
 /// `sql` with `facts` put in place, and its bounds; checks its true row
 /// count lies in them.
 async fn informed(sql: &str, facts: &FactSet) -> (Analysis, Bounds) {
-    let a = analyze(sql).await.with_facts(&Facts::new(facts.clone())).unwrap();
+    let a = analyze(sql).await.with_facts(&Facts::new(facts.clone())).build().unwrap();
     let b = a.bounds().unwrap();
     let rows = count(sql).await;
     println!("{sql}\n  {b}, {rows} rows");

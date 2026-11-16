@@ -93,7 +93,7 @@ async fn check(engine: Engine) {
         planned += 1;
         let truth = engine.count(sql).unwrap();
         let plan = engine.read_plan(&catalog, "q", &json, sql).unwrap();
-        let a = cardinal::analyze_observed(&catalog, &plan, Default::default()).unwrap();
+        let a = cardinal::Analysis::plan(&catalog, &plan).build().unwrap();
         let bound = a.bounds().unwrap().upper;
         println!("{truth} rows, X <= {bound:?}: {sql}");
         if bound.is_some_and(|b| b < truth) {

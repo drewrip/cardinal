@@ -24,6 +24,7 @@ use egglog::prelude::*;
 use egglog::{RawValues, Value};
 
 use super::{Graph, Reach};
+use crate::stats::{EgglogStats, RuleStats};
 use crate::axioms::bases;
 use crate::rows::canonical::Canonicals;
 use crate::rows::contain::{candidates, implied, inner_part};
@@ -45,6 +46,8 @@ pub(crate) struct Relations {
     /// The contexts in play the seeds reach.
     reached: Vec<Context>,
     pub(crate) timings: Timings,
+    /// What the run took and found.
+    pub(crate) stats: EgglogStats,
 }
 
 /// Seconds per stage, and how much the e-graph holds.
@@ -79,6 +82,39 @@ fn insert(g: &mut Graph, name: &str, rows: Vec<Vec<Value>>) {
             Ok(())
         })
         .expect("a relation of the program");
+}
+
+/// What one e-graph's run report says so far: iterations, and each
+/// rule's matches and time.
+struct Report {
+    iterations: usize,
+    matches: HashMap<String, usize>,
+    times: HashMap<String, Duration>,
+}
+
+impl Report {
+    fn of(g: &Graph) -> Report {
+        let r = g.egraph.get_overall_run_report();
+        Report {
+            iterations: r.iterations.len(),
+            matches: r.num_matches_per_rule.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            times: r.search_and_apply_time_per_rule.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        }
+    }
+
+    /// Into `stats`: the iterations and each rule's work since `before`.
+    fn since(&self, before: &Report, stats: &mut EgglogStats) {
+        stats.iterations = self.iterations.saturating_sub(before.iterations);
+        for (rule, n) in &self.matches {
+            let matches = n.saturating_sub(before.matches.get(rule).copied().unwrap_or(0));
+            let time = |r: &Report| r.times.get(rule).copied().unwrap_or_default();
+            let secs = time(self).saturating_sub(time(before)).as_secs_f64();
+            if matches > 0 {
+                stats.rules.push(RuleStats { rule: rule.clone(), matches, secs });
+            }
+        }
+        stats.rules.sort_by(|a, b| b.matches.cmp(&a.matches).then(a.rule.cmp(&b.rule)));
+    }
 }
 
 /// More renamings than this make a graph large.
@@ -123,7 +159,9 @@ impl Relations {
         // small inputs runs large ones far more slowly than a fresh one.
         let large = others.iter().map(Vec::len).sum::<usize>() > LARGE;
         let build = |g: &mut Graph| Relations::build(g, &contexts, &buckets, others, &asks, seeds, reach);
-        if large { build(&mut Graph::new()) } else { Graph::with(build) }
+        let mut out = if large { build(&mut Graph::new()) } else { Graph::with(build) };
+        out.stats.fresh_graph = large;
+        out
     }
 
     fn build(
@@ -136,6 +174,18 @@ impl Relations {
         reach: Reach,
     ) -> Relations {
         let mut timings = Timings::default();
+        let report = Report::of(g);
+        let mut stats = EgglogStats {
+            reach: match reach {
+                Reach::TwoSteps => "two steps",
+                Reach::Fixpoint => "fixpoint",
+            }
+            .to_string(),
+            contexts: contexts.len(),
+            seeds: seeds.len(),
+            renamings: others.iter().map(Vec::len).sum(),
+            ..Default::default()
+        };
         let start = Instant::now();
         let tops = g.encode_all(contexts.iter().copied());
         let class: HashMap<Context, Value> = contexts.iter().map(|c| (*c).clone()).zip(tops.iter().copied()).collect();
@@ -176,6 +226,7 @@ impl Relations {
                 groups.push(vec![r, tops[j]]);
             }
         }
+        stats.asked = fewer.len();
         insert(g, "FewerDemand", fewer);
         insert(g, "GroupDemand", groups);
         // The inner join of each outer join, which may hold outer joins of
@@ -228,6 +279,7 @@ impl Relations {
                     covers.push(vec![x, y]);
                 }
             }
+            stats.covers += covers.len();
             insert(g, "PredsCover", covers);
         }
         saturate(g, "reach");
@@ -236,6 +288,8 @@ impl Relations {
         }
         timings.saturate = start.elapsed();
         timings.tuples = g.egraph.num_tuples();
+        stats.cover_checks = asked.len();
+        Report::of(g).since(&report, &mut stats);
 
         let start = Instant::now();
         let mut reached = HashSet::new();
@@ -250,9 +304,19 @@ impl Relations {
             groups_among: pairs(g, "RGroupsAmong"),
             named: pairs(g, "Sub"),
             timings: Timings::default(),
+            stats: EgglogStats::default(),
         };
         timings.extract = start.elapsed();
-        Relations { timings, ..out }
+        stats.reached = out.reached.len();
+        stats.subset = out.subset.len();
+        stats.fewer = out.fewer.len();
+        stats.groups_among = out.groups_among.len();
+        stats.nodes = timings.nodes;
+        stats.tuples = timings.tuples;
+        stats.encode_secs = timings.encode.as_secs_f64();
+        stats.saturate_secs = timings.saturate.as_secs_f64();
+        stats.extract_secs = timings.extract.as_secs_f64();
+        Relations { timings, stats, ..out }
     }
 
     fn holds(&self, rel: &HashSet<(Value, Value)>, a: &Context, b: &Context) -> bool {

@@ -4,7 +4,7 @@
 mod common;
 mod fixtures;
 
-use cardinal::{Analysis, Bounds, ForeignKey, Options, analyze_observed, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, ForeignKey, Options};
 use datafusion::prelude::SessionContext;
 
 /// Data satisfying every key of `keys()`.
@@ -33,15 +33,15 @@ fn keys() -> Vec<ForeignKey> {
     ]
 }
 
-/// `sql` analyzed with the keys (or without), checked against the data.
-async fn analyze(sql: &str, declared: bool) -> Analysis {
+/// `sql` with the keys (or without), its analysis checked against the data.
+async fn analyze(sql: &str, declared: bool) -> Builder<'static> {
     let ctx = context().await;
     let foreign_keys = if declared { keys() } else { vec![] };
     let options = Options { foreign_keys, ..Default::default() };
-    let a = analyze_sql(&ctx, sql, options).await.unwrap();
-    let v = a.validate(&ctx).await.unwrap();
+    let query = Analysis::sql(&ctx, sql).await.unwrap().options(options);
+    let v = query.clone().build().unwrap().validate(&ctx).await.unwrap();
     assert_eq!(v.violation, None, "{sql}");
-    a
+    query
 }
 
 /// Sizes for the tables, all different (any satisfy the keys), so that a
@@ -161,7 +161,7 @@ async fn referenced_columns_are_unique() {
     let plan = fixtures::plans("tpch").await.into_iter().find(|p| p.name == "q16").unwrap();
     let analyze = |foreign_keys| {
         let options = Options { foreign_keys, ..Default::default() };
-        analyze_observed(&catalog, &plan, options).unwrap()
+        Analysis::plan(&catalog, &plan).options(options).build().unwrap()
     };
     let declared = analyze(fixtures::foreign_keys());
     assert!(declared.constraints().contains("InnerKeyJoin"), "{}", declared.plan);

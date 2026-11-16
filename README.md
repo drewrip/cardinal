@@ -1,25 +1,29 @@
 # cardinal
 
-Proves bounds on a SQL query's output cardinality, with no data, or with facts
-read off plans that ran.
+Proves bounds on a SQL query's output cardinality, with no data, or with the
+executed plans of other queries and facts given by hand.
 
 Requires Z3 (`brew install z3`; paths in `.cargo/config.toml`).
 
 ## Usage
 
 ```rust
-let a = cardinal::analyze_sql(&ctx, sql, Options::default()).await?;
+use cardinal::Analysis;
+
+let a = Analysis::sql(&ctx, sql).await?.options(options).build()?;
 a.bounds()?;              // e.g. "X <= 25" or "3 <= X <= 25"
 a.plan_bounds()?;         // every operator's bounds, and their total
 a.validate(&ctx).await?;  // check the constraints against real data
 
-// With facts from profiled plans; one `Facts` serves many analyses:
-let facts = cardinal::Facts::new(fact_set);
-a.with_facts(&facts)?.bounds()?;
+// With executed plans of other queries (EXPLAIN ANALYZE), and facts by hand:
+let a = Analysis::sql(&ctx, sql).await?
+    .with_plans(&profiles)
+    .with_facts(&cardinal::Facts::new(fact_set))
+    .build()?;
 
 // As DuckDB or PostgreSQL planned it, from EXPLAIN (FORMAT JSON) output:
-let a = cardinal::analyze_duckdb(&catalog, &explain_json, Some(sql), options)?;
-let a = cardinal::analyze_postgres(&catalog, &explain_json, Some(sql), options)?;
+let a = Analysis::duckdb(&catalog, &explain_json, Some(sql))?.build()?;
+let a = Analysis::postgres(&catalog, &explain_json, Some(sql))?.build()?;
 ```
 
 The `cardinal-debug` CLI shows the constraints behind a result:
@@ -28,6 +32,7 @@ The `cardinal-debug` CLI shows the constraints behind a result:
 B="cargo run -p cardinal-debug --"
 $B analyze --schema cardinal-debug/tests/fixtures/tpch.sql --sql tests/tpch/q03.sql
 $B analyze ... --html q03.html  # plan tree beside its constraints
+$B analyze ... --profiles-dir tests/duckdb/tpch --except q03  # with other plans
 ```
 
 See the API docs with `cargo doc --open`.

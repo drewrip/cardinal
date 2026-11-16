@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use cardinal::facts::{CountDialect, FactKind, FactSet};
+use cardinal::facts::CountDialect;
 use cardinal::observed::{Catalog, ObservedPlan, from_duckdb, from_duckdb_explain, from_postgres, from_postgres_explain};
 
 /// How long one DuckDB call may take, in seconds (`CARDINAL_LIVE_TIMEOUT`,
@@ -420,36 +420,6 @@ impl Engine {
             Engine::DuckDb(db) => values(db, queries),
             Engine::Postgres(db) => pg::values(db, queries),
         }
-    }
-
-    /// Counts each fact `facts`' plans have and did not count
-    /// ([`FactSet::unobserved`]), and adds it: then what follows. Returns
-    /// how many it added, and how many no query here could count.
-    pub fn fill(&self, catalog: &Catalog, facts: &mut FactSet) -> (usize, usize) {
-        let kinds: Vec<FactKind> = facts.unobserved().cloned().collect();
-        let mut queries = vec![];
-        let mut asked = vec![];
-        for kind in &kinds {
-            let Some(c) = kind.count_sql_in(catalog, facts, self.dialect()) else { continue };
-            asked.push((kind, queries.len(), c.of.is_some()));
-            queries.push(c.value);
-            queries.extend(c.of);
-        }
-        let values = self.values(&queries);
-        let mut added = 0;
-        for (kind, at, shares) in asked {
-            let Ok(value) = values[at].clone() else { continue };
-            let of = match shares.then(|| values[at + 1].clone()) {
-                Some(Ok(of)) => Some(of),
-                Some(Err(_)) => continue,
-                None => None,
-            };
-            if let Some(fact) = kind.counted(value, of) {
-                added += facts.insert(fact) as usize;
-            }
-        }
-        facts.close();
-        (added, kinds.len() - added)
     }
 
     /// The rows `sql` returns.
