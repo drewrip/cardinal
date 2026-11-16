@@ -18,8 +18,28 @@ fn timeout() -> std::time::Duration {
 }
 pub const TIMED_OUT: &str = "timed out";
 
+/// The DuckDB CLI to run: `CARDINAL_DUCKDB`, or `duckdb` on the path. Not
+/// in agent mode, in which 2.0 notes so on its standard error.
+pub fn duckdb() -> Command {
+    let mut command = Command::new(std::env::var("CARDINAL_DUCKDB").unwrap_or_else(|_| "duckdb".into()));
+    command.env_remove("AI_AGENT");
+    command
+}
+
 pub fn duckdb_available() -> bool {
-    Command::new("duckdb").arg("--version").output().is_ok_and(|o| o.status.success())
+    !duckdb_version().is_empty()
+}
+
+/// The CLI's version, e.g. `v1.5.0`, or empty without one. Databases made
+/// once are kept apart by it: an older CLI may not read a newer's files.
+pub fn duckdb_version() -> String {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| match duckdb().arg("--version").output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string(),
+            _ => String::new(),
+        })
+        .clone()
 }
 
 /// TPC-H at scale factor 0.01, made once.
@@ -29,11 +49,11 @@ pub fn database() -> PathBuf {
         if let Ok(p) = std::env::var("CARDINAL_TPCH_DB") {
             return p.into();
         }
-        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tpch_sf001.duckdb");
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("tpch_sf001_{}.duckdb", duckdb_version()));
         if !path.exists() {
             let tmp = path.with_extension("tmp");
             let _ = std::fs::remove_file(&tmp);
-            run(&tmp, "CALL dbgen(sf = 0.01);", &[]).unwrap();
+            make(&tmp, "CALL dbgen(sf = 0.01);").unwrap();
             std::fs::rename(&tmp, &path).unwrap();
         }
         path
@@ -45,9 +65,17 @@ pub fn database() -> PathBuf {
 /// takes longer than `CARDINAL_LIVE_TIMEOUT` is killed, and fails with
 /// [`TIMED_OUT`].
 pub fn run(db: &PathBuf, sql: &str, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new("duckdb");
+    let mut command = duckdb();
     command.arg(db).args(args);
     exec(command, sql)
+}
+
+/// Runs `sql` on `db`, as [`run`] does, for up to an hour: to make a
+/// database.
+pub fn make(db: &PathBuf, sql: &str) -> Result<String, String> {
+    let mut command = duckdb();
+    command.arg(db);
+    exec_within(command, sql, std::time::Duration::from_secs(3600))
 }
 
 /// Runs `command` with `sql` as its input, returning standard output. A
@@ -194,7 +222,8 @@ pub mod pg {
     /// of the PostgreSQL database `db`, with their primary keys, once: a
     /// copy made before is kept. With `rows`, at most that many rows of
     /// each. DuckDB writes them, through its `postgres` extension, which
-    /// connects as `psql` does.
+    /// connects as `psql` does, but to the server's socket directory where
+    /// `PGHOST` names none: its own default may be another.
     pub fn mirror(duck: &PathBuf, db: &str, schema: &str, rows: Option<u64>) -> Result<(), String> {
         let long = std::time::Duration::from_secs(3600);
         let exists = run("postgres", &format!("SELECT count(*) FROM pg_database WHERE datname = '{db}';"))?;
@@ -214,15 +243,19 @@ pub mod pg {
         };
         let tables = list("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_type = 'BASE TABLE' ORDER BY 1;")?;
         // From a session of its own, the DuckDB database attached to read.
+        let host = match std::env::var("PGHOST") {
+            Ok(_) => String::new(),
+            Err(_) => run("postgres", "SHOW unix_socket_directories;")?.split(',').next().map_or(String::new(), |d| format!(" host={}", d.trim())),
+        };
         let mut script = format!(
-            "INSTALL postgres; LOAD postgres; ATTACH '{}' AS src (READ_ONLY); ATTACH 'dbname={db}' AS pg (TYPE postgres);\n",
+            "INSTALL postgres; LOAD postgres; ATTACH '{}' AS src (READ_ONLY); ATTACH 'dbname={db}{host}' AS pg (TYPE postgres);\n",
             duck.display()
         );
         for t in tables.iter().filter_map(|t| t.first()) {
             let limit = rows.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
             script.push_str(&format!("CREATE TABLE pg.\"{schema}\".\"{t}\" AS SELECT * FROM src.main.\"{t}\"{limit};\n"));
         }
-        exec_within(Command::new("duckdb"), &script, long)?;
+        exec_within(duckdb(), &script, long)?;
         let keys = list(
             "SELECT table_name AS a, array_to_string(list_transform(constraint_column_names, c -> '\"' || c || '\"'), ', ') AS b \
              FROM duckdb_constraints() WHERE schema_name = 'main' AND constraint_type = 'PRIMARY KEY';",

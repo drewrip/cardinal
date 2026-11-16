@@ -41,11 +41,11 @@ fn database() -> Option<PathBuf> {
     static MADE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     MADE.get_or_init(|| {
         let sf = std::env::var("CARDINAL_TPCDS_SF").unwrap_or_else(|_| "1".into());
-        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("tpcds_sf{sf}.duckdb"));
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("tpcds_sf{sf}_{}.duckdb", live::duckdb_version()));
         if !path.exists() {
             let tmp = path.with_extension("tmp");
             let _ = std::fs::remove_file(&tmp);
-            if let Err(e) = run(&tmp, &format!("INSTALL tpcds; LOAD tpcds; CALL dsdgen(sf = {sf});"), &[]) {
+            if let Err(e) = live::make(&tmp, &format!("INSTALL tpcds; LOAD tpcds; CALL dsdgen(sf = {sf});")) {
                 eprintln!("skipped: cannot generate TPC-DS: {e}");
                 return None;
             }

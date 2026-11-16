@@ -2,14 +2,15 @@
 //! and used as reference plans ([`cardinal::Builder::with_plans`]): which
 //! operators' counts are pinned, and that the pins agree with the
 //! constraints and the truth. Regenerate the fixtures with
-//! `scripts/duckdb_fixtures.sh`.
+//! `scripts/duckdb_fixtures.sh`, with DuckDB 1.5; `v2` holds a few made
+//! with 2.0.
 
 mod fixtures;
 
 use cardinal::facts::{Ratio, State, states};
 use cardinal::observed::{ObservedPlan, from_duckdb};
 use cardinal::{Analysis, Options};
-use fixtures::{DIR, catalog, foreign_keys, plans};
+use fixtures::{DIR, catalog, foreign_keys, plans, query};
 use serde_json::{Value, json};
 
 async fn plan(name: &str) -> ObservedPlan {
@@ -170,6 +171,35 @@ async fn own_profile_pins_the_truth() {
     println!("{exact} of {all} exact");
     assert!(failures.is_empty(), "{failures:#?}");
     assert!(exact * 4 >= all * 3, "only {exact} of {all} exact");
+}
+
+/// DuckDB 2.0 lays a profile out anew: the plan under `operator`, each
+/// operator's rows as `intermediate_rows`. Its profiles pin the truth too.
+#[tokio::test]
+async fn reads_duckdb_2_profiles() {
+    let catalog = catalog().await;
+    let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
+    for (name, truth) in [("q01", 4), ("q06", 1), ("q12", 2)] {
+        let json = std::fs::read_to_string(format!("{DIR}/v2/{name}.json")).unwrap();
+        let p = from_duckdb(&catalog, name, &json, Some(&query("tpch", name))).unwrap();
+        assert_eq!(p.nodes[p.root].rows, truth, "{name}");
+        let b = Analysis::plan(&catalog, &p).options(options.clone()).with_plans([&p]).build().unwrap().bounds().unwrap();
+        assert_eq!((b.lower, b.upper), (truth, Some(truth)), "{name}: {b}");
+    }
+}
+
+/// DuckDB 2.0 reports 0 rows for a `UNION`, whatever passed through it: it
+/// is not pinned.
+#[tokio::test]
+async fn duckdb_2_unions_are_not_counted() {
+    let catalog = catalog().await;
+    let json = std::fs::read_to_string(format!("{DIR}/v2/union_all.json")).unwrap();
+    let p = from_duckdb(&catalog, "union_all", &json, None).unwrap();
+    let union = p.nodes.iter().position(|n| n.engine_op == "UNION").unwrap();
+    assert!(!p.nodes[union].counted);
+    let b = Analysis::plan(&catalog, &p).with_plans([&p]).build().unwrap().bounds().unwrap();
+    // Pinned to 0 below its 136 rows, the constraints contradict.
+    assert_eq!((b.lower, b.upper), (1, Some(1)), "{b}");
 }
 
 /// What may not have run to completion is not pinned: the scan below a

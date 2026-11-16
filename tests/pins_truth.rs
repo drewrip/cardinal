@@ -12,8 +12,9 @@
 //! counted contradicts the constraints, or the truth. Each bound must hold
 //! the query's true row count.
 //!
-//! Needs the `duckdb` CLI, and for PostgreSQL a server with the database
-//! `scripts/postgres_fixtures.sh` loads; each is skipped without.
+//! Needs the `duckdb` CLI (or `CARDINAL_DUCKDB`, the path of another), and
+//! for PostgreSQL a server with the database `scripts/postgres_fixtures.sh`
+//! loads; each is skipped without.
 //! `CARDINAL_TRUTH_N` sets the
 //! number of generated queries (default 120), `CARDINAL_TRUTH_SEED` their
 //! seed, `CARDINAL_TRUTH_ONLY` (a substring of names) limits the queries,
@@ -320,7 +321,7 @@ async fn truth(engine: Engine) {
 
     // Profile each query in each way.
     let mut failures = vec![];
-    let mut slow = 0;
+    let (mut slow, mut empty) = (0, 0);
     let mut plans: Vec<(String, String, ObservedPlan)> = vec![];
     let variants = engine.variants();
     for (name, sql) in &queries {
@@ -330,7 +331,7 @@ async fn truth(engine: Engine) {
             match profiled {
                 Ok(p) => plans.push((name.clone(), sql.clone(), p)),
                 // `count(*)` of a table is answered from metadata: no operators.
-                Err(e) if e.contains("0 children") => {}
+                Err(e) if e.contains("0 children") => empty += 1,
                 Err(e) if e == TIMED_OUT => slow += 1,
                 Err(e) => failures.push(format!("{label}: does not profile: {e}\n  {sql}")),
             }
@@ -361,4 +362,7 @@ async fn truth(engine: Engine) {
         plans.len(),
     );
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    // A profile the reader takes for empty is rare: a whole run of them is
+    // a layout it does not know.
+    assert!(empty * 10 <= queries.len() * variants.len(), "{empty} profiles read as empty");
 }
