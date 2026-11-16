@@ -6,9 +6,15 @@
 //! table to `lineitem@1`, `lineitem@2`, ..., in the order that makes the fact
 //! least. Any renaming of instances of one table keeps a fact's meaning, so
 //! the least is a canonical form.
+//!
+//! A fact over one context compares its rows first ([`FactKind`]'s field
+//! order), so its least form names the context as the context's own least
+//! form does, and only the renamings that keep that form compete on the
+//! keys. [`Canonicals`] finds those once per context, for all its facts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use super::rewrite::Classes;
 use super::{Context, Exists, ExistsKind, Term, rewrite};
 use crate::facts::FactKind;
 use crate::observed::base_table;
@@ -17,27 +23,119 @@ use crate::observed::base_table;
 /// first appear, which is deterministic but may keep equal facts apart.
 pub(crate) const MAX_ORDERS: usize = 5040;
 
-/// The rows the last fact canonicalized was over, renamed under each order
-/// of its instances, for the next fact over the same rows to reuse:
-/// renaming rows is the costly part, and the facts of one operator's
-/// columns are all over its rows.
+/// Instance names by plan instance, for one order of each table's.
+type Names = HashMap<String, String>;
+
+/// Each context seen, canonically renamed: renaming rows is the costly
+/// part, and many facts are over the same rows.
 #[derive(Default)]
-pub(crate) struct Renamed {
-    over: Option<Context>,
-    groups: Vec<Vec<String>>,
-    contexts: Vec<Context>,
+pub(crate) struct Canonicals {
+    entries: HashMap<Context, Canonical>,
+    /// Lookups that found their context, and those that searched.
+    pub(crate) hits: usize,
+    pub(crate) misses: usize,
+}
+
+/// A context's canonical form.
+pub(crate) struct Canonical {
+    /// The context, canonically renamed.
+    pub(crate) context: Context,
+    /// Every renaming of its instances that gives `context`, up to
+    /// [`MAX_ORDERS`]: more than one if instances are interchangeable.
+    pub(crate) maps: Vec<Names>,
+    /// `context`'s classes of equal columns, for keys over it.
+    classes: Classes,
+}
+
+impl std::fmt::Debug for Canonicals {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Canonicals({} contexts, {} hits, {} misses)", self.entries.len(), self.hits, self.misses)
+    }
+}
+
+impl Canonicals {
+    /// The canonical form of `c`, searched for once.
+    pub(crate) fn of(&mut self, c: &Context) -> &Canonical {
+        if self.entries.contains_key(c) {
+            self.hits += 1;
+        } else {
+            self.misses += 1;
+            let entry = Canonical::search(c);
+            self.entries.insert(c.clone(), entry);
+        }
+        &self.entries[c]
+    }
+}
+
+impl Canonical {
+    /// The least renaming of `c` over every order of its instances, and
+    /// each order that gives it.
+    fn search(c: &Context) -> Canonical {
+        let mut instances = vec![];
+        context_instances(c, &mut instances);
+        let groups = grouped(&instances);
+        let mut all = vec![];
+        if orders(&groups).is_none_or(|n| n > MAX_ORDERS) {
+            all.push(labels(&groups, &groups.iter().map(|(_, g)| g.clone()).collect::<Vec<_>>()));
+        } else {
+            each_order(&groups, 0, &mut vec![], &mut |order| all.push(labels(&groups, order)));
+        }
+        // Renaming a large context is slow: many orders are renamed on
+        // several threads, each keeping its least, then the least of those.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(all.len() / PER_THREAD).max(1);
+        let chunk = all.len().div_ceil(threads);
+        let (context, maps) = if threads == 1 {
+            least(c, all)
+        } else {
+            let mut parts = vec![];
+            let mut rest = all;
+            while !rest.is_empty() {
+                let tail = rest.split_off(chunk.min(rest.len()));
+                parts.push(std::mem::replace(&mut rest, tail));
+            }
+            let found: Vec<(Context, Vec<Names>)> = std::thread::scope(|s| {
+                let handles: Vec<_> = parts.into_iter().map(|p| s.spawn(move || least(c, p))).collect();
+                handles.into_iter().map(|h| h.join().expect("a renaming thread")).collect()
+            });
+            let best = found.iter().map(|(r, _)| r).min().expect("one order at least").clone();
+            let maps = found.into_iter().filter(|(r, _)| *r == best).flat_map(|(_, m)| m).collect();
+            (best, maps)
+        };
+        let classes = rewrite::key_classes(&context);
+        Canonical { context, maps, classes }
+    }
+}
+
+/// Orders one thread renames at least.
+const PER_THREAD: usize = 16;
+
+/// The least of `c` renamed by each of `orders`, and the orders that give
+/// it, in the order given.
+fn least(c: &Context, orders: Vec<Names>) -> (Context, Vec<Names>) {
+    let (mut best, mut maps): (Option<Context>, Vec<Names>) = (None, vec![]);
+    for names in orders {
+        let r = c.rename(&|r| names.get(r).cloned());
+        match best.as_ref().map(|b| r.cmp(b)) {
+            Some(std::cmp::Ordering::Greater) => {}
+            Some(std::cmp::Ordering::Equal) => maps.push(names),
+            _ => {
+                best = Some(r);
+                maps = vec![names];
+            }
+        }
+    }
+    (best.expect("one order at least"), maps)
 }
 
 impl FactKind {
     /// This fact with its table instances canonically renamed.
     pub fn canonical(&self) -> FactKind {
-        self.canonical_in(&mut Renamed::default())
+        self.canonical_in(&mut Canonicals::default())
     }
 
-    /// [`FactKind::canonical`], reusing `renamed`'s renamings of the rows
-    /// when this fact is over the same rows, with the same instances, as the
-    /// last one it saw.
-    pub(crate) fn canonical_in(&self, renamed: &mut Renamed) -> FactKind {
+    /// [`FactKind::canonical`], finding its context's canonical form in
+    /// `canonicals`, or adding it.
+    pub(crate) fn canonical_in(&self, canonicals: &mut Canonicals) -> FactKind {
         // Lookups no term reads taken out, and decorrelated first: what they
         // take out is no instance to name.
         let ungrouped = self.ungrouped();
@@ -45,44 +143,71 @@ impl FactKind {
         let unpadded = this.unpadded();
         let this = unpadded.as_ref().unwrap_or(this);
         let decorrelated = this.decorrelated();
-        let this = decorrelated.as_ref().unwrap_or(this);
-        let instances = this.instances();
-        let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
-        for i in &instances {
-            groups.entry(base_table(i).unwrap()).or_default().push(i);
+        decorrelated.as_ref().unwrap_or(this).named_in(canonicals)
+    }
+
+    /// This fact with its instances renamed in the least order, the rest
+    /// of [`FactKind::canonical_in`] already done.
+    fn named_in(&self, canonicals: &mut Canonicals) -> FactKind {
+        let Some(over) = self.over_only() else { return self.search() };
+        // Keys over instances the rows do not have are named with them.
+        let mut instances = vec![];
+        context_instances(over, &mut instances);
+        if self.instances().len() != instances.len() {
+            return self.search();
         }
-        let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
-        let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
-        if orders.is_none_or(|n| n > MAX_ORDERS) {
+        let entry = canonicals.of(over);
+        entry
+            .maps
+            .iter()
+            .map(|names| self.around_in(names, entry.context.clone(), &entry.classes))
+            .min()
+            .expect("one renaming at least")
+    }
+
+    /// The least renaming of this fact over every order of its instances,
+    /// renaming each whole; past [`MAX_ORDERS`], instances numbered as they
+    /// first appear.
+    pub(crate) fn search(&self) -> FactKind {
+        let instances = self.instances();
+        let groups = grouped(&instances);
+        if orders(&groups).is_none_or(|n| n > MAX_ORDERS) {
             let names = groups.iter().map(|(_, g)| g.clone()).collect::<Vec<_>>();
-            return this.rename(&labels(&groups, &names));
-        }
-        let over = this.over_only();
-        let names: Vec<Vec<String>> = groups.iter().map(|(_, g)| g.iter().map(|i| i.to_string()).collect()).collect();
-        let reuse = over.is_some() && renamed.over.as_ref() == over && renamed.groups == names;
-        if !reuse {
-            *renamed = Renamed { over: over.cloned(), groups: names, contexts: vec![] };
+            return self.rename(&labels(&groups, &names));
         }
         let mut best: Option<FactKind> = None;
-        let mut choice = vec![];
-        let mut k = 0;
-        each_order(&groups, 0, &mut choice, &mut |order| {
-            let names = labels(&groups, order);
-            let candidate = match over {
-                Some(o) => {
-                    if !reuse {
-                        renamed.contexts.push(o.rename(&|r| names.get(r).cloned()));
-                    }
-                    this.around(&names, renamed.contexts[k].clone())
-                }
-                None => this.rename(&names),
-            };
-            k += 1;
+        each_order(&groups, 0, &mut vec![], &mut |order| {
+            let candidate = self.rename(&labels(&groups, order));
             if best.as_ref().is_none_or(|b| candidate < *b) {
                 best = Some(candidate);
             }
         });
-        best.unwrap_or_else(|| this.clone())
+        best.unwrap_or_else(|| self.clone())
+    }
+
+    /// This fact as stored, its keys renamed as [`FactKind::canonical`]
+    /// names them now: a stored distinct count, uniqueness, least or
+    /// greatest value may be spelled as an older canonical form, which
+    /// compared keys before rows. Its instances `t@1`, `t@2`, ... are named
+    /// again, as a plan's would be; nothing else
+    /// [`FactKind::canonical`] does is done again, nor are other kinds
+    /// renamed, as derived facts are spelled as the facts they came from.
+    pub(crate) fn recanonical_in(&self, canonicals: &mut Canonicals) -> FactKind {
+        match self {
+            FactKind::Distinct { .. } | FactKind::Unique { .. } | FactKind::Min { .. } | FactKind::Max { .. } => {
+                self.respelled().as_ref().unwrap_or(self).named_in(canonicals)
+            }
+            _ => self.clone(),
+        }
+    }
+
+    /// This fact with its instances numbered `t@1`, `t@2`, ... spelled as a
+    /// plan's, to be named again; `None` if it has none.
+    fn respelled(&self) -> Option<FactKind> {
+        let mut numbered = vec![];
+        self.each_instance(&mut |r| r.contains('@'), &mut numbered);
+        let names: Names = numbered.iter().map(|r| (r.clone(), r.replacen('@', "#@", 1))).collect();
+        (!names.is_empty()).then(|| self.rename(&names))
     }
 
     /// A distinct count, min or max of keys over a GROUP BY on them and
@@ -194,7 +319,9 @@ impl FactKind {
         let f = |r: &str| names.get(r).cloned();
         let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
         if let Some(over) = self.over_only() {
-            return self.around(names, over.rename(&f));
+            let over = over.rename(&f);
+            let classes = rewrite::key_classes(&over);
+            return self.around_in(names, over, &classes);
         }
         match self {
             FactKind::Selectivity { pred, over } => {
@@ -229,15 +356,16 @@ impl FactKind {
     }
 
     /// This fact, over one context, renamed by `names` given its context
-    /// renamed so already, `over`.
-    fn around(&self, names: &HashMap<String, String>, over: Context) -> FactKind {
+    /// renamed so already, `over`, whose classes of equal columns are
+    /// `classes`.
+    fn around_in(&self, names: &Names, over: Context, classes: &Classes) -> FactKind {
         let f = |r: &str| names.get(r).cloned();
         let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
         match self {
-            FactKind::Distinct { keys, .. } => FactKind::Distinct { keys: rewrite::keys(&over, &terms(keys)), over },
-            FactKind::Unique { keys, .. } => FactKind::Unique { keys: rewrite::keys(&over, &terms(keys)), over },
+            FactKind::Distinct { keys, .. } => FactKind::Distinct { keys: classes.keys(&terms(keys)), over },
+            FactKind::Unique { keys, .. } => FactKind::Unique { keys: classes.keys(&terms(keys)), over },
             FactKind::Min { key, .. } | FactKind::Max { key, .. } => {
-                let key = rewrite::keys(&over, &[key.rename(&f)].into()).into_iter().next().unwrap_or_else(|| key.rename(&f));
+                let key = classes.keys(&[key.rename(&f)].into()).into_iter().next().unwrap_or_else(|| key.rename(&f));
                 match self {
                     FactKind::Min { .. } => FactKind::Min { key, over },
                     _ => FactKind::Max { key, over },
@@ -250,32 +378,38 @@ impl FactKind {
     /// Every table instance named, in order of first appearance.
     pub(crate) fn instances(&self) -> Vec<String> {
         let mut out = vec![];
-        let terms = |ts: &mut dyn Iterator<Item = &Term>, out: &mut Vec<String>| {
+        self.each_instance(&mut |r| base_table(r).is_some(), &mut out);
+        out
+    }
+
+    /// Every relation named that `is` an instance, in order of first
+    /// appearance.
+    fn each_instance(&self, is: &mut dyn FnMut(&str) -> bool, out: &mut Vec<String>) {
+        let terms = |ts: &mut dyn Iterator<Item = &Term>, is: &mut dyn FnMut(&str) -> bool, out: &mut Vec<String>| {
             for t in ts {
-                term_instances(t, out);
+                term_relations(t, is, out);
             }
         };
         match self {
-            FactKind::Cardinality(c) => context_instances(c, &mut out),
+            FactKind::Cardinality(c) => relations(c, is, out),
             FactKind::Selectivity { pred, over } => {
-                context_instances(over, &mut out);
-                terms(&mut pred.iter(), &mut out);
+                relations(over, is, out);
+                terms(&mut pred.iter(), is, out);
             }
             FactKind::Match { on, kept, other } => {
-                context_instances(kept, &mut out);
-                context_instances(other, &mut out);
-                terms(&mut on.iter(), &mut out);
+                relations(kept, is, out);
+                relations(other, is, out);
+                terms(&mut on.iter(), is, out);
             }
             FactKind::Distinct { keys, over } | FactKind::Unique { keys, over } => {
-                context_instances(over, &mut out);
-                terms(&mut keys.iter(), &mut out);
+                relations(over, is, out);
+                terms(&mut keys.iter(), is, out);
             }
             FactKind::Min { key, over } | FactKind::Max { key, over } => {
-                context_instances(over, &mut out);
-                terms(&mut std::iter::once(key), &mut out);
+                relations(over, is, out);
+                terms(&mut std::iter::once(key), is, out);
             }
         }
-        out
     }
 }
 
@@ -290,52 +424,72 @@ impl Context {
 }
 
 fn context_instances(c: &Context, out: &mut Vec<String>) {
+    relations(c, &mut |r| base_table(r).is_some(), out);
+}
+
+/// Every relation `c` names that `is` an instance, in order of first
+/// appearance.
+fn relations(c: &Context, is: &mut dyn FnMut(&str) -> bool, out: &mut Vec<String>) {
     match c {
         Context::Spj { tables, atoms, preds, exists } => {
             for t in tables {
-                push(t, out);
+                push(t, is, out);
             }
             for a in atoms {
-                context_instances(a, out);
+                relations(a, is, out);
             }
             for p in preds {
-                term_instances(p, out);
+                term_relations(p, is, out);
             }
             for e in exists {
-                context_instances(&e.other, out);
+                relations(&e.other, is, out);
                 for t in &e.on {
-                    term_instances(t, out);
+                    term_relations(t, is, out);
                 }
             }
         }
         Context::Derived { args, inputs, .. } => {
             for i in inputs {
-                context_instances(i, out);
+                relations(i, is, out);
             }
             for a in args {
-                term_instances(a, out);
+                term_relations(a, is, out);
             }
         }
     }
 }
 
-fn term_instances(t: &Term, out: &mut Vec<String>) {
+fn term_relations(t: &Term, is: &mut dyn FnMut(&str) -> bool, out: &mut Vec<String>) {
     for c in t.expr.column_refs() {
         if let Some(r) = c.relation.as_ref() {
-            push(r.table(), out);
+            push(r.table(), is, out);
         }
     }
 }
 
-fn push(r: &str, out: &mut Vec<String>) {
-    if base_table(r).is_some() && !out.iter().any(|o| o == r) {
+fn push(r: &str, is: &mut dyn FnMut(&str) -> bool, out: &mut Vec<String>) {
+    if is(r) && !out.iter().any(|o| o == r) {
         out.push(r.to_string());
     }
 }
 
+/// `instances` by base table, in the order given.
+fn grouped(instances: &[String]) -> Vec<(&str, Vec<&String>)> {
+    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for i in instances {
+        groups.entry(base_table(i).unwrap()).or_default().push(i);
+    }
+    groups.into_iter().collect()
+}
+
+/// How many orders of `groups`' instances there are; `None` past `usize`.
+fn orders(groups: &[(&str, Vec<&String>)]) -> Option<usize> {
+    groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)))
+}
+
 /// Instance names: the table's for its only instance, else numbered in the
 /// order given for each table.
-fn labels(groups: &[(&str, Vec<&String>)], order: &[Vec<&String>]) -> HashMap<String, String> {
+fn labels(groups: &[(&str, Vec<&String>)], order: &[Vec<&String>]) -> Names {
     let mut out = HashMap::new();
     for ((table, _), order) in groups.iter().zip(order) {
         for (k, i) in order.iter().enumerate() {
@@ -397,5 +551,109 @@ mod tests {
         // Keys the group does not have stay over it.
         let other = FactKind::Distinct { keys: terms([col("part.p_name")]), over: more };
         assert_eq!(other.canonical(), other);
+    }
+
+    /// `emp#a ⋈ emp#b ⋈ emp#c` on managers, `a`'s department filtered,
+    /// with `dept` alone, and every kind over it, by instance names.
+    fn kinds(a: &str, b: &str, c: &str) -> Vec<FactKind> {
+        let e = |i: &str, c: &str| col(format!("emp#{i}.{c}"));
+        let over = [a, b, c]
+            .iter()
+            .map(|i| Context::table(&format!("emp#{i}")))
+            .chain([Context::table("dept#9")])
+            .reduce(|x, y| x.cross(&y).unwrap())
+            .unwrap()
+            .filter(&terms([
+                e(a, "manager").eq(e(b, "id")),
+                e(b, "manager").eq(e(c, "id")),
+                e(a, "dept").eq(col("dept#9.id")),
+                e(a, "salary").gt(datafusion::prelude::lit(10)),
+            ]));
+        let keys = |cs: &[(&str, &str)]| terms(cs.iter().map(|(i, c)| e(i, c)));
+        vec![
+            FactKind::Cardinality(over.clone()),
+            FactKind::Distinct { over: over.clone(), keys: keys(&[(b, "dept")]) },
+            FactKind::Distinct { over: over.clone(), keys: keys(&[(c, "dept"), (a, "salary")]) },
+            FactKind::Distinct { over: over.clone(), keys: keys(&[(b, "id")]) },
+            FactKind::Unique { over: over.clone(), keys: keys(&[(a, "id"), (c, "id")]) },
+            FactKind::Min { over: over.clone(), key: Term::new(e(c, "salary")) },
+            FactKind::Max { over, key: Term::new(e(a, "dept")) },
+        ]
+    }
+
+    /// The least renaming of `k` over every order of its instances, by
+    /// brute force.
+    fn least(k: &FactKind) -> FactKind {
+        let instances = k.instances();
+        let groups = grouped(&instances);
+        let mut best: Option<FactKind> = None;
+        each_order(&groups, 0, &mut vec![], &mut |order| {
+            let c = k.rename(&labels(&groups, order));
+            if best.as_ref().is_none_or(|b| c < *b) {
+                best = Some(c);
+            }
+        });
+        best.unwrap()
+    }
+
+    #[test]
+    fn every_renaming_has_one_canonical_form() {
+        let mut canonicals = Canonicals::default();
+        let first = kinds("1", "2", "3");
+        let forms: Vec<FactKind> = first.iter().map(|k| k.canonical_in(&mut canonicals)).collect();
+        for (a, b, c) in [("1", "3", "2"), ("2", "1", "3"), ("2", "3", "1"), ("3", "1", "2"), ("3", "2", "1"), ("7", "5", "6")] {
+            let renamed: Vec<FactKind> = kinds(a, b, c).iter().map(|k| k.canonical_in(&mut canonicals)).collect();
+            assert_eq!(renamed, forms, "{a}{b}{c}");
+        }
+        // One search per context, here one context in seven orders.
+        assert_eq!(canonicals.misses, 7);
+        // As a search over every order of the whole fact would find.
+        for (k, form) in first.iter().zip(&forms) {
+            assert_eq!(&least(k), form, "{k}");
+            assert_eq!(&k.search(), form, "{k}");
+        }
+        // Distinct kinds stay apart.
+        assert_eq!(forms.iter().collect::<BTreeSet<_>>().len(), forms.len());
+    }
+
+    #[test]
+    fn interchangeable_instances_take_the_least_keys() {
+        // Two unfiltered copies of `emp`: either order names the rows alike.
+        let both = Context::table("emp#4").cross(&Context::table("emp#8")).unwrap();
+        let mut canonicals = Canonicals::default();
+        assert_eq!(canonicals.of(&both).maps.len(), 2);
+        for i in ["4", "8"] {
+            let k = FactKind::Distinct { over: both.clone(), keys: terms([col(format!("emp#{i}.dept"))]) };
+            let c = k.canonical_in(&mut canonicals);
+            assert_eq!(c.to_string(), "ndv(\"emp@1\".dept | emp@1 × emp@2)");
+            assert_eq!(c, least(&k));
+        }
+    }
+
+    #[test]
+    fn stored_forms_are_read_as_now() {
+        // The keys are of the managed copy: spelled as when keys came
+        // first, it is `@1`; the rows' least naming has it `@2`.
+        let kind = |k: &str, m: &str| {
+            let e = |i: &str, c: &str| col(format!("emp{i}.{c}"));
+            let over = Context::table(&format!("emp{k}"))
+                .cross(&Context::table(&format!("emp{m}")))
+                .unwrap()
+                .filter(&terms([e(m, "manager").eq(e(k, "id"))]));
+            FactKind::Distinct { over, keys: terms([e(m, "dept")]) }
+        };
+        let old = kind("@2", "@1");
+        let now = kind("#1", "#2").canonical();
+        assert_ne!(old, now);
+        assert_eq!(old.recanonical_in(&mut Canonicals::default()), now);
+        assert_eq!(now.recanonical_in(&mut Canonicals::default()), now);
+        // A set stored so reads as written now.
+        let mut set = crate::facts::FactSet::default();
+        let fact = |kind: FactKind| crate::facts::Fact { kind, value: crate::facts::Ratio::int(3), origins: vec![] };
+        set.insert(fact(old.clone()));
+        set.insert_bound(fact(old.clone()));
+        set.insert_floor(fact(old));
+        let read: crate::facts::FactSet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+        assert!(read.get(&now).is_some() && read.bound(&now).is_some() && read.floor(&now).is_some());
     }
 }

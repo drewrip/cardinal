@@ -19,6 +19,7 @@ use crate::analysis::{Node, Unit, unit};
 use crate::axioms::bases;
 use crate::postprocess::Role;
 use crate::facts::{Context, Fact, FactKind, FactSet, Term};
+use crate::rows::canonical::Canonicals;
 use crate::rows::contain::{fewer, groups_among, renamed};
 use crate::rows::logical::Logical;
 use crate::trace::{FactClaim, FactInfo, FactRef};
@@ -45,6 +46,8 @@ struct Shared {
     /// are costly with several instances of a table, and the same contexts
     /// come up for many operators and queries.
     canonical: Mutex<HashMap<FactKind, FactKind>>,
+    /// Each context's canonical form, for the kinds not yet in `canonical`.
+    canonicals: Mutex<Canonicals>,
 }
 
 impl Facts {
@@ -60,7 +63,7 @@ impl Facts {
             FactKind::Min { over, .. } | FactKind::Max { over, .. } => Some(over),
             _ => None,
         }));
-        Facts(Arc::new(Shared { set, conflicted, bounded, ranged, canonical: Mutex::default() }))
+        Facts(Arc::new(Shared { set, conflicted, bounded, ranged, canonical: Mutex::default(), canonicals: Mutex::default() }))
     }
 
     /// The closed facts.
@@ -154,7 +157,7 @@ impl<'a> Lookup<'a> {
         if let Some(c) = self.shared.canonical.lock().unwrap().get(&kind) {
             return c.clone();
         }
-        let c = kind.canonical();
+        let c = kind.canonical_in(&mut self.shared.canonicals.lock().unwrap());
         self.shared.canonical.lock().unwrap().insert(kind, c.clone());
         c
     }

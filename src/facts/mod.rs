@@ -89,6 +89,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Options;
 use crate::observed::{Catalog, ObservedPlan};
+use crate::rows::canonical::Canonicals;
 use crate::rows::join;
 
 /// A non-negative rational, in lowest terms.
@@ -211,14 +212,19 @@ pub enum FactKind {
     /// `other` under `on`. A semi join keeps `m`, an anti join `1 − m`.
     Match { on: BTreeSet<Term>, kept: Context, other: Context },
     /// `ndv(keys | over)`: the distinct combinations of `keys` over `over`.
-    Distinct { keys: BTreeSet<Term>, over: Context },
+    ///
+    /// `over` comes first in this and the kinds below so the derived order
+    /// compares contexts before keys: a canonical form then names the
+    /// context as it is named alone, once for all its kinds
+    /// (see [`FactKind::canonical`]).
+    Distinct { over: Context, keys: BTreeSet<Term> },
     /// `keys` take a different value in each of `over`'s rows. Its value is 1.
-    Unique { keys: BTreeSet<Term>, over: Context },
+    Unique { over: Context, keys: BTreeSet<Term> },
     /// `min(key | over)`: the least non-NULL value of `key` in `over`'s
     /// rows, an integer (a date as days). Known only by its bounds so far.
-    Min { key: Term, over: Context },
+    Min { over: Context, key: Term },
     /// `max(key | over)`: the greatest.
-    Max { key: Term, over: Context },
+    Max { over: Context, key: Term },
 }
 
 impl FactKind {
@@ -300,7 +306,9 @@ pub struct Conflict {
 ///
 /// Serde writes each map as the list of its values, and reads a list back
 /// as [`FactSet::insert`], [`FactSet::insert_bound`],
-/// [`FactSet::insert_floor`] and [`FactSet::insert_value`] would add it.
+/// [`FactSet::insert_floor`] and [`FactSet::insert_value`] would add it,
+/// with each kind canonically renamed again: a set written before a change
+/// of the canonical form reads as written after.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactSet {
@@ -320,6 +328,7 @@ pub struct FactSet {
     #[serde(serialize_with = "serialize_values", deserialize_with = "values")]
     values: BTreeMap<String, Value>,
     /// The facts of operators whose rows were not counted.
+    #[serde(deserialize_with = "unobserved")]
     unobserved: BTreeSet<FactKind>,
     pub conflicts: Vec<Conflict>,
 }
@@ -536,27 +545,35 @@ impl fmt::Display for FactSet {
 }
 
 fn facts<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D::Error> {
-    let mut set = FactSet::default();
-    for fact in Vec::<Fact>::deserialize(d)? {
+    let (mut set, mut canonicals) = (FactSet::default(), Canonicals::default());
+    for mut fact in Vec::<Fact>::deserialize(d)? {
+        fact.kind = fact.kind.recanonical_in(&mut canonicals);
         set.insert(fact);
     }
     Ok(set.facts)
 }
 
 fn bounds<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D::Error> {
-    let mut set = FactSet::default();
-    for bound in Vec::<Fact>::deserialize(d)? {
+    let (mut set, mut canonicals) = (FactSet::default(), Canonicals::default());
+    for mut bound in Vec::<Fact>::deserialize(d)? {
+        bound.kind = bound.kind.recanonical_in(&mut canonicals);
         set.insert_bound(bound);
     }
     Ok(set.bounds)
 }
 
 fn floors<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<FactKind, Fact>, D::Error> {
-    let mut set = FactSet::default();
-    for floor in Vec::<Fact>::deserialize(d)? {
+    let (mut set, mut canonicals) = (FactSet::default(), Canonicals::default());
+    for mut floor in Vec::<Fact>::deserialize(d)? {
+        floor.kind = floor.kind.recanonical_in(&mut canonicals);
         set.insert_floor(floor);
     }
     Ok(set.floors)
+}
+
+fn unobserved<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeSet<FactKind>, D::Error> {
+    let mut canonicals = Canonicals::default();
+    Ok(BTreeSet::<FactKind>::deserialize(d)?.into_iter().map(|k| k.recanonical_in(&mut canonicals)).collect())
 }
 
 fn values<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Value>, D::Error> {

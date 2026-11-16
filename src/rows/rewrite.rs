@@ -338,14 +338,13 @@ pub(crate) fn on(c: &Context, on: &BTreeSet<Term>) -> BTreeSet<Term> {
     }
 }
 
-/// Grouping keys over the rows of `c`, with a bare column written as its
-/// class's least: equal on every row, they group alike. Only for the keys of
-/// a distinct count, which nothing reads: a GROUP BY's rows are read by the
-/// columns it was given.
-pub(crate) fn keys(c: &Context, keys: &BTreeSet<Term>) -> BTreeSet<Term> {
-    let Context::Spj { preds, .. } = c else { return keys.clone() };
-    let classes = Classes::of(preds);
-    keys.iter().map(|k| classes.column(&k.expr).map_or_else(|| k.clone(), |e| Term::new(e.clone()))).collect()
+/// The classes of equal columns of `c`'s rows, to write grouping keys over
+/// them with ([`Classes::keys`]).
+pub(crate) fn key_classes(c: &Context) -> Classes {
+    match c {
+        Context::Spj { preds, .. } => Classes::of(preds),
+        _ => Classes::default(),
+    }
 }
 
 /// `pred` over the rows of `over`, written as `over ∧ pred` writes it: the
@@ -393,7 +392,8 @@ pub(crate) fn substituted(c: &Context) -> Context {
 }
 
 /// The classes of columns that a set of predicates says are equal.
-struct Classes {
+#[derive(Default)]
+pub(crate) struct Classes {
     /// Each column in a class of more than one, by its text, with itself and
     /// the least column of its class.
     members: BTreeMap<String, (Expr, Expr)>,
@@ -435,6 +435,14 @@ impl Classes {
             })
             .collect();
         Classes { members }
+    }
+
+    /// Grouping keys with a bare column written as its class's least: equal
+    /// on every row, they group alike. Only for the keys of a distinct
+    /// count, which nothing reads: a GROUP BY's rows are read by the
+    /// columns it was given.
+    pub(crate) fn keys(&self, keys: &BTreeSet<Term>) -> BTreeSet<Term> {
+        keys.iter().map(|k| self.column(&k.expr).map_or_else(|| k.clone(), |e| Term::new(e.clone()))).collect()
     }
 
     /// The least column of `e`'s class, if `e` is a column in one.
@@ -570,8 +578,8 @@ mod tests {
     #[test]
     fn keys_and_conditions_read_the_least_column() {
         let ab = t("a").cross(&t("b")).unwrap().filter(&eq("a.x", "b.x"));
-        assert_eq!(keys(&ab, &terms([col("b.x")])), terms([col("a.x")]));
-        assert_eq!(keys(&ab, &terms([col("b.x"), col("a.x")])), terms([col("a.x")]));
+        assert_eq!(key_classes(&ab).keys(&terms([col("b.x")])), terms([col("a.x")]));
+        assert_eq!(key_classes(&ab).keys(&terms([col("b.x"), col("a.x")])), terms([col("a.x")]));
         let semi = |c: &str| ab.exists(ExistsKind::Semi, eq(c, "o.x"), t("o"));
         assert_eq!(semi("b.x"), semi("a.x"));
     }

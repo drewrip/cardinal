@@ -138,7 +138,7 @@ use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
 use crate::parity;
-use crate::rows::canonical::Renamed;
+use crate::rows::canonical::Canonicals;
 use crate::rows::contain::{self, renamed, renamed_kind};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
@@ -632,9 +632,9 @@ fn key_col(plan: &LogicalPlan, i: usize) -> Expr {
 /// Returns the contexts of the nodes' rows.
 fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<Context> {
     let mut contexts = BTreeSet::new();
-    let mut renamings = Renamed::default();
+    let mut canonicals = Canonicals::default();
     let mut add = |space: &mut Space, q: FactKind, var: &str, contexts: &mut BTreeSet<Context>| {
-        let q = q.canonical_in(&mut renamings);
+        let q = q.canonical_in(&mut canonicals);
         contexts.insert(over(&q).clone());
         space.add(q, Int::new_const(var));
     };
