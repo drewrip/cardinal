@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use super::canonical::{MAX_ORDERS, each_order};
+use std::sync::Arc;
+
+use super::canonical::{Canonical, Canonicals, MAX_ORDERS, Names, each_order, term_numbered};
 use super::{Context, Exists, ExistsKind, Term};
 use crate::axioms::comparison;
 use crate::facts::FactKind;
@@ -199,69 +201,292 @@ pub(crate) fn inner_part(c: &Context) -> Option<Context> {
 /// True if `test(a, b)` holds with `a`'s instances of each table renamed
 /// among themselves some way. Canonical contexts number a table's several
 /// instances (`t@1`, `t@2`) to make each least, so two related contexts may
-/// number the same instances differently. Past `MAX_ORDERS` renamings, only
-/// the names as they are are tried.
+/// number the same instances differently. Only the renamings
+/// [`candidates`] finds are tried; past `MAX_ORDERS` renamings, only the
+/// names as they are.
+#[cfg(test)]
 pub(crate) fn renamed(a: &Context, b: &Context, test: impl Fn(&Context, &Context) -> bool) -> bool {
+    renamed_in(a, b, test, &mut Canonicals::default())
+}
+
+/// [`renamed`], with the canonical forms of the parts it aligns kept in
+/// `canonicals`.
+pub(crate) fn renamed_in(a: &Context, b: &Context, test: impl Fn(&Context, &Context) -> bool, canonicals: &mut Canonicals) -> bool {
     if test(a, b) {
         return true;
     }
-    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
-    let tables = a.tables();
-    for t in &tables {
-        if let Some((table, _)) = t.split_once('@') {
-            groups.entry(table).or_default().push(t);
-        }
-    }
-    let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
-    let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
-    if groups.is_empty() || orders.is_none_or(|n| n > MAX_ORDERS) {
-        return false;
-    }
-    let mut found = false;
-    each_order(&groups, 0, &mut vec![], &mut |order| {
-        if found {
-            return;
-        }
-        let names: BTreeMap<&str, &str> = groups
-            .iter()
-            .zip(order)
-            .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.as_str(), t.as_str())))
-            .collect();
-        let renamed = a.rename(&|r| names.get(r).map(|n| n.to_string()));
-        found = test(&renamed, b);
-    });
-    found
+    candidates(a, b, canonicals).iter().any(|names| test(&a.rename(&|r| names.get(r).cloned()), b))
 }
 
-/// `a` with its instances of each table renamed among themselves every
-/// other way [`renamed`] tries; none past `MAX_ORDERS`.
-#[cfg_attr(not(feature = "egglog"), allow(dead_code))]
-pub(crate) fn renamings(a: &Context) -> Vec<Context> {
-    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+/// A renaming being built: each of `a`'s numbered instances renamed so far,
+/// to one of the same table's.
+type Partial = BTreeMap<String, String>;
+
+/// Every renaming of `a`'s numbered instances among themselves, other than
+/// none, under which [`subset`], [`fewer`], [`groups_among`] or same inputs
+/// may relate `a` to `b`; empty past `MAX_ORDERS` renamings.
+///
+/// Each route between contexts needs one part of the renamed `a` equal to
+/// one of the context it is compared with, `t`: `b`, the inner join of `b`
+/// if an outer join (and so on), or `b` as an SPJ of itself alone.
+///
+/// | Route | Must be equal |
+/// |---|---|
+/// | SPJ ⊆ SPJ, same inputs | tables, atoms |
+/// | outer join `fewer` | the join condition; inputs ⊆ as SPJs |
+/// | [`groups_among`] | the keys; inputs ⊆ as SPJs |
+///
+/// An atom is equal to another under the renamings that take it to the
+/// other's canonical form ([`Canonicals::numbered`]); tables and terms
+/// under those that take their names to the other's. Instances no part
+/// pins are renamed every way. Predicates and existence conditions need
+/// only be covered, so they pin nothing.
+pub(crate) fn candidates(a: &Context, b: &Context, canonicals: &mut Canonicals) -> Vec<Names> {
     let tables = a.tables();
+    let mut labels: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
     for t in &tables {
         if let Some((table, _)) = t.split_once('@') {
-            groups.entry(table).or_default().push(t);
+            labels.entry(table).or_default().push(t);
         }
     }
-    let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
+    let groups: Vec<(&str, Vec<&String>)> = labels.into_iter().collect();
     let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
     if groups.is_empty() || orders.is_none_or(|n| n > MAX_ORDERS) {
         return vec![];
     }
-    let mut out = vec![];
-    each_order(&groups, 0, &mut vec![], &mut |order| {
-        let names: BTreeMap<&str, &str> = groups
-            .iter()
-            .zip(order)
-            .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.as_str(), t.as_str())))
-            .filter(|(f, t)| f != t)
-            .collect();
-        if !names.is_empty() {
-            out.push(a.rename(&|r| names.get(r).map(|n| n.to_string())));
+    let space: BTreeSet<&str> = groups.iter().flat_map(|(_, g)| g.iter().map(|t| t.as_str())).collect();
+    let mut partials = subset_partials(a, b, canonicals);
+    partials.extend(fewer_partials(a, b, canonicals));
+    partials.extend(group_partials(a, b, canonicals));
+    // Each renamed every way among what no part pinned.
+    let mut out: BTreeSet<Vec<(String, String)>> = BTreeSet::new();
+    for p in partials {
+        if p.iter().any(|(_, to)| !space.contains(to.as_str())) {
+            continue;
         }
+        complete(&groups, &p, &mut |full| {
+            if out.len() < MAX_ORDERS {
+                out.insert(full.iter().filter(|(f, t)| f != t).map(|(f, t)| (f.clone(), t.clone())).collect());
+            }
+        });
+    }
+    out.into_iter().filter(|m| !m.is_empty()).map(|m| m.into_iter().collect()).collect()
+}
+
+/// Calls `f` with `partial` completed every way: each instance of
+/// `groups` not renamed yet renamed to one of its table's not taken.
+fn complete(groups: &[(&str, Vec<&String>)], partial: &Partial, f: &mut dyn FnMut(&Partial)) {
+    let taken: BTreeSet<&String> = partial.values().collect();
+    let (mut targets, mut sources) = (vec![], vec![]);
+    for (table, g) in groups {
+        let from: Vec<&String> = g.iter().copied().filter(|t| !partial.contains_key(*t)).collect();
+        let to: Vec<&String> = g.iter().copied().filter(|t| !taken.contains(t)).collect();
+        if from.len() != to.len() {
+            return;
+        }
+        if !from.is_empty() {
+            targets.push((*table, to));
+            sources.push(from);
+        }
+    }
+    // Each order of the free targets, matched to the free sources in order.
+    each_order(&targets, 0, &mut vec![], &mut |order| {
+        let mut full = partial.clone();
+        for (from, to) in sources.iter().zip(order) {
+            full.extend(from.iter().zip(to).map(|(f, t)| ((*f).clone(), (*t).clone())));
+        }
+        f(&full);
     });
+}
+
+/// `p` with `q` added, if they rename no instance two ways and no two to
+/// one.
+fn merge(p: &Partial, q: &Partial) -> Option<Partial> {
+    let mut out = p.clone();
+    let taken: BTreeSet<&String> = p.values().collect();
+    for (f, t) in q {
+        match p.get(f) {
+            Some(u) if u != t => return None,
+            Some(_) => {}
+            None if taken.contains(t) => return None,
+            None => {
+                out.insert(f.clone(), t.clone());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Every consistent merge of one of each of `parts`.
+fn product(parts: Vec<Vec<Partial>>) -> Vec<Partial> {
+    parts.into_iter().fold(vec![Partial::new()], |acc, part| {
+        acc.iter().flat_map(|p| part.iter().filter_map(move |q| merge(p, q))).take(MAX_ORDERS).collect()
+    })
+}
+
+/// The partial renamings under which `a` renamed may be [`subset`] of `b`:
+/// with the same tables and atoms as `b`, or as an SPJ of `b` alone, or as
+/// the inner join of `b` if an outer join, and so on.
+fn subset_partials(a: &Context, b: &Context, canonicals: &mut Canonicals) -> Vec<Partial> {
+    let mut out = vec![];
+    let mut target = Some(b.clone());
+    while let Some(t) = target {
+        out.extend(spj_partials(&Spj::of(a), &Spj::of(&t), canonicals));
+        target = inner_part(&t);
+    }
     out
+}
+
+/// The partial renamings of `x`'s instances under which its tables and
+/// atoms are `y`'s.
+fn spj_partials(x: &Spj, y: &Spj, canonicals: &mut Canonicals) -> Vec<Partial> {
+    if x.atoms.len() != y.atoms.len() {
+        return vec![];
+    }
+    // Tables: the same unnumbered ones, and each numbered one to one of
+    // `y`'s of its table.
+    fn split(s: &Spj) -> (BTreeSet<&String>, BTreeMap<&str, Vec<&String>>) {
+        let (mut bare, mut numbered): (BTreeSet<&String>, BTreeMap<&str, Vec<&String>>) = (BTreeSet::new(), BTreeMap::new());
+        for t in &s.tables {
+            match t.split_once('@') {
+                Some((table, _)) => numbered.entry(table).or_default().push(t),
+                None => _ = bare.insert(t),
+            }
+        }
+        (bare, numbered)
+    }
+    let ((xb, xn), (yb, yn)) = (split(x), split(y));
+    if xb != yb || xn.keys().ne(yn.keys()) || xn.iter().zip(&yn).any(|((_, f), (_, t))| f.len() != t.len()) {
+        return vec![];
+    }
+    let mut tables = vec![];
+    let groups: Vec<(&str, Vec<&String>)> = yn.iter().map(|(t, g)| (*t, g.clone())).collect();
+    each_order(&groups, 0, &mut vec![], &mut |order| {
+        let p: Partial = xn.values().zip(order).flat_map(|(f, t)| f.iter().zip(t).map(|(f, t)| ((*f).clone(), (*t).clone()))).collect();
+        tables.push(p);
+    });
+    // Atoms: each to one of `y`'s with its canonical form, by a renaming
+    // that gives it.
+    let xs: Vec<(Arc<Canonical>, &Context)> = x.atoms.iter().map(|a| (canonicals.numbered(a), a)).collect();
+    let ys: Vec<Arc<Canonical>> = y.atoms.iter().map(|a| canonicals.numbered(a)).collect();
+    let mut out = vec![];
+    for p in tables {
+        atoms(&xs, &ys, 0, &mut vec![false; ys.len()], p, &mut out);
+    }
+    out
+}
+
+/// Extends `p` to `xs[k..]`, each atom to an unmatched one of `ys` with
+/// its canonical form, every way, into `out`.
+fn atoms(xs: &[(Arc<Canonical>, &Context)], ys: &[Arc<Canonical>], k: usize, matched: &mut Vec<bool>, p: Partial, out: &mut Vec<Partial>) {
+    if out.len() >= MAX_ORDERS {
+        return;
+    }
+    let Some((cx, _)) = xs.get(k) else {
+        out.push(p);
+        return;
+    };
+    for j in 0..ys.len() {
+        if matched[j] || ys[j].context != cx.context {
+            continue;
+        }
+        // `y`'s instance by canonical name.
+        let back: BTreeMap<&String, &String> = ys[j].maps[0].iter().map(|(n, l)| (l, n)).collect();
+        matched[j] = true;
+        for m in &cx.maps {
+            let q: Option<Partial> = m.iter().map(|(n, l)| Some((n.clone(), (*back.get(l)?).clone()))).collect();
+            if let Some(next) = q.and_then(|q| merge(&p, &q)) {
+                atoms(xs, ys, k + 1, matched, next, out);
+            }
+        }
+        matched[j] = false;
+    }
+}
+
+/// The partial renamings of `xs`' instances under which they are `ys`, as
+/// sets.
+fn term_partials(xs: &[Term], ys: &[Term]) -> Vec<Partial> {
+    fn go(xs: &[Term], ys: &[Term], used: &mut Vec<bool>, p: Partial, out: &mut Vec<Partial>) {
+        let Some((x, rest)) = xs.split_first() else {
+            out.push(p);
+            return;
+        };
+        let from = term_numbered(x);
+        for j in 0..ys.len() {
+            if used[j] {
+                continue;
+            }
+            let to = term_numbered(&ys[j]);
+            if to.len() != from.len() {
+                continue;
+            }
+            // Each order of `ys[j]`'s instances, matched to `x`'s in order.
+            let mut by: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+            for t in &to {
+                by.entry(t.split_once('@').unwrap().0).or_default().push(t);
+            }
+            let groups: Vec<(&str, Vec<&String>)> = by.into_iter().collect();
+            let mut found = vec![];
+            each_order(&groups, 0, &mut vec![], &mut |order| {
+                let mut q = Partial::new();
+                for ((table, _), to) in groups.iter().zip(order) {
+                    let from: Vec<&String> = from.iter().filter(|f| f.split_once('@').unwrap().0 == *table).collect();
+                    if from.len() != to.len() {
+                        return;
+                    }
+                    q.extend(from.into_iter().zip(to).map(|(f, t)| (f.clone(), (*t).clone())));
+                }
+                if q.len() == from.len() && x.rename(&|r| q.get(r).cloned()) == ys[j] {
+                    found.push(q);
+                }
+            });
+            used[j] = true;
+            for q in found {
+                if let Some(next) = merge(&p, &q) {
+                    go(rest, ys, used, next, out);
+                }
+            }
+            used[j] = false;
+        }
+    }
+    let mut out = vec![];
+    if xs.len() == ys.len() {
+        go(xs, ys, &mut vec![false; ys.len()], Partial::new(), &mut out);
+    }
+    out
+}
+
+/// The partial renamings under which `a` renamed may have [`fewer`] rows
+/// than `b` as outer joins: the same condition, over inputs among `b`'s,
+/// either way round for a full join.
+fn fewer_partials(a: &Context, b: &Context, canonicals: &mut Canonicals) -> Vec<Partial> {
+    let (Context::Derived { op: oa, args: xa, inputs: ia }, Context::Derived { op: ob, args: xb, inputs: ib }) = (a, b) else {
+        return vec![];
+    };
+    let outer = |op: &str| matches!(op, "Left join" | "Full join");
+    if !outer(oa) || !outer(ob) || ia.len() != 2 || ib.len() != 2 {
+        return vec![];
+    }
+    let on = term_partials(xa, xb);
+    let mut out = vec![];
+    for (l, r) in [(&ib[0], &ib[1]), (&ib[1], &ib[0])] {
+        let (pl, pr) = (subset_partials(&ia[0], l, canonicals), subset_partials(&ia[1], r, canonicals));
+        out.extend(product(vec![on.clone(), pl, pr]));
+    }
+    out
+}
+
+/// The partial renamings under which GROUP BY `a` renamed may have its
+/// groups among GROUP BY `b`'s ([`groups_among`]).
+fn group_partials(a: &Context, b: &Context, canonicals: &mut Canonicals) -> Vec<Partial> {
+    match (a, b) {
+        (Context::Derived { op: oa, args: ka, inputs: ia }, Context::Derived { op: ob, args: kb, inputs: ib })
+            if oa == "group" && ob == "group" && ia.len() == 1 && ib.len() == 1 =>
+        {
+            product(vec![term_partials(ka, kb), subset_partials(&ia[0], &ib[0], canonicals)])
+        }
+        _ => vec![],
+    }
 }
 
 /// [`renamed`] for whole facts: true if `test(a, b)` holds with `a`'s
@@ -306,7 +531,15 @@ mod tests {
     use datafusion::prelude::{col, lit};
 
     use super::*;
-    use crate::rows::{Term, terms};
+    use crate::rows::{ExistsKind, Term, terms};
+
+    /// SPJs over the same inputs and conditions.
+    fn same_inputs(a: &Context, b: &Context) -> bool {
+        let (Context::Spj { tables: ta, atoms: aa, exists: ea, .. }, Context::Spj { tables: tb, atoms: ab, exists: eb, .. }) = (a, b) else {
+            return false;
+        };
+        ta == tb && aa == ab && ea == eb
+    }
 
     fn t(name: &str) -> Context {
         Context::table(name)
@@ -391,6 +624,119 @@ mod tests {
         let narrow = pair("emp@2", "emp@1").filter(&p("emp@1.dept", 3));
         assert!(!subset(&narrow, &wide));
         assert!(renamed(&narrow, &wide, subset));
+    }
+
+    /// `test(a, b)` under some order of `a`'s numbered instances, trying
+    /// every one.
+    fn every_order(a: &Context, b: &Context, test: impl Fn(&Context, &Context) -> bool) -> bool {
+        let tables = a.tables();
+        let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for t in &tables {
+            if let Some((table, _)) = t.split_once('@') {
+                groups.entry(table).or_default().push(t);
+            }
+        }
+        let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
+        let mut found = test(a, b);
+        each_order(&groups, 0, &mut vec![], &mut |order| {
+            let names: BTreeMap<&str, &str> = groups
+                .iter()
+                .zip(order)
+                .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.as_str(), t.as_str())))
+                .collect();
+            found = found || test(&a.rename(&|r| names.get(r).map(|n| n.to_string())), b);
+        });
+        found
+    }
+
+    /// Contexts over several instances of `emp`, and of `dept`, each with
+    /// its instances renamed every way.
+    fn family() -> Vec<Context> {
+        let e = |i: u8, c: &str| col(format!("emp@{i}.{c}"));
+        let emp = |i: u8| t(&format!("emp@{i}"));
+        let manages = |a: u8, b: u8| terms([e(a, "manager").eq(e(b, "id"))]);
+        let pair = |a: u8, b: u8| emp(a).cross(&emp(b)).unwrap().filter(&manages(a, b));
+        let chain = pair(1, 2).cross(&emp(3)).unwrap().filter(&manages(2, 3));
+        let group = |i: u8, c: Context| Context::Derived { op: "group".into(), args: vec![Term::new(e(i, "dept"))], inputs: vec![c] };
+        let left = |l: Context, r: Context| Context::join(JoinType::Left, manages(1, 2), l, r);
+        let full = |l: Context, r: Context| Context::join(JoinType::Full, manages(1, 2), l, r);
+        let dept = |i: u8, c: Context| c.cross(&t("dept")).unwrap().filter(&terms([e(i, "dept").eq(col("dept.id"))]));
+        let base = vec![
+            pair(1, 2),
+            pair(1, 2).filter(&p("emp@1.dept", 3)),
+            pair(1, 2).filter(&p("emp@2.dept", 3)),
+            emp(1).cross(&emp(2)).unwrap(),
+            emp(1).cross(&emp(2)).unwrap().filter(&p("emp@2.level", 1)),
+            chain.clone(),
+            chain.filter(&p("emp@3.level", 1)),
+            chain.filter(&terms([e(1, "level").lt(lit(5))])),
+            chain.filter(&terms([e(1, "level").lt(lit(9))])),
+            dept(2, pair(1, 2)),
+            dept(1, pair(1, 2).filter(&p("emp@2.level", 1))),
+            emp(1).cross(&group(2, emp(2))).unwrap().filter(&terms([e(1, "dept").eq(e(2, "dept"))])),
+            emp(1).cross(&group(2, emp(2).filter(&p("emp@2.level", 1)))).unwrap().filter(&terms([e(1, "dept").eq(e(2, "dept"))])),
+            emp(3).cross(&group(2, pair(1, 2))).unwrap().filter(&terms([e(3, "dept").eq(e(2, "dept"))])),
+            group(1, pair(1, 2)),
+            group(1, pair(1, 2).filter(&p("emp@2.level", 1))),
+            group(2, pair(1, 2)),
+            left(emp(1), emp(2)),
+            left(emp(1).filter(&p("emp@1.level", 1)), emp(2)),
+            left(emp(1), emp(2).filter(&p("emp@2.level", 1))),
+            full(emp(1), emp(2)),
+            full(emp(1), emp(2).filter(&p("emp@2.level", 1))),
+            left(emp(1), emp(2)).filter(&p("emp@2.level", 1)),
+            emp(1).exists(ExistsKind::Semi, manages(2, 1), emp(2)),
+            emp(1).exists(ExistsKind::Semi, manages(2, 1), emp(2).filter(&p("emp@2.level", 1))),
+            emp(1).exists(ExistsKind::Anti, manages(2, 1), emp(2).filter(&p("emp@2.level", 1))),
+            emp(1).exists(ExistsKind::Anti, manages(2, 1), emp(2)),
+            emp(1).cross(&emp(3)).unwrap().exists(ExistsKind::Semi, manages(2, 1), emp(2)),
+        ];
+        let mut out = BTreeSet::new();
+        for c in base {
+            let tables = c.tables();
+            let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+            for t in &tables {
+                if let Some((table, _)) = t.split_once('@') {
+                    groups.entry(table).or_default().push(t);
+                }
+            }
+            let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
+            each_order(&groups, 0, &mut vec![], &mut |order| {
+                let names: BTreeMap<&str, &str> = groups
+                    .iter()
+                    .zip(order)
+                    .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.as_str(), t.as_str())))
+                    .collect();
+                out.insert(c.rename(&|r| names.get(r).map(|n| n.to_string())));
+            });
+        }
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn candidate_renamings_relate_as_every_order() {
+        let family = family();
+        let mut canonicals = Canonicals::default();
+        let (mut pairs, mut related, mut renaming, mut tried, mut orders) = (0, 0, 0, 0, 0);
+        for a in &family {
+            for b in family.iter().filter(|b| b.tables() == a.tables() && *b != a) {
+                pairs += 1;
+                let tests: [(&str, fn(&Context, &Context) -> bool); 4] =
+                    [("subset", subset), ("fewer", fewer), ("groups among", groups_among), ("same inputs", same_inputs)];
+                for (name, test) in tests {
+                    let all = every_order(a, b, test);
+                    assert_eq!(renamed_in(a, b, test, &mut canonicals), all, "{name}: {a}  vs  {b}");
+                    related += all as usize;
+                    renaming += (all && !test(a, b)) as usize;
+                }
+                tried += candidates(a, b, &mut canonicals).len();
+                let n = a.tables().iter().filter(|t| t.contains('@')).count();
+                orders += (1..=n).product::<usize>() - 1;
+            }
+        }
+        assert!(pairs > 500 && related > 200 && renaming > 100, "{pairs} pairs, {related} related, {renaming} only renamed");
+        // Fewer renamings than every order.
+        assert!(tried * 2 < orders, "{tried} candidates of {orders} renamings");
     }
 
     #[test]

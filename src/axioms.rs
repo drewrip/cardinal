@@ -121,6 +121,7 @@
 //! - `D` joins `C`: both SPJs, `D` with more inputs, and all of `C`'s
 //!   tables, atoms, conditions and predicates.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -139,7 +140,7 @@ use crate::keys::Nulls;
 use crate::origin::{self, Origin};
 use crate::parity;
 use crate::rows::canonical::Canonicals;
-use crate::rows::contain::{self, renamed, renamed_kind};
+use crate::rows::contain::{self, renamed_kind};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
@@ -694,6 +695,9 @@ pub struct Axiom {
 #[derive(Default)]
 pub struct Space {
     terms: BTreeMap<FactKind, Vec<Int>>,
+    /// The canonical forms of the parts of contexts renamed to relate
+    /// them ([`contain::candidates`]).
+    canonicals: RefCell<Canonicals>,
     /// The relations between the contexts, on egglog, if the analysis
     /// relates them so; else `rows::contain` tests each pair.
     #[cfg(feature = "egglog")]
@@ -716,7 +720,7 @@ impl Space {
         if let Some(r) = &self.egg {
             return r.subset(a, b);
         }
-        renamed(a, b, contain::subset)
+        self.renamed(a, b, contain::subset)
     }
 
     /// `a ⊆ b`, as named.
@@ -737,7 +741,7 @@ impl Space {
         if let Some(r) = &self.egg {
             return r.fewer(a, b);
         }
-        renamed(a, b, contain::fewer)
+        self.renamed(a, b, contain::fewer)
     }
 
     /// `contain::groups_among`, up to renaming.
@@ -747,13 +751,18 @@ impl Space {
             return r.groups_among(a, b);
         }
         let group = |c: &Context| matches!(c, Context::Derived { op, .. } if op == "group");
-        group(a) && group(b) && renamed(a, b, contain::groups_among)
+        group(a) && group(b) && self.renamed(a, b, contain::groups_among)
     }
 
     /// True if `a` and `b` name rows one bounds the other's: either has
     /// fewer than the other, or is the other with other predicates.
     fn related(&self, a: &Context, b: &Context) -> bool {
-        self.fewer(a, b) || self.fewer(b, a) || renamed(a, b, same_inputs)
+        self.fewer(a, b) || self.fewer(b, a) || self.renamed(a, b, same_inputs)
+    }
+
+    /// `test(a, b)` up to renaming `a`'s instances ([`contain::renamed`]).
+    fn renamed(&self, a: &Context, b: &Context, test: impl Fn(&Context, &Context) -> bool) -> bool {
+        contain::renamed_in(a, b, test, &mut self.canonicals.borrow_mut())
     }
 
     /// Records that `term` equals quantity `q`, a canonical kind.

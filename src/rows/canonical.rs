@@ -13,6 +13,7 @@
 //! keys. [`Canonicals`] finds those once per context, for all its facts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use super::rewrite::Classes;
 use super::{Context, Exists, ExistsKind, Term, rewrite};
@@ -24,13 +25,16 @@ use crate::observed::base_table;
 pub(crate) const MAX_ORDERS: usize = 5040;
 
 /// Instance names by plan instance, for one order of each table's.
-type Names = HashMap<String, String>;
+pub(crate) type Names = HashMap<String, String>;
 
 /// Each context seen, canonically renamed: renaming rows is the costly
 /// part, and many facts are over the same rows.
 #[derive(Default)]
 pub(crate) struct Canonicals {
-    entries: HashMap<Context, Canonical>,
+    entries: HashMap<Context, Arc<Canonical>>,
+    /// The same, of contexts whose instances are numbered as canonical
+    /// forms number them ([`Canonicals::numbered`]).
+    numbered: HashMap<Context, Arc<Canonical>>,
     /// Lookups that found their context, and those that searched.
     pub(crate) hits: usize,
     pub(crate) misses: usize,
@@ -42,6 +46,7 @@ pub(crate) struct Canonical {
     pub(crate) context: Context,
     /// Every renaming of its instances that gives `context`, up to
     /// [`MAX_ORDERS`]: more than one if instances are interchangeable.
+    /// Each names every instance renamed, and only those.
     pub(crate) maps: Vec<Names>,
     /// `context`'s classes of equal columns, for keys over it.
     classes: Classes,
@@ -55,15 +60,36 @@ impl std::fmt::Debug for Canonicals {
 
 impl Canonicals {
     /// The canonical form of `c`, searched for once.
-    pub(crate) fn of(&mut self, c: &Context) -> &Canonical {
-        if self.entries.contains_key(c) {
+    pub(crate) fn of(&mut self, c: &Context) -> Arc<Canonical> {
+        if let Some(e) = self.entries.get(c) {
             self.hits += 1;
-        } else {
-            self.misses += 1;
-            let entry = Canonical::search(c);
-            self.entries.insert(c.clone(), entry);
+            return e.clone();
         }
-        &self.entries[c]
+        self.misses += 1;
+        let entry = Arc::new(Canonical::search(c));
+        self.entries.insert(c.clone(), entry.clone());
+        entry
+    }
+
+    /// The canonical form of `c`, part of a canonical form: its instances
+    /// `t@1`, `t@2`, ... are named as a plan's would be, and its maps
+    /// rename those names.
+    pub(crate) fn numbered(&mut self, c: &Context) -> Arc<Canonical> {
+        if let Some(e) = self.numbered.get(c) {
+            self.hits += 1;
+            return e.clone();
+        }
+        self.misses += 1;
+        let names = numbered(c);
+        let spelled: Names = names.iter().map(|r| (r.clone(), r.replacen('@', "#@", 1))).collect();
+        let back: Names = spelled.iter().map(|(r, s)| (s.clone(), r.clone())).collect();
+        let mut entry = Canonical::search(&c.rename(&|r| spelled.get(r).cloned()));
+        for m in &mut entry.maps {
+            *m = m.drain().map(|(s, label)| (back[&s].clone(), label)).collect();
+        }
+        let entry = Arc::new(entry);
+        self.numbered.insert(c.clone(), entry.clone());
+        entry
     }
 }
 
@@ -425,6 +451,21 @@ impl Context {
 
 fn context_instances(c: &Context, out: &mut Vec<String>) {
     relations(c, &mut |r| base_table(r).is_some(), out);
+}
+
+/// The instances `c` names numbered `t@1`, `t@2`, ..., as canonical forms
+/// number several of one table's, in order of first appearance.
+pub(crate) fn numbered(c: &Context) -> Vec<String> {
+    let mut out = vec![];
+    relations(c, &mut |r| r.contains('@'), &mut out);
+    out
+}
+
+/// The instances `t` names numbered so.
+pub(crate) fn term_numbered(t: &Term) -> Vec<String> {
+    let mut out = vec![];
+    term_relations(t, &mut |r| r.contains('@'), &mut out);
+    out
 }
 
 /// Every relation `c` names that `is` an instance, in order of first

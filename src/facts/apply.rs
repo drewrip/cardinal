@@ -20,7 +20,7 @@ use crate::axioms::bases;
 use crate::postprocess::Role;
 use crate::facts::{Context, Fact, FactKind, FactSet, Term};
 use crate::rows::canonical::Canonicals;
-use crate::rows::contain::{fewer, groups_among, renamed};
+use crate::rows::contain::{fewer, groups_among, renamed_in};
 use crate::rows::logical::Logical;
 use crate::trace::{FactClaim, FactInfo, FactRef};
 use crate::{Analysis, Result};
@@ -46,7 +46,8 @@ struct Shared {
     /// are costly with several instances of a table, and the same contexts
     /// come up for many operators and queries.
     canonical: Mutex<HashMap<FactKind, FactKind>>,
-    /// Each context's canonical form, for the kinds not yet in `canonical`.
+    /// Each context's canonical form, for the kinds not yet in `canonical`,
+    /// and of the parts of contexts renamed to relate them.
     canonicals: Mutex<Canonicals>,
 }
 
@@ -211,7 +212,7 @@ impl<'a> Lookup<'a> {
                     && !self.shared.conflicted.contains(&f.kind)
                     && c.tables().is_subset(&tables)
                     && let Some(n) = f.value.as_int()
-                    && renamed(&ctx, c, fewer)
+                    && renamed_in(&ctx, c, fewer, &mut self.shared.canonicals.lock().unwrap())
                 {
                     out.push((i, node.var.clone(), n, FactRef::of(f)));
                 }
@@ -229,7 +230,7 @@ impl<'a> Lookup<'a> {
                     && !self.shared.conflicted.contains(&f.kind)
                     && over.tables().is_subset(&tables)
                     && let Some(n) = f.value.as_int()
-                    && renamed(&ctx, &wider, groups_among)
+                    && renamed_in(&ctx, &wider, groups_among, &mut self.shared.canonicals.lock().unwrap())
                 {
                     out.push((i, node.var.clone(), n, FactRef::of(f)));
                 }
@@ -365,7 +366,7 @@ impl<'a> Lookup<'a> {
             let ctx = self.canonical_ctx(ctx);
             let tables = ctx.tables();
             for (c, n, fact, floor) in &counts {
-                if tables.is_subset(&c.tables()) && if **c == ctx { *floor } else { renamed(c, &ctx, fewer) } {
+                if tables.is_subset(&c.tables()) && if **c == ctx { *floor } else { renamed_in(c, &ctx, fewer, &mut self.shared.canonicals.lock().unwrap()) } {
                     out.push((i, node.var.clone(), *n, FactRef::of(fact)));
                 }
             }

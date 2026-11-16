@@ -1,8 +1,23 @@
 //! Containment between contexts on egglog: the rules of `contain.egg`,
 //! seeded from Rust, give `rows::contain`'s relations between a set of
 //! contexts.
+//!
+//! Each pair over the same tables is asked about as named, and under each
+//! renaming of the first's instances that may relate them
+//! (`rows::contain::candidates`): one that lines up the part some rule
+//! compares exactly.
+//!
+//! | Route | Must be equal |
+//! |---|---|
+//! | SPJ ⊆ SPJ (`Sub`), same inputs (`RSameInputs`) | tables, atoms |
+//! | outer join `Fewer` | the join condition; inputs ⊆ as SPJs |
+//! | `GroupsAmong` | the keys; inputs ⊆ as SPJs |
+//! | derived ⊆ SPJ through `Wraps` | the SPJ's one atom |
+//!
+//! A rule that relates a renamed context by another route needs its own
+//! line here, and in `candidates`, or the relations it gives are lost.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use egglog::prelude::*;
@@ -10,7 +25,8 @@ use egglog::{RawValues, Value};
 
 use super::{Graph, Reach};
 use crate::axioms::bases;
-use crate::rows::contain::{implied, inner_part, renamings};
+use crate::rows::canonical::Canonicals;
+use crate::rows::contain::{candidates, implied, inner_part};
 use crate::rows::{Context, Term};
 
 /// The relations between some contexts, each up to renaming the first's
@@ -79,22 +95,34 @@ impl Relations {
     /// The relations between `contexts`, and those of them `seeds` reach.
     pub(crate) fn new<'c>(contexts: impl IntoIterator<Item = &'c Context>, seeds: &BTreeSet<Context>, reach: Reach) -> Relations {
         let contexts: Vec<&Context> = contexts.into_iter().collect();
-        // Each context with its instances renamed: a context alone over
-        // its tables needs none.
         let mut buckets: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
         for (i, c) in contexts.iter().enumerate() {
             buckets.entry(bases(c)).or_default().push(i);
         }
-        let mut others = vec![vec![]; contexts.len()];
+        // For each pair over the same tables, the renamings of the first
+        // that may relate it to the second ([`candidates`]): a context alone
+        // over its tables needs none.
+        let mut canonicals = Canonicals::default();
+        let mut others: Vec<Vec<Context>> = vec![vec![]; contexts.len()];
+        let mut asks: Vec<(usize, usize, usize)> = vec![];
         for bucket in buckets.values().filter(|b| b.len() > 1) {
             for &i in bucket {
-                others[i] = renamings(contexts[i]);
+                let mut seen: BTreeMap<Vec<(String, String)>, usize> = BTreeMap::new();
+                for &j in bucket.iter().filter(|j| **j != i) {
+                    for names in candidates(contexts[i], contexts[j], &mut canonicals) {
+                        let k = *seen.entry(names.iter().map(|(f, t)| (f.clone(), t.clone())).collect()).or_insert_with(|| {
+                            others[i].push(contexts[i].rename(&|r| names.get(r).cloned()));
+                            others[i].len() - 1
+                        });
+                        asks.push((i, k, j));
+                    }
+                }
             }
         }
         // The rules run as their first run planned them: a graph that ran
         // small inputs runs large ones far more slowly than a fresh one.
         let large = others.iter().map(Vec::len).sum::<usize>() > LARGE;
-        let build = |g: &mut Graph| Relations::build(g, &contexts, &buckets, others, seeds, reach);
+        let build = |g: &mut Graph| Relations::build(g, &contexts, &buckets, others, &asks, seeds, reach);
         if large { build(&mut Graph::new()) } else { Graph::with(build) }
     }
 
@@ -103,6 +131,7 @@ impl Relations {
         contexts: &[&Context],
         buckets: &HashMap<Vec<String>, Vec<usize>>,
         others: Vec<Vec<Context>>,
+        asks: &[(usize, usize, usize)],
         seeds: &BTreeSet<Context>,
         reach: Reach,
     ) -> Relations {
@@ -119,32 +148,32 @@ impl Relations {
         };
         g.egraph.update(|mut fs| fs.set("Limit", RawValues(vec![]), limit)).expect("a function of the program");
         // Each context with its instances renamed, and which pairs of
-        // contexts over the same tables are asked about.
+        // contexts over the same tables are asked about: each as named, and
+        // each renaming that may relate them.
         let mut renames = vec![];
         let mut named = class.clone();
-        let mut renamed: Vec<Vec<Value>> = tops.iter().map(|v| vec![*v]).collect();
+        let mut renamed: Vec<Vec<Value>> = vec![];
         for (i, others) in others.into_iter().enumerate() {
             let classes = g.encode_all(&others);
             for (o, r) in others.into_iter().zip(&classes) {
                 renames.push(vec![tops[i], *r]);
                 named.entry(o).or_insert(*r);
             }
-            renamed[i].extend(classes);
+            renamed.push(classes);
         }
         insert(g, "Renames", renames);
         let group = |c: &Context| matches!(c, Context::Derived { op, .. } if op == "group");
         let (mut fewer, mut groups) = (vec![], vec![]);
+        let mut asked: Vec<(usize, Value, usize)> = asks.iter().map(|&(i, k, j)| (i, renamed[i][k], j)).collect();
         for bucket in buckets.values() {
             for &i in bucket {
-                for &j in bucket.iter().filter(|j| **j != i) {
-                    let both = group(contexts[i]) && group(contexts[j]);
-                    for r in &renamed[i] {
-                        fewer.push(vec![*r, tops[j]]);
-                        if both {
-                            groups.push(vec![*r, tops[j]]);
-                        }
-                    }
-                }
+                asked.extend(bucket.iter().filter(|j| **j != i).map(|&j| (i, tops[i], j)));
+            }
+        }
+        for (i, r, j) in asked {
+            fewer.push(vec![r, tops[j]]);
+            if group(contexts[i]) && group(contexts[j]) {
+                groups.push(vec![r, tops[j]]);
             }
         }
         insert(g, "FewerDemand", fewer);
