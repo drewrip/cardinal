@@ -10,6 +10,7 @@
 //! | When | Rules |
 //! |---|---|
 //! | a count is made (`Analyzer::new_var`) | [`non_negative`](Analyzer::non_negative) |
+//! | a stored table is scanned ([`Analyzer::scan`]) | [`composite_key`](Analyzer::composite_key), [`referenced_size`](Analyzer::referenced_size), with reference plans ([`crate::joint`]) only |
 //! | an output is made (`Analyzer::fresh`) | [`ndv_within_rows`](Analyzer::ndv_within_rows), [`nonempty_ndv`](Analyzer::nonempty_ndv), [`boolean_ndv`](Analyzer::boolean_ndv) |
 //! | its rule is done ([`Analyzer::finish`]), by its domains | [`empty_domain`](Analyzer::empty_domain), [`ndv_within_domain`](Analyzer::ndv_within_domain), [`range_within_domain`](Analyzer::range_within_domain) |
 //! | 〃, by its subset bounds | [`bounded_sum`](Analyzer::bounded_sum), [`nulls_and_values`](Analyzer::nulls_and_values) |
@@ -30,13 +31,14 @@
 //! | wider (inner join side, GROUP BY key, ...) | [`within`](properties::within) | [`columns`] |
 //! | ranges only (padded side, MIN, MAX) | [`within`](properties::within) | [`ranges`] |
 
-use datafusion::common::Column;
+use datafusion::common::{Column, Constraint};
 use datafusion::logical_expr::Expr;
-use datafusion::logical_expr::logical_plan::LogicalPlan;
+use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use z3::ast::Int;
 
 use super::col;
-use crate::analysis::{Analyzer, Rel, int, product};
+use crate::analysis::{Analyzer, Rel, ScanKind, int, product};
+use crate::builder::bare_kind;
 use crate::keys::Nulls;
 use crate::postprocess::Role;
 use crate::properties::{self, Claim, Pair};
@@ -271,6 +273,78 @@ impl Analyzer<'_> {
                 self.assert(out.card.le(nulls));
             } else if d.never_null() {
                 self.assert(out.card.le(values));
+            }
+        }
+    }
+
+    /// Creates the size variable of each table `scan`'s table references by
+    /// a foreign key, scanned or not, for [`Self::referenced_size`].
+    pub(crate) fn referenced_tables(&mut self, scan: &TableScan) {
+        let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
+        let refs: Vec<String> =
+            self.foreign_keys.iter().filter(|fk| fk.table == display).map(|fk| fk.references.clone()).collect();
+        for t in refs {
+            if let ScanKind::Base { key, display } = bare_kind(&t) {
+                self.table(&key, &display);
+            }
+        }
+    }
+
+    /// `referenced size`.
+    ///
+    /// - **Claim**: `ndv(c | R) ≤ |S|` for each column `c` of a foreign key
+    ///   `R(cols) → S`, on a scan of `R`.
+    /// - **When**: the analysis has reference plans ([`crate::joint`]);
+    ///   `S` need not be scanned. Not on a float column.
+    /// - **Why**: each row's `cols` equal the key of one row of `S`, so
+    ///   they take at most `|S|` combinations, and one column no more.
+    pub fn referenced_size(&self, scan: &TableScan, out: &Rel) {
+        let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
+        let schema = &scan.projected_schema;
+        for fk in self.foreign_keys.iter().filter(|fk| fk.table == display) {
+            let ScanKind::Base { key, .. } = bare_kind(&fk.references) else { continue };
+            let Some(t) = self.tables.get(&key) else { continue };
+            for c in &fk.columns {
+                if let Some(j) = schema.fields().iter().position(|f| f.name() == c)
+                    && !schema.field(j).data_type().is_floating()
+                {
+                    self.assert(out.ndv[j].le(&t.var));
+                }
+            }
+        }
+    }
+
+    /// `composite key`.
+    ///
+    /// - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or
+    ///   of a composite UNIQUE constraint's on NOT NULL columns.
+    /// - **Why**: each row has its own combination of key values.
+    pub fn composite_key(&self, scan: &TableScan, out: &Rel) {
+        let Some(constraints) = scan.source.constraints() else {
+            return;
+        };
+        let schema = scan.source.schema();
+        for c in constraints.iter() {
+            let pk = match c {
+                Constraint::PrimaryKey(pk) => pk,
+                Constraint::Unique(u) if u.iter().all(|i| !schema.field(*i).is_nullable()) => u,
+                Constraint::Unique(_) => continue,
+            };
+            if pk.len() < 2 {
+                continue;
+            }
+            let positions: Option<Vec<usize>> = pk
+                .iter()
+                .map(|src| match &scan.projection {
+                    None => Some(*src),
+                    Some(proj) => proj.iter().position(|p| p == src),
+                })
+                .collect();
+            if let Some(positions) = positions {
+                let factors: Vec<&Int> = positions.iter().map(|i| &out.ndv[*i]).collect();
+                if let Some(p) = product(&factors, self.max_product) {
+                    self.assert(out.card.le(p));
+                }
             }
         }
     }

@@ -441,7 +441,11 @@ impl<'a> Analyzer<'a> {
                         s.facts.add(&field_col(schema, j), Dom::non_null(), schema);
                     }
                 }
-                self.relations[s.id].scan = Some(scan.clone());
+                self.composite_key(scan, &s);
+                if self.referenced_sizes {
+                    self.referenced_tables(scan);
+                    self.referenced_size(scan, &s);
+                }
                 let name = self.name_of(&s.card);
                 self.scans.push((name.clone(), display, s.card.clone()));
                 s.origin = Some(Origin::scan(&key, schema).narrow(&s.facts, schema));

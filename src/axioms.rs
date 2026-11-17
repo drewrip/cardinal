@@ -24,15 +24,6 @@
 //! [`assert_all`] asserts every axiom, once the rules are done, before any
 //! fact. They are grouped by what they range over.
 //!
-//! # Axioms on each scan
-//!
-//! One method of [`Analyzer`] each:
-//!
-//! | Axiom | Claim |
-//! |---|---|
-//! | `composite key` | [`Analyzer::composite_key`] |
-//! | `referenced size` | [`Analyzer::referenced_size`], with reference plans ([`crate::joint`]) only |
-//!
 //! # Axioms on one table's rows
 //!
 //! | Axiom | Claim |
@@ -90,14 +81,12 @@ use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use datafusion::common::{Constraint, ScalarValue};
-use datafusion::logical_expr::logical_plan::TableScan;
+use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Expr, Operator};
 
 use z3::ast::Int;
 
-use crate::builder::bare_kind;
-use crate::analysis::{Analyzer, Node, Rel, ScanKind, product};
+use crate::analysis::{Analyzer, Node};
 use crate::facts::FactKind;
 use crate::origin::{self, Origin};
 use crate::rows::canonical::Canonicals;
@@ -107,82 +96,9 @@ use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
 use crate::properties::{self, Claim, Pair};
 
-/// [Axioms on each scan](self#axioms-on-each-scan) and on
-/// [one table's rows](self#axioms-on-one-tables-rows), one function each, so
-/// a trace names the axiom a constraint is from.
+/// [Axioms on one table's rows](self#axioms-on-one-tables-rows), so a trace
+/// names the axiom a constraint is from.
 impl<'a> Analyzer<'a> {
-    /// Creates the size variable of each table `scan`'s table references by
-    /// a foreign key, scanned or not, for [`Self::referenced_size`].
-    fn referenced_tables(&mut self, scan: &TableScan) {
-        let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
-        let refs: Vec<String> =
-            self.foreign_keys.iter().filter(|fk| fk.table == display).map(|fk| fk.references.clone()).collect();
-        for t in refs {
-            if let ScanKind::Base { key, display } = bare_kind(&t) {
-                self.table(&key, &display);
-            }
-        }
-    }
-
-    /// `referenced size`.
-    ///
-    /// - **Claim**: `ndv(c | R) ≤ |S|` for each column `c` of a foreign key
-    ///   `R(cols) → S`, on a scan of `R`.
-    /// - **When**: the analysis has reference plans ([`crate::joint`]);
-    ///   `S` need not be scanned. Not on a float column.
-    /// - **Why**: each row's `cols` equal the key of one row of `S`, so
-    ///   they take at most `|S|` combinations, and one column no more.
-    pub fn referenced_size(&self, scan: &TableScan, rel: &Rel) {
-        let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
-        let schema = &scan.projected_schema;
-        for fk in self.foreign_keys.iter().filter(|fk| fk.table == display) {
-            let ScanKind::Base { key, .. } = bare_kind(&fk.references) else { continue };
-            let Some(t) = self.tables.get(&key) else { continue };
-            for c in &fk.columns {
-                if let Some(j) = schema.fields().iter().position(|f| f.name() == c)
-                    && !schema.field(j).data_type().is_floating()
-                {
-                    self.assert(rel.ndv[j].le(&t.var));
-                }
-            }
-        }
-    }
-
-    /// `composite key`.
-    ///
-    /// - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or
-    ///   of a composite UNIQUE constraint's on NOT NULL columns.
-    /// - **Why**: each row has its own combination of key values.
-    pub fn composite_key(&self, scan: &TableScan, rel: &Rel) {
-        let Some(constraints) = scan.source.constraints() else {
-            return;
-        };
-        let schema = scan.source.schema();
-        for c in constraints.iter() {
-            let pk = match c {
-                Constraint::PrimaryKey(pk) => pk,
-                Constraint::Unique(u) if u.iter().all(|i| !schema.field(*i).is_nullable()) => u,
-                Constraint::Unique(_) => continue,
-            };
-            if pk.len() < 2 {
-                continue;
-            }
-            let positions: Option<Vec<usize>> = pk
-                .iter()
-                .map(|src| match &scan.projection {
-                    None => Some(*src),
-                    Some(proj) => proj.iter().position(|p| p == src),
-                })
-                .collect();
-            if let Some(positions) = positions {
-                let factors: Vec<&Int> = positions.iter().map(|i| &rel.ndv[*i]).collect();
-                if let Some(p) = product(&factors, self.max_product) {
-                    self.assert(rel.card.le(p));
-                }
-            }
-        }
-    }
-
     /// `disjoint`, between relations. [`disjoint`](fn@disjoint) finds it
     /// between contexts.
     ///
@@ -248,43 +164,11 @@ impl<'a> Analyzer<'a> {
             self.assert_property(a.rule, a.claims);
         }
     }
-
-    /// Runs `f` with `frame` as the node being visited, so a trace gives
-    /// what it asserts to that node.
-    fn in_frame<T>(&mut self, frame: Option<usize>, f: impl FnOnce(&Self) -> T) -> T {
-        let n = self.owners.len();
-        self.owners.extend(frame);
-        let out = f(self);
-        self.owners.truncate(n);
-        out
-    }
 }
 
 /// Asserts every axiom of `a`, once its rules have visited the plan: those
-/// on each relation the rules made, on the rows of one table, and between
-/// contexts.
+/// on the rows of one table, and between contexts.
 pub fn assert_all(a: &mut Analyzer) {
-    let relations = std::mem::take(&mut a.relations);
-    // The sizes of the tables scans' foreign keys reference.
-    if a.referenced_sizes {
-        for r in &relations {
-            if let Some(scan) = &r.scan {
-                a.referenced_tables(scan);
-            }
-        }
-    }
-    // The keys of each scan's table.
-    for r in &relations {
-        if let Some(scan) = &r.scan {
-            a.in_frame(r.frame, |a| {
-                a.composite_key(scan, &r.rel);
-                if a.referenced_sizes {
-                    a.referenced_size(scan, &r.rel);
-                }
-            });
-        }
-    }
-    a.relations = relations;
     // The rows of one table.
     a.disjoint();
     // Between the contexts of the operators' rows.

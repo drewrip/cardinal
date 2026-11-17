@@ -91,9 +91,6 @@ pub(crate) type RelId = usize;
 pub(crate) struct Relation {
     /// The relation once its rule is done with it ([`Analyzer::finish`]).
     pub(crate) rel: Rel,
-    /// For a stored table's scan, before pushed-down filters: the scan,
-    /// whose declared keys bound it.
-    pub(crate) scan: Option<TableScan>,
     /// The frame of the node it was made for, for [`crate::trace`].
     pub(crate) frame: Option<usize>,
     /// The node it is the output of: none for a scan's raw rows.
@@ -433,7 +430,6 @@ impl<'a> Analyzer<'a> {
         };
         self.relations.push(Relation {
             rel: rel.clone(),
-            scan: None,
             frame: self.owners.last().copied(),
             node: None,
         });
