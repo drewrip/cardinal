@@ -233,6 +233,7 @@ fn analyze(
     let (own, own_scans, own_vars) = (a.nodes.len(), a.scans.len(), a.vars.len());
     a.resolve = referenced;
     let (pins, owners) = joint::visit(&mut a, plan, plans, options);
+    a.disjoint_origins();
     axioms::assert_all(&mut a);
     let pinned = joint::assert_pins(&a, &pins);
 

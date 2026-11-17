@@ -24,12 +24,6 @@
 //! [`assert_all`] asserts every axiom, once the rules are done, before any
 //! fact. They are grouped by what they range over.
 //!
-//! # Axioms on one table's rows
-//!
-//! | Axiom | Claim |
-//! |---|---|
-//! | `disjoint` | [`Analyzer::disjoint`] |
-//!
 //! # Axioms between contexts
 //!
 //! [`Analyzer::between_contexts`] gives each operator's rows its
@@ -78,8 +72,7 @@
 //!   tables, atoms, conditions and predicates.
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Expr, Operator};
@@ -88,7 +81,6 @@ use z3::ast::Int;
 
 use crate::analysis::{Analyzer, Node};
 use crate::facts::FactKind;
-use crate::origin::{self, Origin};
 use crate::rows::canonical::Canonicals;
 use crate::rows::contain::{self, renamed_kind};
 use crate::rows::logical::Logical;
@@ -96,60 +88,7 @@ use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
 use crate::properties::{self, Claim, Pair};
 
-/// [Axioms on one table's rows](self#axioms-on-one-tables-rows), so a trace
-/// names the axiom a constraint is from.
 impl<'a> Analyzer<'a> {
-    /// `disjoint`, between relations. [`disjoint`](fn@disjoint) finds it
-    /// between contexts.
-    ///
-    /// - **Claim**: relations whose rows no row of the table is in both of
-    ///   are apart: `|X| + |Y| ≤ |T|`.
-    /// - **When**: relations made of distinct rows of one stored table `T`,
-    ///   reached through operators that never repeat a row (filter,
-    ///   projection, sort, limit, distinct, semi and anti joins), whose value
-    ///   domains on some column do not meet. Relations with the same domains
-    ///   form a class bounded by one variable, and each set of pairwise
-    ///   disjoint classes sums to at most `|T|`; at most 64 classes per
-    ///   table.
-    ///
-    /// ```text
-    /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
-    /// ```
-    pub fn disjoint(&mut self) {
-        // Nodes' outputs of distinct rows of one stored table, in node order.
-        let mut of: Vec<(usize, Int, Origin)> = self
-            .op_outputs
-            .iter()
-            .filter_map(|out| {
-                let o = out.origin.as_ref().filter(|o| o.informative())?;
-                Some((out.node?, out.card.clone(), o.clone()))
-            })
-            .collect();
-        of.sort_by_key(|(node, _, _)| *node);
-        let (cards, origins): (Vec<Int>, Vec<Origin>) = of.into_iter().map(|(_, c, o)| (c, o)).unzip();
-        let (classes, cliques) = origin::disjoint_classes(&origins, 64);
-        let mut part: HashMap<usize, Int> = HashMap::new();
-        for clique in cliques {
-            let table = self.tables[&origins[classes[clique[0]][0]].table].var.clone();
-            let mut sum = vec![];
-            for c in clique {
-                let v = match part.entry(c) {
-                    Entry::Occupied(e) => e.get().clone(),
-                    Entry::Vacant(e) => {
-                        let v = self.new_var(format!("part{c}"));
-                        for &m in &classes[c] {
-                            self.assert(cards[m].le(&v));
-                        }
-                        self.assert(v.le(&table));
-                        e.insert(v).clone()
-                    }
-                };
-                sum.push(v);
-            }
-            self.assert(Int::add(&sum).le(&table));
-        }
-    }
-
     /// Every [axiom between contexts](self#axioms-between-contexts)
     /// over the quantities of this analysis's own operators, each
     /// operator's rows given the context facts give them, among the
@@ -166,12 +105,8 @@ impl<'a> Analyzer<'a> {
     }
 }
 
-/// Asserts every axiom of `a`, once its rules have visited the plan: those
-/// on the rows of one table, and between contexts.
+/// Asserts every axiom of `a`, once its rules have visited every plan.
 pub fn assert_all(a: &mut Analyzer) {
-    // The rows of one table.
-    a.disjoint();
-    // Between the contexts of the operators' rows.
     a.between_contexts();
 }
 
@@ -667,8 +602,8 @@ pub(crate) fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, re
     out
 }
 
-/// `disjoint`, between contexts. [`Analyzer::disjoint`] finds it between
-/// relations.
+/// `disjoint`, between contexts. [`Analyzer::disjoint_origins`] finds it
+/// between op outputs of one table.
 ///
 /// - **Claim**: rows that no row satisfies the conditions of both are apart
 ///   among any rows holding both: `|X| + |Y| ≤ |Z|`.
