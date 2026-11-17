@@ -482,16 +482,10 @@ impl<'a> Analyzer<'a> {
     }
 }
 
-/// Asserts every axiom of `a`, once its rules have visited the plan: that
-/// no count is negative, those on each relation the rules made, on the
-/// rows of one table, and between contexts. Z3's
-/// time depends on the order: with the counts last, plan bounds took
-/// several times as long on some queries.
+/// Asserts every axiom of `a`, once its rules have visited the plan: those
+/// on each relation the rules made, on the rows of one table, and between
+/// contexts.
 pub fn assert_all(a: &mut Analyzer) {
-    // The counts the rules made.
-    for (v, frame) in std::mem::take(&mut a.counts) {
-        a.in_frame(frame, |a| a.non_negative(&v));
-    }
     let relations = std::mem::take(&mut a.relations);
     // The sizes of the tables scans' foreign keys reference.
     if a.referenced_sizes {
@@ -499,10 +493,6 @@ pub fn assert_all(a: &mut Analyzer) {
             if let Some(scan) = &r.scan {
                 a.referenced_tables(scan);
             }
-        }
-        // The referenced tables' sizes.
-        for (v, frame) in std::mem::take(&mut a.counts) {
-            a.in_frame(frame, |a| a.non_negative(&v));
         }
     }
     // Each relation's own axioms, recording the functional dependencies
@@ -520,10 +510,6 @@ pub fn assert_all(a: &mut Analyzer) {
     a.relations = relations;
     // The rows of one table.
     a.disjoint();
-    // `disjoint`'s parts.
-    for (v, frame) in std::mem::take(&mut a.counts) {
-        a.in_frame(frame, |a| a.non_negative(&v));
-    }
     // Between the contexts of the operators' rows.
     a.between_contexts();
 }

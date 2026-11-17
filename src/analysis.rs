@@ -164,9 +164,6 @@ pub struct Analyzer<'a> {
     pub(crate) nodes: Vec<Node>,
     /// Every relation the rules made, by [`RelId`], for the axioms.
     pub(crate) relations: Vec<Relation>,
-    /// Every count variable (rows, distinct values, a table's size), with
-    /// the frame it was made in, for the axioms: none is negative.
-    pub(crate) counts: Vec<(Int, Option<usize>)>,
     /// Ids of visited nodes not yet claimed by a parent.
     pub(crate) frontier: Vec<usize>,
     pub(crate) counter: usize,
@@ -353,7 +350,6 @@ impl<'a> Analyzer<'a> {
             frontier: Vec::new(),
             counter: 0,
             relations: Vec::new(),
-            counts: Vec::new(),
             max_product,
             foreign_keys,
             trace,
@@ -382,10 +378,11 @@ impl<'a> Analyzer<'a> {
         v
     }
 
-    /// A variable counting something: rows or distinct values.
+    /// A variable counting something, rows or distinct values: never
+    /// negative.
     pub(crate) fn new_var(&mut self, name: String) -> Int {
         let v = Int::new_const(name.as_str());
-        self.counts.push((v.clone(), self.owners.last().copied()));
+        self.non_negative(&v);
         self.vars.push((name, v.clone()));
         v
     }
@@ -509,7 +506,7 @@ impl<'a> Analyzer<'a> {
         // with operator variables (which start with `op`).
         let symbol = format!("T{}_{}", self.tables.len(), symbol(display));
         let var = Int::new_const(symbol.as_str());
-        self.counts.push((var.clone(), self.owners.last().copied()));
+        self.non_negative(&var);
         self.tables.insert(
             key.to_string(),
             TableVar {
