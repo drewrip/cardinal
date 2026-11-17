@@ -22,7 +22,8 @@ use crate::observed::{ObservedPlan, Op, Pred, base_table, column_key, qualified,
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Taint {
     /// Below a `LIMIT`, or the probe side of a join whose build side was
-    /// empty: the engine may have stopped reading early.
+    /// empty: the engine may have stopped reading early. Also a top n's
+    /// rows, which hang on an order no context names.
     EarlyStop,
     /// Pruned by an optional or runtime filter that nothing above enforced.
     Pruned(String),
@@ -617,17 +618,6 @@ fn state(
             let op = if keys.is_empty() { "aggregate" } else { "group" };
             State::Clean(Context::Derived { op: op.into(), args: keys.into_iter().collect(), inputs: vec![input] })
         }
-        Op::TopN { fetch, offset } => match inputs[0].clone().settle() {
-            Ok(c) => State::Clean(Context::Derived {
-                op: match offset {
-                    0 => format!("top {fetch}"),
-                    k => format!("top {fetch} offset {k}"),
-                },
-                args: vec![],
-                inputs: vec![c],
-            }),
-            Err(t) => State::Tainted(t),
-        },
         Op::Union => {
             let mut ctxs = vec![];
             for s in inputs {
@@ -638,7 +628,7 @@ fn state(
             }
             State::Clean(Context::Derived { op: "union".into(), args: vec![], inputs: ctxs })
         }
-        Op::Limit { .. } => State::Tainted(Taint::EarlyStop),
+        Op::Limit { .. } | Op::TopN { .. } => State::Tainted(Taint::EarlyStop),
         Op::Other => State::Tainted(Taint::Unsupported(node.engine_op.clone())),
     }
 }

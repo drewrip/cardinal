@@ -730,3 +730,15 @@ fn futures_are_send() {
     let validate = a.validate(&ctx);
     assert_send(&validate);
 }
+
+#[tokio::test]
+async fn top_n_by_other_orders_are_other_rows() {
+    // The first two rows by `a` and by `b` are as many, but not the same.
+    let ctx = SessionContext::new();
+    for sql in ["CREATE TABLE t (a BIGINT, b BIGINT)", "INSERT INTO t VALUES (1, 9), (2, 8), (3, 1), (3, 2)"] {
+        ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    }
+    let sql = "SELECT DISTINCT x.a, y.a FROM (SELECT a FROM t ORDER BY a LIMIT 2) x, (SELECT a FROM t ORDER BY b LIMIT 2) y";
+    let a = Analysis::sql(&ctx, sql).await.unwrap().build().unwrap();
+    assert_eq!(a.validate(&ctx).await.unwrap().violation, None);
+}

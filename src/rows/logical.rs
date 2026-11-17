@@ -123,13 +123,9 @@ impl Logical {
                 (input(0), None, pass(0))
             }
             LogicalPlan::Window(_) => (input(0), None, pass(0)),
-            LogicalPlan::Sort(s) => {
-                let ctx = match s.fetch {
-                    None => input(0),
-                    Some(n) => input(0).map(|c| Context::Derived { op: format!("top {n}"), args: vec![], inputs: vec![c] }),
-                };
-                (ctx, None, pass(0))
-            }
+            // Which rows a fetch keeps hangs on an order no context names.
+            LogicalPlan::Sort(s) if s.fetch.is_some() => (Err(Taint::EarlyStop), None, pass(0)),
+            LogicalPlan::Sort(_) => (input(0), None, pass(0)),
             LogicalPlan::Limit(_) => (Err(Taint::EarlyStop), None, pass(0)),
             // The first row of each partition: as many rows as a GROUP BY on
             // the partition, which is all that is named of them. Which row
