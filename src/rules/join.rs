@@ -5,12 +5,12 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Join, LogicalPlan};
 use z3::ast::Int;
 
-use super::op_output::{columns, ranges, same_rows, with_card};
+use super::op_output::{columns, ranges, with_card};
 use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
 use crate::analysis::{Analyzer, OpOutput, SubsetBounds, ScanKind, int, min};
 use crate::domain::Facts;
 use crate::postprocess::Role;
-use crate::properties::within;
+use crate::properties::{same, within};
 
 impl<'a> Analyzer<'a> {
     /// `Join` of every kind. Notation as in [the module](super#notation).
@@ -488,8 +488,8 @@ impl<'a> Analyzer<'a> {
             JoinType::RightSemi | JoinType::RightAnti => {
                 self.assert_property("subset", within(&with_card(o, r, &aligned(nr, 0))))
             }
-            JoinType::LeftMark => self.assert_property("same rows", same_rows(o, l, &aligned(nl, 0))),
-            JoinType::RightMark => self.assert_property("same rows", same_rows(o, r, &aligned(nr, 0))),
+            JoinType::LeftMark => self.assert_property("same rows", same(&with_card(o, l, &aligned(nl, 0)))),
+            JoinType::RightMark => self.assert_property("same rows", same(&with_card(o, r, &aligned(nr, 0)))),
         }
         // Matched equi-key values exist on both sides.
         let semi = match join.join_type {

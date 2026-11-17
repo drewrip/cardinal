@@ -27,7 +27,7 @@
 //!
 //! | Relationship | Property | Pairs |
 //! |---|---|---|
-//! | same rows (projection, alias, sort, ...) | [`same_rows`] | [`with_card`] |
+//! | same rows (projection, alias, sort, ...) | [`same`](properties::same) | [`with_card`] |
 //! | subset (filter, limit, semi join, ...) | [`within`](properties::within) | [`with_card`] |
 //! | wider (inner join side, GROUP BY key, ...) | [`within`](properties::within) | [`columns`] |
 //! | ranges only (padded side, MIN, MAX) | [`within`](properties::within) | [`ranges`] |
@@ -46,7 +46,7 @@ use crate::builder::bare_kind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
 use crate::postprocess::Role;
-use crate::properties::{self, Claim, Pair};
+use crate::properties::{self, Pair};
 
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Min` and `Max`, if
 /// both have them in one unit. A cast of an integer to a decimal keeps the
@@ -79,16 +79,6 @@ pub fn columns<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)])
 pub fn with_card<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out = vec![Pair::Card(&o.card, &l.card)];
     out.extend(self::columns(o, l, columns));
-    out
-}
-
-/// `o`'s rows are `l`'s: their counts are [`same`](properties::same), and
-/// their ranges [`within`](properties::within).
-pub fn same_rows(o: &OpOutput, l: &OpOutput, columns: &[(usize, usize)]) -> Vec<Claim> {
-    let (counts, ranges): (Vec<Pair>, Vec<Pair>) =
-        with_card(o, l, columns).into_iter().partition(|p| matches!(p, Pair::Card(..) | Pair::Ndv(..)));
-    let mut out = properties::same(&counts);
-    out.extend(properties::within(&ranges));
     out
 }
 

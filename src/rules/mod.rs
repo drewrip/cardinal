@@ -91,8 +91,8 @@ use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
 use crate::postprocess::Role;
-use crate::properties::within;
-use op_output::{same_rows, with_card};
+use crate::properties::{same, within};
+use op_output::with_card;
 
 impl<'a> Analyzer<'a> {
     /// The ranges `predicate` holds between two columns on every row of
@@ -179,7 +179,7 @@ impl<'a> Analyzer<'a> {
                 None => self.expr_ndv(&o.ndv[j], e, &p.input, &l),
             }
         }
-        self.assert_property("same rows", same_rows(&o, &l, &columns));
+        self.assert_property("same rows", same(&with_card(&o, &l, &columns)));
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
         o.subset_bounds = l.subset_bounds.rename(&|c| passed_column(plan, &p.expr, c));
         o.origin = l.origin.as_ref().map(|origin| {
@@ -297,7 +297,7 @@ impl<'a> Analyzer<'a> {
         let columns = aligned(l.ndv.len(), 0);
         o.inherit(&l);
         match s.fetch {
-            None => self.assert_property("same rows", same_rows(&o, &l, &columns)),
+            None => self.assert_property("same rows", same(&with_card(&o, &l, &columns))),
             // Top-k: exactly the first n rows.
             Some(n) => {
                 self.assert_property("subset", within(&with_card(&o, &l, &columns)));
@@ -516,7 +516,7 @@ impl<'a> Analyzer<'a> {
     pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> OpOutput {
         let l = self.visit(input);
         let mut o = self.fresh(kind, plan);
-        self.assert_property("same rows", same_rows(&o, &l, &aligned(l.ndv.len(), 0)));
+        self.assert_property("same rows", same(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         o.facts = l.facts.by_position(input.schema(), plan.schema());
         let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;
