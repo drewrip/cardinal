@@ -422,6 +422,12 @@ impl<'a> Analyzer<'a> {
     /// - **Why**: a provider must return at least `fetch` rows and may return
     ///   more; DataFusion keeps the limit above.
     pub fn scan(&mut self, plan: &LogicalPlan, scan: &TableScan) -> (Rel, Option<RawScan>) {
+        // The scan before pushed-down filters and fetch: its keys are the
+        // table's, with no column pinned.
+        let mut raw = scan.clone();
+        raw.filters.clear();
+        raw.fetch = None;
+        let raw = LogicalPlan::TableScan(raw);
         let mut raw_scan = None;
         let mut out = match (self.resolve)(scan) {
             ScanKind::Base { key, display } => {
@@ -440,19 +446,12 @@ impl<'a> Analyzer<'a> {
                 self.scans.push((name.clone(), display, s.card.clone()));
                 s.origin = Some(Origin::scan(&key, schema).narrow(&s.facts, schema));
                 if !scan.filters.is_empty() {
-                    // The raw scan, before pushed-down filters and fetch.
-                    let mut raw = scan.clone();
-                    raw.filters.clear();
-                    raw.fetch = None;
-                    let raw = LogicalPlan::TableScan(raw);
-                    // Its keys are the table's, with no column pinned.
-                    self.relations[s.id].plan = raw.clone();
                     raw_scan = Some(RawScan {
                         var: name,
                         ndv_vars: self.names_of(&s),
                         min_vars: range_names(&s.min),
                         max_vars: range_names(&s.max),
-                        plan: raw,
+                        plan: raw.clone(),
                     });
                 }
                 s
@@ -465,7 +464,7 @@ impl<'a> Analyzer<'a> {
         // and may return more (DataFusion keeps the Limit above), so it bounds
         // nothing.
         if !scan.filters.is_empty() {
-            self.finish(&out, None);
+            self.finish(&out, &raw, None);
             let mut f = self.fresh("ScanFilter", plan);
             self.assert_property("subset", within(&with_card(&f, &out, &aligned(out.ndv.len(), 0))));
             f.facts = out.facts.clone();

@@ -91,7 +91,6 @@ pub(crate) type RelId = usize;
 pub(crate) struct Relation {
     /// The relation once its rule is done with it ([`Analyzer::finish`]).
     pub(crate) rel: Rel,
-    pub(crate) plan: LogicalPlan,
     /// For a stored table's scan, before pushed-down filters: the scan,
     /// whose declared keys bound it.
     pub(crate) scan: Option<TableScan>,
@@ -389,7 +388,8 @@ impl<'a> Analyzer<'a> {
 
     /// Creates a fresh relation for `plan`'s output: a cardinality variable
     /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, recorded in
-    /// [`Self::relations`] for the axioms.
+    /// [`Self::relations`] for the axioms. Asserts what holds of any
+    /// columns of any rows.
     pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> Rel {
         let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;
@@ -400,7 +400,7 @@ impl<'a> Analyzer<'a> {
             .iter()
             .map(|f| f.data_type().clone())
             .collect();
-        let ndv = fields
+        let ndv: Vec<Int> = fields
             .iter()
             .enumerate()
             .map(|(j, _)| self.new_var(format!("{base}_c{j}")))
@@ -412,6 +412,13 @@ impl<'a> Analyzer<'a> {
             min.push(u.is_some().then(|| self.range_var(format!("{base}_c{j}_min"))));
             max.push(u.is_some().then(|| self.range_var(format!("{base}_c{j}_max"))));
             units.push(u);
+        }
+        for (v, t) in ndv.iter().zip(&fields) {
+            self.ndv_within_rows(v, &card);
+            self.nonempty_ndv(v, &card);
+            if t == &DataType::Boolean {
+                self.boolean_ndv(v);
+            }
         }
         let rel = Rel {
             id: self.relations.len(),
@@ -426,7 +433,6 @@ impl<'a> Analyzer<'a> {
         };
         self.relations.push(Relation {
             rel: rel.clone(),
-            plan: plan.clone(),
             scan: None,
             frame: self.owners.last().copied(),
             node: None,
@@ -434,12 +440,14 @@ impl<'a> Analyzer<'a> {
         rel
     }
 
-    /// Records `rel` as its rule leaves it, with the facts found of its
-    /// rows, for the axioms; with `node` if it is that node's output.
-    pub(crate) fn finish(&mut self, rel: &Rel, node: Option<usize>) {
+    /// Records `rel`, the output of `plan`, as its rule leaves it, with
+    /// `node` if it is that node's output, and asserts what follows of it
+    /// ([`Self::on_op_output`]).
+    pub(crate) fn finish(&mut self, rel: &Rel, plan: &LogicalPlan, node: Option<usize>) {
         let r = &mut self.relations[rel.id];
         r.rel = rel.clone();
         r.node = node;
+        self.on_op_output(rel, plan);
     }
 
     /// The unquoted name of a variable created by `new_var`.
@@ -549,7 +557,7 @@ impl<'a> Analyzer<'a> {
             dependencies: vec![],
         });
         self.node_at.insert(address(plan), self.nodes.len() - 1);
-        self.finish(&out, Some(self.nodes.len() - 1));
+        self.finish(&out, plan, Some(self.nodes.len() - 1));
         // Those of plans not yet visited wait for them; those of plans never
         // visited (rewritten copies) are dropped at the end.
         for (at, d) in std::mem::take(&mut *self.relied.borrow_mut()) {

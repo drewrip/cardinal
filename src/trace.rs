@@ -165,6 +165,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("rules/mod.rs", include_str!("rules/mod.rs")),
     ("rules/aggregate.rs", include_str!("rules/aggregate.rs")),
     ("rules/join.rs", include_str!("rules/join.rs")),
+    ("rules/op_output.rs", include_str!("rules/op_output.rs")),
 ];
 
 impl Trace {

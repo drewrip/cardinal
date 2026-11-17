@@ -484,22 +484,8 @@ impl<'a> Analyzer<'a> {
 
     /// [`Self::determining_keys`] of the output positions `cols`, with
     /// `sizes` by position in `cols`. The kept positions are in `cols`' order.
+    /// Relies on the dependency of the dropped positions on the kept.
     pub(crate) fn determining(&self, plan: &LogicalPlan, cols: &[usize], sizes: &[Option<u128>]) -> Vec<usize> {
-        let (keys, dependency) = self.determining_with(plan, cols, sizes);
-        if let Some(d) = dependency {
-            self.rely(plan, d);
-        }
-        keys
-    }
-
-    /// [`Self::determining`], returning the dependency it relies on, if it
-    /// drops any position, for the caller to record.
-    pub(crate) fn determining_with(
-        &self,
-        plan: &LogicalPlan,
-        cols: &[usize],
-        sizes: &[Option<u128>],
-    ) -> (Vec<usize>, Option<Dependency>) {
         let mut order: Vec<usize> = (0..cols.len()).collect();
         order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().flatten().unwrap_or(u128::MAX)));
         let mut keys: Vec<usize> = cols.to_vec();
@@ -511,9 +497,10 @@ impl<'a> Analyzer<'a> {
                 keys = rest;
             }
         }
-        let dependency =
-            (keys.len() < cols.len()).then(|| Dependency { on: keys.clone(), determines: Determines::Columns(cols.to_vec()) });
-        (keys, dependency)
+        if keys.len() < cols.len() {
+            self.rely(plan, Dependency { on: keys.clone(), determines: Determines::Columns(cols.to_vec()) });
+        }
+        keys
     }
 
     /// Notes that a rule relied on `d` holding in `plan`'s rows.
