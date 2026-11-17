@@ -374,7 +374,7 @@ impl<'a> Analyzer<'a> {
     pub fn same_rows(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
         self.assert(o.card.eq(&l.card));
         for &(j, i) in columns {
-            self.assert_as(Role::Link, o.ndv[j].eq(&l.ndv[i]));
+            self.assert_as(Role::Flow, o.ndv[j].eq(&l.ndv[i]));
             self.within(o, j, l, i);
         }
     }
@@ -402,7 +402,7 @@ impl<'a> Analyzer<'a> {
     ///   not paired.
     pub fn wider(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
         for &(j, i) in columns {
-            self.assert_as(Role::Link, o.ndv[j].le(&l.ndv[i]));
+            self.assert_as(Role::Flow, o.ndv[j].le(&l.ndv[i]));
             self.within(o, j, l, i);
         }
     }
@@ -456,7 +456,7 @@ impl<'a> Analyzer<'a> {
     pub(crate) fn unique_columns(&self, plan: &LogicalPlan, rel: &Rel) -> Vec<Dependency> {
         let schema = plan.schema();
         let mut relied = vec![];
-        for key in &rel.rows.keys {
+        for key in &rel.subset_bounds.keys {
             let positions: Option<Vec<usize>> = key
                 .iter()
                 .map(|e| match e {
@@ -493,7 +493,7 @@ impl<'a> Analyzer<'a> {
     ///   holds only values `≥ k ≥ 1`.
     /// - **Why**: each row adds at least `k`.
     pub fn bounded_sum(&self, plan: &LogicalPlan, rel: &Rel) {
-        for (c, bound) in &rel.rows.sums {
+        for (c, bound) in &rel.subset_bounds.sums {
             if let Some(k) = rel.facts.dom(c, plan.schema()).min()
                 && k >= 1
                 && k <= u64::MAX as i128
@@ -510,7 +510,7 @@ impl<'a> Analyzer<'a> {
     ///   at most `v` rows have non-NULL if it is never NULL.
     /// - **Why**: every row is one of those counted.
     pub fn nulls_and_values(&self, plan: &LogicalPlan, rel: &Rel) {
-        for (c, nulls, values) in &rel.rows.nulls {
+        for (c, nulls, values) in &rel.subset_bounds.nulls {
             let d = rel.facts.dom(c, plan.schema());
             if d.is_null_only() {
                 self.assert(rel.card.le(nulls));

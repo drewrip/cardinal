@@ -16,9 +16,9 @@
 //! - **Output**: the assertions to solve with: every one that mentions no
 //!   column variable or only live ones, and every [`Role::Gen`].
 //! - **Liveness**: a [`Role::Gen`]'s columns are live, and so are those of
-//!   a [`Role::Link`] that equates a row count with a column's (`X =
+//!   a [`Role::Flow`] that equates a row count with a column's (`X =
 //!   ndv`), as some axioms between contexts do. Otherwise a
-//!   [`Role::Link`] makes the columns it mentions live if one of them is
+//!   [`Role::Flow`] makes the columns it mentions live if one of them is
 //!   live, but never a column of a node above that one's: liveness flows
 //!   from a node down to the inputs it reads. Per column: its `ndv`, `min`
 //!   and `max` together.
@@ -50,7 +50,7 @@ pub enum Role {
     /// Relates a node's columns to its inputs' or to each other: liveness
     /// flows through it. Kept if all its columns are live; a
     /// [`Role::Gen`] if it equates a row count with a column's.
-    Link,
+    Flow,
     /// Bounds its columns by what they belong to. Kept if all its columns
     /// are live.
     Local,
@@ -59,7 +59,7 @@ pub enum Role {
 /// The role of an axiom between contexts, by its rule name.
 pub(crate) fn axiom_role(rule: &str) -> Role {
     match rule {
-        "same rows" | "subset" | "wider rows" => Role::Link,
+        "same rows" | "subset" | "wider rows" => Role::Flow,
         "fewer keys" => Role::Local,
         _ => Role::Gen,
     }
@@ -178,7 +178,7 @@ impl Assertions {
         cols.sort_unstable();
         cols.dedup();
         // `X = ndv`: a row count is a column's distinct count.
-        let role = if role == Role::Link && count && smt.starts_with("(= ") {
+        let role = if role == Role::Flow && count && smt.starts_with("(= ") {
             Role::Gen
         } else {
             role
@@ -202,7 +202,7 @@ impl Assertions {
         for (cols, role) in self.columns.iter().zip(&self.roles) {
             match role {
                 Role::Gen => work.extend(cols),
-                Role::Link => {
+                Role::Flow => {
                     for &u in cols {
                         links[u].extend(cols.iter().filter(|&&v| v != u));
                     }

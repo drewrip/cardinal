@@ -49,7 +49,7 @@ impl<'a> Analyzer<'a> {
             if let Expr::AggregateFunction(f) = strip_alias(e)
                 && f.func.name() == "count"
             {
-                o.rows.sums.push((col(plan, agg.group_expr.len() + i), l.card.clone()));
+                o.subset_bounds.sums.push((col(plan, agg.group_expr.len() + i), l.card.clone()));
             }
         }
         self.assert(o.card.le(&l.card));
@@ -63,7 +63,7 @@ impl<'a> Analyzer<'a> {
                 Some(i) => {
                     columns.push((j, i));
                     if !plan.schema().field(j).data_type().is_floating() {
-                        self.assert_as(Role::Link, o.ndv[j].ge(&l.ndv[i]));
+                        self.assert_as(Role::Flow, o.ndv[j].ge(&l.ndv[i]));
                     }
                 }
                 None => self.expr_ndv(&o.ndv[j], e, &agg.input, &l),

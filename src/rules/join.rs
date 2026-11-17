@@ -6,7 +6,7 @@ use datafusion::logical_expr::logical_plan::{Join, LogicalPlan};
 use z3::ast::Int;
 
 use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
-use crate::analysis::{Analyzer, LinkKind, Rel, Rows, ScanKind, int, min};
+use crate::analysis::{Analyzer, LinkKind, Rel, SubsetBounds, ScanKind, int, min};
 use crate::domain::Facts;
 use crate::postprocess::Role;
 
@@ -135,10 +135,10 @@ impl<'a> Analyzer<'a> {
         self.join_ranges(plan, join, &o);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
-        o.rows = match join.join_type {
-            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.rows.clone(),
-            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.rows.clone(),
-            _ => Rows::default(),
+        o.subset_bounds = match join.join_type {
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.subset_bounds.clone(),
+            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.subset_bounds.clone(),
+            _ => SubsetBounds::default(),
         };
         // On an outer join, a padded-side column that is never NULL on matched
         // rows is NULL exactly on the padded rows: at most the other side's
@@ -158,14 +158,14 @@ impl<'a> Analyzer<'a> {
             let values = if full { Int::add(&[&inner, &r.card]) } else { inner.clone() };
             let keys = if full { &[][..] } else { &rk[..] };
             for c in never_null_when_matched(join, &join.right, &r.facts, keys) {
-                o.rows.nulls.push((col(plan, nl + c), l.card.clone(), values.clone()));
+                o.subset_bounds.nulls.push((col(plan, nl + c), l.card.clone(), values.clone()));
             }
         }
         if pad_left {
             let values = if full { Int::add(&[&inner, &l.card]) } else { inner.clone() };
             let keys = if full { &[][..] } else { &lk[..] };
             for c in never_null_when_matched(join, &join.left, &l.facts, keys) {
-                o.rows.nulls.push((col(plan, c), r.card.clone(), values.clone()));
+                o.subset_bounds.nulls.push((col(plan, c), r.card.clone(), values.clone()));
             }
         }
         let width = plan.schema().fields().len();
@@ -283,7 +283,7 @@ impl<'a> Analyzer<'a> {
             self.kept(o, r, nl);
         }
         for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
-            self.assert_as(Role::Link, o.ndv[ia].eq(&o.ndv[nl + ib]));
+            self.assert_as(Role::Flow, o.ndv[ia].eq(&o.ndv[nl + ib]));
         }
     }
 
@@ -443,8 +443,8 @@ impl<'a> Analyzer<'a> {
             if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib])
                 && o.unit[ia] == o.unit[nl + ib]
             {
-                self.assert_as(Role::Link, a_lo.eq(b_lo));
-                self.assert_as(Role::Link, a_hi.eq(b_hi));
+                self.assert_as(Role::Flow, a_lo.eq(b_lo));
+                self.assert_as(Role::Flow, a_hi.eq(b_hi));
             }
         }
         if let Some(f) = &join.filter {
@@ -504,7 +504,7 @@ impl<'a> Analyzer<'a> {
     /// `side`'s: each of its rows is one of `o`'s.
     fn kept(&self, o: &Rel, side: &Rel, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
-            self.assert_as(Role::Link, o.ndv[at + i].ge(v));
+            self.assert_as(Role::Flow, o.ndv[at + i].ge(v));
         }
     }
 
@@ -512,7 +512,7 @@ impl<'a> Analyzer<'a> {
     /// or NULL.
     fn padded(&self, o: &Rel, side: &Rel, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
-            self.assert_as(Role::Link, o.ndv[at + i].le(v + int(1)));
+            self.assert_as(Role::Flow, o.ndv[at + i].le(v + int(1)));
             self.within(o, at + i, side, i);
         }
     }

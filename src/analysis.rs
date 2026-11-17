@@ -66,8 +66,8 @@ pub struct Rel {
     pub(crate) unit: Vec<Option<Unit>>,
     /// What every row's values satisfy, whatever the data.
     pub(crate) facts: Facts,
-    /// Facts that also hold for any subset of the rows.
-    pub(crate) rows: Rows,
+    /// Bounds that also hold of any subset of the rows.
+    pub(crate) subset_bounds: SubsetBounds,
     /// The stored table this relation's rows are distinct rows of, if any.
     pub(crate) origin: Option<Origin>,
 }
@@ -77,7 +77,7 @@ impl Rel {
     /// them as they are, columns unchanged.
     pub(crate) fn inherit(&mut self, l: &Rel) {
         self.facts = l.facts.clone();
-        self.rows = l.rows.clone();
+        self.subset_bounds = l.subset_bounds.clone();
         self.origin = l.origin.clone();
     }
 }
@@ -122,10 +122,12 @@ pub(crate) struct Link {
     pub(crate) frame: Option<usize>,
 }
 
-/// Facts about a relation's rows that also hold for any subset of them, so
-/// they survive operators that keep some rows as they are.
+/// Bounds on an output's rows that hold of any subset of them too, so they
+/// carry up through operators that keep some rows as they are. Each waits on
+/// a domain to apply: a column of counts summing to `b`, a unique key, a
+/// column NULL on at most `n` rows.
 #[derive(Clone, Default)]
-pub(crate) struct Rows {
+pub(crate) struct SubsetBounds {
     /// `(column, bound)`: the column holds non-negative integers summing to at
     /// most `bound` over all rows, like the counts of a GROUP BY.
     pub(crate) sums: Vec<(Expr, Int)>,
@@ -137,11 +139,11 @@ pub(crate) struct Rows {
     pub(crate) nulls: Vec<(Expr, Int, Int)>,
 }
 
-impl Rows {
-    /// The facts whose columns all map through `map`, over the new columns.
-    pub(crate) fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> Rows {
+impl SubsetBounds {
+    /// The bounds whose columns all map through `map`, over the new columns.
+    pub(crate) fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> SubsetBounds {
         let r = |c: &Expr| domain::rename(c, map);
-        Rows {
+        SubsetBounds {
             sums: self
                 .sums
                 .iter()
@@ -445,7 +447,7 @@ impl<'a> Analyzer<'a> {
             max,
             unit: units,
             facts: Facts::default(),
-            rows: Rows::default(),
+            subset_bounds: SubsetBounds::default(),
             origin: None,
         };
         self.relations.push(Relation {

@@ -105,10 +105,10 @@ impl<'a> Analyzer<'a> {
             return;
         }
         if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
-            self.assert_as(Role::Link, a.ge(b));
+            self.assert_as(Role::Flow, a.ge(b));
         }
         if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
-            self.assert_as(Role::Link, a.le(b));
+            self.assert_as(Role::Flow, a.le(b));
         }
     }
 
@@ -129,14 +129,14 @@ impl<'a> Analyzer<'a> {
             let below = |x: usize, y: usize, strict: bool| {
                 let ((x_lo, x_hi), (y_lo, y_hi)) = (lo_hi(x), lo_hi(y));
                 let gap = int(strict as u64);
-                self.assert_as(Role::Link, y_lo.ge(x_lo + &gap));
-                self.assert_as(Role::Link, x_hi.le(y_hi - &gap));
+                self.assert_as(Role::Flow, y_lo.ge(x_lo + &gap));
+                self.assert_as(Role::Flow, x_hi.le(y_hi - &gap));
             };
             match op {
                 Operator::Eq => {
                     let ((a_lo, a_hi), (b_lo, b_hi)) = (lo_hi(a), lo_hi(b));
-                    self.assert_as(Role::Link, a_lo.eq(b_lo));
-                    self.assert_as(Role::Link, a_hi.eq(b_hi));
+                    self.assert_as(Role::Flow, a_lo.eq(b_lo));
+                    self.assert_as(Role::Flow, a_hi.eq(b_hi));
                 }
                 Operator::Lt => below(a, b, true),
                 Operator::LtEq => below(a, b, false),
@@ -198,7 +198,7 @@ impl<'a> Analyzer<'a> {
         }
         self.link(&o, LinkKind::SameRows, &l, &columns);
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
-        o.rows = l.rows.rename(&|c| passed_column(plan, &p.expr, c));
+        o.subset_bounds = l.subset_bounds.rename(&|c| passed_column(plan, &p.expr, c));
         o.origin = l.origin.as_ref().map(|origin| {
             origin.project(p.expr.iter().map(|e| match strip_alias(e) {
                 Expr::Column(c) => p.input.schema().index_of_column(c).ok(),
@@ -517,7 +517,7 @@ impl<'a> Analyzer<'a> {
                 .collect();
             if let Some(mut key) = key {
                 key.push(c);
-                o.rows.keys.push(key);
+                o.subset_bounds.keys.push(key);
             }
         }
     }
@@ -536,7 +536,7 @@ impl<'a> Analyzer<'a> {
             let i = input.schema().index_of_column(c).ok()?;
             child_column(plan, i)
         };
-        o.rows = l.rows.rename(&by_position);
+        o.subset_bounds = l.subset_bounds.rename(&by_position);
         o.origin = l.origin.as_ref().map(|x| x.with_width(plan.schema().fields().len()));
         o
     }
@@ -547,7 +547,7 @@ impl<'a> Analyzer<'a> {
     pub fn kept_values(&self, plan: &LogicalPlan, o: &Rel, l: &Rel) {
         for (j, (a, b)) in o.ndv.iter().zip(&l.ndv).enumerate() {
             if !plan.schema().field(j).data_type().is_floating() {
-                self.assert_as(Role::Link, a.ge(b));
+                self.assert_as(Role::Flow, a.ge(b));
             }
         }
     }
@@ -556,7 +556,7 @@ impl<'a> Analyzer<'a> {
     /// `e` is not a column: those the axioms relate.
     pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &Rel) {
         if let Some(bound) = expr_bound(e, input, l, self.max_product) {
-            self.assert_as(Role::Link, v.le(bound));
+            self.assert_as(Role::Flow, v.le(bound));
         }
     }
 
@@ -565,7 +565,7 @@ impl<'a> Analyzer<'a> {
     pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &Rel) {
         // Every surviving row has a = b (neither NULL).
         for (a, b) in equalities(predicate, input) {
-            self.assert_as(Role::Link, o.ndv[a].eq(&o.ndv[b]));
+            self.assert_as(Role::Flow, o.ndv[a].eq(&o.ndv[b]));
         }
     }
 }
