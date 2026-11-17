@@ -1,11 +1,11 @@
 //! Building one plan's SMT system: a bottom-up walk over a DataFusion
 //! `LogicalPlan` by an [`Analyzer`].
 //!
-//! Every operator gets a [`Rel`]: an integer variable for its output
+//! Every operator gets an [`OpOutput`]: an integer variable for its output
 //! cardinality and, per output column, one bounding its number of distinct
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
-//! inputs' and records the relation in the [`Analyzer`]'s ledger; once the
+//! inputs' and records the op output in the [`Analyzer`]'s ledger; once the
 //! walk is done, the [axioms](crate::axioms) pass asserts what holds of
 //! them.
 
@@ -48,13 +48,14 @@ pub(crate) struct TableVar {
     pub(crate) var: Int,
 }
 
-/// The abstract state of a relation: a variable for its cardinality and, per
-/// output column, one for its number of distinct values and, for some, its
-/// least and greatest value; and what is known of its rows whatever the data.
+/// An operator's output: variables for its rows, and what is known of them.
+/// A variable for its cardinality and, per output column, one for its
+/// number of distinct values and, for some, its least and greatest value;
+/// and what its rows satisfy whatever the data.
 #[derive(Clone)]
-pub struct Rel {
-    /// Its record in [`Analyzer::relations`].
-    pub(crate) id: RelId,
+pub struct OpOutput {
+    /// Its record in [`Analyzer::op_outputs`].
+    pub(crate) id: OpOutputId,
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
     /// Per output column, the ends of an interval holding each of its
@@ -69,33 +70,28 @@ pub struct Rel {
     pub(crate) facts: Facts,
     /// Bounds that also hold of any subset of the rows.
     pub(crate) subset_bounds: SubsetBounds,
-    /// The stored table this relation's rows are distinct rows of, if any.
+    /// The stored table these rows are distinct rows of, if any.
     pub(crate) origin: Option<Origin>,
+    /// The frame of the node being visited when it was made, for
+    /// [`crate::trace`].
+    pub(crate) frame: Option<usize>,
+    /// The node it is the output of, once finished ([`Analyzer::finish`]):
+    /// none for a scan's raw rows.
+    pub(crate) node: Option<usize>,
 }
 
-impl Rel {
+impl OpOutput {
     /// Takes what is known of `l`'s rows, for an operator that keeps some of
     /// them as they are, columns unchanged.
-    pub(crate) fn inherit(&mut self, l: &Rel) {
+    pub(crate) fn inherit(&mut self, l: &OpOutput) {
         self.facts = l.facts.clone();
         self.subset_bounds = l.subset_bounds.clone();
         self.origin = l.origin.clone();
     }
 }
 
-/// A relation's index in [`Analyzer::relations`].
-pub(crate) type RelId = usize;
-
-/// A relation as the [axioms](crate::axioms) read it: its final state, the
-/// operator that made it, and where it came from.
-pub(crate) struct Relation {
-    /// The relation once its rule is done with it ([`Analyzer::finish`]).
-    pub(crate) rel: Rel,
-    /// The frame of the node it was made for, for [`crate::trace`].
-    pub(crate) frame: Option<usize>,
-    /// The node it is the output of: none for a scan's raw rows.
-    pub(crate) node: Option<usize>,
-}
+/// An op output's index in [`Analyzer::op_outputs`].
+pub(crate) type OpOutputId = usize;
 
 /// Bounds on an output's rows that hold of any subset of them too, so they
 /// carry up through operators that keep some rows as they are. Each waits on
@@ -141,9 +137,8 @@ impl SubsetBounds {
 /// The state of one analysis: the Z3 solver and every variable and
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
-/// and how its rows are its inputs', and records its relations; the
-/// [axioms](crate::axioms) pass
-/// then asserts what holds of them. Each rule and axiom is one of its
+/// and how its rows are its inputs', and records its op outputs; the
+/// [axioms](crate::axioms) pass then asserts what holds of them. Each rule and axiom is one of its
 /// methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
     pub(crate) solver: Solver,
@@ -158,8 +153,9 @@ pub struct Analyzer<'a> {
     /// Every plan node, children before parents, so a validator can evaluate
     /// them bottom-up.
     pub(crate) nodes: Vec<Node>,
-    /// Every relation the rules made, by [`RelId`], for the axioms.
-    pub(crate) relations: Vec<Relation>,
+    /// Every op output the rules made, by [`OpOutputId`], as its rule left
+    /// it once finished.
+    pub(crate) op_outputs: Vec<OpOutput>,
     /// Ids of visited nodes not yet claimed by a parent.
     pub(crate) frontier: Vec<usize>,
     pub(crate) counter: usize,
@@ -215,7 +211,7 @@ pub(crate) struct Node {
     /// For a base scan with pushed-down filters: the scan before them.
     pub(crate) raw_scan: Option<RawScan>,
     /// The min and max variable of each output column that has them
-    /// ([`Rel::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
+    /// ([`OpOutput::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
     pub(crate) min_vars: Vec<Option<String>>,
     pub(crate) max_vars: Vec<Option<String>>,
     /// The functional dependencies the rules relied on among the output
@@ -345,7 +341,7 @@ impl<'a> Analyzer<'a> {
             nodes: Vec::new(),
             frontier: Vec::new(),
             counter: 0,
-            relations: Vec::new(),
+            op_outputs: Vec::new(),
             max_product,
             foreign_keys,
             trace,
@@ -383,11 +379,11 @@ impl<'a> Analyzer<'a> {
         v
     }
 
-    /// Creates a fresh relation for `plan`'s output: a cardinality variable
+    /// Creates a fresh op output for `plan`: a cardinality variable
     /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, recorded in
-    /// [`Self::relations`] for the axioms. Asserts what holds of any
+    /// [`Self::op_outputs`] for the axioms. Asserts what holds of any
     /// columns of any rows.
-    pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> Rel {
+    pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> OpOutput {
         let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;
         let card = self.new_var(base.clone());
@@ -417,8 +413,8 @@ impl<'a> Analyzer<'a> {
                 self.boolean_ndv(v);
             }
         }
-        let rel = Rel {
-            id: self.relations.len(),
+        let out = OpOutput {
+            id: self.op_outputs.len(),
             card,
             ndv,
             min,
@@ -427,23 +423,21 @@ impl<'a> Analyzer<'a> {
             facts: Facts::default(),
             subset_bounds: SubsetBounds::default(),
             origin: None,
-        };
-        self.relations.push(Relation {
-            rel: rel.clone(),
             frame: self.owners.last().copied(),
             node: None,
-        });
-        rel
+        };
+        self.op_outputs.push(out.clone());
+        out
     }
 
-    /// Records `rel`, the output of `plan`, as its rule leaves it, with
+    /// Records `out`, the output of `plan`, as its rule leaves it, with
     /// `node` if it is that node's output, and asserts what follows of it
     /// ([`Self::on_op_output`]).
-    pub(crate) fn finish(&mut self, rel: &Rel, plan: &LogicalPlan, node: Option<usize>) {
-        let r = &mut self.relations[rel.id];
-        r.rel = rel.clone();
-        r.node = node;
-        self.on_op_output(rel, plan);
+    pub(crate) fn finish(&mut self, out: &OpOutput, plan: &LogicalPlan, node: Option<usize>) {
+        let out = OpOutput { node, ..out.clone() };
+        self.on_op_output(&out, plan);
+        let id = out.id;
+        self.op_outputs[id] = out;
     }
 
     /// The unquoted name of a variable created by `new_var`.
@@ -455,8 +449,8 @@ impl<'a> Analyzer<'a> {
             .expect("variable was created by new_var")
     }
 
-    pub(crate) fn names_of(&self, rel: &Rel) -> Vec<String> {
-        rel.ndv.iter().map(|v| self.name_of(v)).collect()
+    pub(crate) fn names_of(&self, out: &OpOutput) -> Vec<String> {
+        out.ndv.iter().map(|v| self.name_of(v)).collect()
     }
 
     /// Asserts `b`, a [`Role::Gen`].
@@ -523,7 +517,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Returns the abstract state of `plan`'s output.
-    pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> Rel {
+    pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> OpOutput {
         let frame = self.next_frame;
         self.next_frame += 1;
         // Subqueries left inside expressions (e.g. an uncorrelated scalar subquery

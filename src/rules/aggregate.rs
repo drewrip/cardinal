@@ -7,7 +7,7 @@ use z3::ast::Int;
 
 use super::op_output::{self, ranges};
 use super::{col, column_index, determined, key_column, strip_alias, unproject};
-use crate::analysis::{Analyzer, Rel, int, product};
+use crate::analysis::{Analyzer, OpOutput, int, product};
 use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
 use crate::postprocess::Role;
@@ -29,7 +29,7 @@ impl<'a> Analyzer<'a> {
     ///   range ([`Self::aggregate_ranges`]).
     /// - **When**: ROLLUP, CUBE and GROUPING SETS get nothing: they may emit
     ///   more rows than they read.
-    pub fn aggregate(&mut self, plan: &LogicalPlan, agg: &Aggregate) -> Rel {
+    pub fn aggregate(&mut self, plan: &LogicalPlan, agg: &Aggregate) -> OpOutput {
         let l = self.visit(&agg.input);
         if super::grouping_sets(agg) {
             // ROLLUP / CUBE / GROUPING SETS can emit more rows than they read.
@@ -107,7 +107,7 @@ impl<'a> Analyzer<'a> {
     /// groups. It may be one of the input's, or of the rows the projections and
     /// filters below it read: those keep fewer rows, each computed from one of
     /// them. The first of at most 64 columns tried bounds the groups.
-    pub fn determining_column(&self, agg: &Aggregate, o: &Rel) {
+    pub fn determining_column(&self, agg: &Aggregate, o: &OpOutput) {
         let (mut node, mut keys) = (self.nodes.len() - 1, agg.group_expr.clone());
         let mut tries = 64;
         loop {
@@ -141,7 +141,7 @@ impl<'a> Analyzer<'a> {
 
     /// Part of [`Self::aggregate`]: a MIN's or MAX's values are its
     /// argument's.
-    pub fn aggregate_ranges(&self, agg: &Aggregate, o: &Rel, l: &Rel) {
+    pub fn aggregate_ranges(&self, agg: &Aggregate, o: &OpOutput, l: &OpOutput) {
         let groups = agg.group_expr.len();
         for (j, e) in agg.aggr_expr.iter().enumerate() {
             let arg = match strip_alias(e) {

@@ -2,8 +2,8 @@
 //!
 //! The analysis visits a DataFusion [`LogicalPlan`] bottom-up, and
 //! [`Analyzer::visit_node`] hands each operator to its rule once its inputs
-//! have their relations ([`Rel`]). The rule makes the operator's relation and
-//! relates it to theirs:
+//! have their op outputs ([`OpOutput`]). The rule makes the operator's op
+//! output and relates it to theirs:
 //!
 //! ```text
 //!         Join            X, ndv, min, max  ◀── join: X ≤ l·r, ...
@@ -16,22 +16,20 @@
 //! # Spec
 //!
 //! - **Input**: one operator, visited after its inputs, and its inputs'
-//!   relations: their variables and what is known of their rows (value
+//!   op outputs: their variables and what is known of their rows (value
 //!   domains, keys, the stored table they are rows of).
-//! - **Output**: the operator's relation. That is fresh variables (`X`, the
+//! - **Output**: the operator's op output. That is fresh variables (`X`, the
 //!   output cardinality; per column `ndv`, and `min` and `max` for integer,
 //!   date, timestamp and decimal columns some range or key reads, related
 //!   only between columns of one unit and scale), Z3 assertions relating
-//!   them to the inputs' (`l`, `r`), and a record of the relation, with
-//!   what is known of its rows, for the [axioms](crate::axioms).
+//!   them to the inputs' (`l`, `r`), and a record of the op output, with
+//!   what is known of its rows.
 //! - **Guarantees**: every assertion holds for every execution of the
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
 //!   this against data).
-//! - **Not done**: no axiom is asserted here. What holds of every relation
-//!   whatever its operator (`ndv ≤ X`, a key's `ndv = X`, value domains
-//!   bounding `ndv`, disjoint filters over one table) is asserted by the
-//!   [axioms](crate::axioms) pass once every rule is done.
+//! - **Not done**: what holds between op outputs only their contexts
+//!   relate, or of one table's rows, is the [axioms](crate::axioms)'.
 //!
 //! # Notation
 //!
@@ -59,8 +57,8 @@
 //! | `Values` | [`Analyzer::values`] |
 //! | `EmptyRelation` | [`Analyzer::empty_relation`] |
 //!
-//! Unnest, recursive CTEs and the rest get no rule: only the axioms on
-//! their variables. Their inputs are still visited, so their scans count.
+//! Unnest, recursive CTEs and the rest get no rule: only those on every op
+//! output ([`op_output`]). Their inputs are still visited, so their scans count.
 //!
 //! A rule also states what follows from its output's rows being an
 //! input's: the same rows, a subset of them, or each holding one
@@ -69,8 +67,7 @@
 //! A trace names each constraint's rule by the function that asserted it:
 //! the rule's own, or a part of it it calls ([`Analyzer::join_sides`],
 //! ...), or the [property](crate::properties) it is (`subset`, ...). An
-//! axiom asserted for a relation a rule recorded is given to that rule's
-//! node, under the axiom's function.
+//! assertion about an op output is given to the node its rule was for.
 
 mod aggregate;
 pub(crate) mod join;
@@ -89,7 +86,7 @@ use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::Int;
 
-use crate::analysis::{Analyzer, RawScan, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
+use crate::analysis::{Analyzer, RawScan, OpOutput, ScanKind, inexact_filters, int, max, min, product, range_names};
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
@@ -102,7 +99,7 @@ impl<'a> Analyzer<'a> {
     /// `o`, the output of `plan` keeping only rows that satisfy it: equal
     /// columns take the same values, and `a < b` puts `b`'s least above
     /// `a`'s least and `a`'s greatest below `b`'s.
-    pub fn range_pairs(&self, predicate: &Expr, plan: &LogicalPlan, o: &Rel) {
+    pub fn range_pairs(&self, predicate: &Expr, plan: &LogicalPlan, o: &OpOutput) {
         let index = |e: &Expr| column_index(plan, e).filter(|&i| o.min[i].is_some());
         for conj in split_conjunction(predicate) {
             let Expr::BinaryExpr(BinaryExpr { left, op, right }) = conj else { continue };
@@ -136,7 +133,7 @@ impl<'a> Analyzer<'a> {
     /// Visits `plan`'s inputs and applies its operator's rule
     /// ([the table](self#rules)). A scan also returns its raw scan, before
     /// pushed-down filters.
-    pub fn visit_node(&mut self, plan: &LogicalPlan) -> (Rel, Option<RawScan>) {
+    pub fn visit_node(&mut self, plan: &LogicalPlan) -> (OpOutput, Option<RawScan>) {
         let out = match plan {
             LogicalPlan::TableScan(scan) => return self.scan(plan, scan),
             LogicalPlan::Projection(p) => self.projection(plan, p),
@@ -172,7 +169,7 @@ impl<'a> Analyzer<'a> {
     ///   an injective cast of one holding its value. Another deterministic
     ///   expression has `ndv ≤ Π ndv` of the columns it reads; a literal `≤
     ///   1` ([`Self::expr_ndv`]).
-    pub fn projection(&mut self, plan: &LogicalPlan, p: &Projection) -> Rel {
+    pub fn projection(&mut self, plan: &LogicalPlan, p: &Projection) -> OpOutput {
         let l = self.visit(&p.input);
         let mut o = self.fresh("Projection", plan);
         let mut columns = vec![];
@@ -200,7 +197,7 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: as [`Self::pass_through`] for the input's columns.
     ///   `row_number`, `rank` and `dense_rank` are `≥ 1`, and `row_number`
     ///   with its partition columns is unique ([`Self::window_functions`]).
-    pub fn window(&mut self, plan: &LogicalPlan, p: &Window) -> Rel {
+    pub fn window(&mut self, plan: &LogicalPlan, p: &Window) -> OpOutput {
         let mut o = self.pass_through("Window", plan, &p.input);
         self.window_functions(plan, &p.input, &p.window_expr, &mut o);
         o
@@ -213,7 +210,7 @@ impl<'a> Analyzer<'a> {
     ///   ranges ([`Self::range_pairs`]). The predicate's domains hold above.
     /// - **When**: `a = b` skips floats, whose SQL equality merges values
     ///   distinct as bits (`-0.0 = 0.0`).
-    pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> Rel {
+    pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> OpOutput {
         let l = self.visit(&f.input);
         let mut o = self.fresh("Filter", plan);
         self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
@@ -231,7 +228,7 @@ impl<'a> Analyzer<'a> {
     ///   1`, `X ≤ Π ndv` of the input's columns, or of the columns that
     ///   determine the rest. Columns keep every value ([`Self::kept_values`]).
     ///   A unique input: `X = l`.
-    pub fn distinct(&mut self, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
+    pub fn distinct(&mut self, plan: &LogicalPlan, input: &LogicalPlan) -> OpOutput {
         let l = self.visit(input);
         let mut o = self.fresh("Distinct", plan);
         o.inherit(&l);
@@ -265,7 +262,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv` of the `ON`
     ///   expressions, without those the others determine.
-    pub fn distinct_on(&mut self, plan: &LogicalPlan, on: &DistinctOn) -> Rel {
+    pub fn distinct_on(&mut self, plan: &LogicalPlan, on: &DistinctOn) -> OpOutput {
         let l = self.visit(&on.input);
         let mut o = self.fresh("DistinctOn", plan);
         o.facts = computed_facts(plan, &on.select_expr, &on.input, &l.facts);
@@ -294,7 +291,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: [`same rows`](op_output) as the input; with `fetch
     ///   n`, a [`subset`](op_output) of it with `X = min(n, l)`.
-    pub fn sort(&mut self, plan: &LogicalPlan, s: &Sort) -> Rel {
+    pub fn sort(&mut self, plan: &LogicalPlan, s: &Sort) -> OpOutput {
         let l = self.visit(&s.input);
         let mut o = self.fresh("Sort", plan);
         let columns = aligned(l.ndv.len(), 0);
@@ -315,7 +312,7 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: a [`subset`](op_output) of the input. Literal skip `k`
     ///   and fetch `n`: `X = min(n, max(l − k, 0))`; otherwise `X ≤ n` for a
     ///   literal fetch.
-    pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> Rel {
+    pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> OpOutput {
         let l = self.visit(&lim.input);
         let mut o = self.fresh("Limit", plan);
         o.inherit(&l);
@@ -349,12 +346,12 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: each input a [`subset`](op_output) of the output; `X
     ///   = Σ` inputs; `ndv ≤ Σ ndv` per column; each range within the
     ///   inputs' together.
-    pub fn union(&mut self, plan: &LogicalPlan, u: &Union) -> Rel {
-        let inputs: Vec<Rel> = u.inputs.iter().map(|i| self.visit(i)).collect();
+    pub fn union(&mut self, plan: &LogicalPlan, u: &Union) -> OpOutput {
+        let inputs: Vec<OpOutput> = u.inputs.iter().map(|i| self.visit(i)).collect();
         let mut o = self.fresh("Union", plan);
         for j in 0..plan.schema().fields().len() {
-            let dom = u.inputs.iter().zip(&inputs).fold(Dom::nothing(), |acc, (input, rel)| {
-                acc.union(&rel.facts.dom(&col(input, j), input.schema()))
+            let dom = u.inputs.iter().zip(&inputs).fold(Dom::nothing(), |acc, (input, out)| {
+                acc.union(&out.facts.dom(&col(input, j), input.schema()))
             });
             o.facts.add(&col(plan, j), dom, plan.schema());
         }
@@ -372,7 +369,7 @@ impl<'a> Analyzer<'a> {
             if inputs.iter().any(|r| r.unit.get(j) != Some(&o.unit[j])) {
                 continue;
             }
-            let ends = |ends: fn(&Rel) -> &Vec<Option<Int>>| -> Option<Vec<Int>> {
+            let ends = |ends: fn(&OpOutput) -> &Vec<Option<Int>>| -> Option<Vec<Int>> {
                 inputs.iter().map(|r| ends(r).get(j).cloned().flatten()).collect()
             };
             if let (Some(lo), Some(los)) = (&o.min[j], ends(|r| &r.min)) {
@@ -389,7 +386,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X =` the rows listed; each column within the values
     ///   listed for it.
-    pub fn values(&mut self, plan: &LogicalPlan, v: &Values) -> Rel {
+    pub fn values(&mut self, plan: &LogicalPlan, v: &Values) -> OpOutput {
         let mut o = self.fresh("Values", plan);
         self.assert(o.card.eq(int(v.values.len() as u64)));
         for j in 0..plan.schema().fields().len() {
@@ -405,7 +402,7 @@ impl<'a> Analyzer<'a> {
     /// `EmptyRelation`: no rows, or one without columns.
     ///
     /// - **Claim**: `X = 0`, or `1` if it produces a row.
-    pub fn empty_relation(&mut self, plan: &LogicalPlan, e: &EmptyRelation) -> Rel {
+    pub fn empty_relation(&mut self, plan: &LogicalPlan, e: &EmptyRelation) -> OpOutput {
         let o = self.fresh("EmptyRelation", plan);
         self.assert(o.card.eq(int(e.produce_one_row as u64)));
         o
@@ -421,7 +418,7 @@ impl<'a> Analyzer<'a> {
     ///   `fetch` bounds nothing.
     /// - **Why**: a provider must return at least `fetch` rows and may return
     ///   more; DataFusion keeps the limit above.
-    pub fn scan(&mut self, plan: &LogicalPlan, scan: &TableScan) -> (Rel, Option<RawScan>) {
+    pub fn scan(&mut self, plan: &LogicalPlan, scan: &TableScan) -> (OpOutput, Option<RawScan>) {
         // The scan before pushed-down filters and fetch: its keys are the
         // table's, with no column pinned.
         let mut raw = scan.clone();
@@ -487,7 +484,7 @@ impl<'a> Analyzer<'a> {
 
     /// Ranking functions number rows from 1, and `row_number()` numbers each
     /// partition's rows 1, 2, 3, ...: with the partition keys, it is unique.
-    pub fn window_functions(&self, plan: &LogicalPlan, input: &LogicalPlan, exprs: &[Expr], o: &mut Rel) {
+    pub fn window_functions(&self, plan: &LogicalPlan, input: &LogicalPlan, exprs: &[Expr], o: &mut OpOutput) {
         let n = input.schema().fields().len();
         for (i, e) in exprs.iter().enumerate() {
             let Expr::WindowFunction(w) = strip_alias(e) else {
@@ -516,7 +513,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: [`same rows`](op_output) as the input, column for
     ///   column.
-    pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
+    pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> OpOutput {
         let l = self.visit(input);
         let mut o = self.fresh(kind, plan);
         self.assert_property("same rows", same_rows(&o, &l, &aligned(l.ndv.len(), 0)));
@@ -533,7 +530,7 @@ impl<'a> Analyzer<'a> {
     /// `o` keeps every value of `l`'s columns: `ndv ≥` its input's. Not for
     /// floats: deduplicating by SQL equality can merge values that are
     /// distinct as bits (`-0.0` and `0.0`).
-    pub fn kept_values(&self, plan: &LogicalPlan, o: &Rel, l: &Rel) {
+    pub fn kept_values(&self, plan: &LogicalPlan, o: &OpOutput, l: &OpOutput) {
         for (j, (a, b)) in o.ndv.iter().zip(&l.ndv).enumerate() {
             if !plan.schema().field(j).data_type().is_floating() {
                 self.assert_as(Role::Flow, a.ge(b));
@@ -543,7 +540,7 @@ impl<'a> Analyzer<'a> {
 
     /// Bounds output column `v`, computed by `e` over the rows of `input`, if
     /// `e` is not a column: those the axioms relate.
-    pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &Rel) {
+    pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &OpOutput) {
         if let Some(bound) = expr_bound(e, input, l, self.max_product) {
             self.assert_as(Role::Flow, v.le(bound));
         }
@@ -551,7 +548,7 @@ impl<'a> Analyzer<'a> {
 
     /// `ndv(a) = ndv(b)` on `o`, the output of filtering `input` by
     /// `predicate`, for each `a = b` it holds.
-    pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &Rel) {
+    pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &OpOutput) {
         // Every surviving row has a = b (neither NULL).
         for (a, b) in equalities(predicate, input) {
             self.assert_as(Role::Flow, o.ndv[a].eq(&o.ndv[b]));
@@ -559,7 +556,7 @@ impl<'a> Analyzer<'a> {
     }
 }
 
-/// `n` columns paired with the same positions of another relation's, from
+/// `n` columns paired with the same positions of another op output's, from
 /// position `at` on: `(at + i, i)`.
 pub(crate) fn aligned(n: usize, at: usize) -> Vec<(usize, usize)> {
     (0..n).map(|i| (at + i, i)).collect()
@@ -723,7 +720,7 @@ pub(crate) fn with_equalities(
 /// `input`, or `None` if nothing better than the row count is known. A
 /// deterministic function of some columns takes at most as many values as
 /// there are combinations of theirs.
-pub(crate) fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int> {
+pub(crate) fn expr_bound(e: &Expr, input: &LogicalPlan, l: &OpOutput, cap: usize) -> Option<Int> {
     if let Some(c) = key_column(input, e) {
         let i = input.schema().index_of_column(&c).ok()?;
         return Some(l.ndv[i].clone());

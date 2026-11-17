@@ -37,7 +37,7 @@ use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use z3::ast::Int;
 
 use super::col;
-use crate::analysis::{Analyzer, Rel, ScanKind, int, product};
+use crate::analysis::{Analyzer, OpOutput, ScanKind, int, product};
 use crate::builder::bare_kind;
 use crate::keys::Nulls;
 use crate::postprocess::Role;
@@ -46,7 +46,7 @@ use crate::properties::{self, Claim, Pair};
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Min` and `Max`, if
 /// both have them in one unit. A cast of an integer to a decimal keeps the
 /// value, not the count.
-pub(crate) fn ranges<'a>(o: &'a Rel, l: &'a Rel, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
+pub(crate) fn ranges<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out = vec![];
     for &(j, i) in columns {
         if o.unit[j] != l.unit[i] {
@@ -64,14 +64,14 @@ pub(crate) fn ranges<'a>(o: &'a Rel, l: &'a Rel, columns: &[(usize, usize)]) -> 
 
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Ndv`, then their
 /// [`ranges`].
-pub(crate) fn columns<'a>(o: &'a Rel, l: &'a Rel, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
+pub(crate) fn columns<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out: Vec<Pair> = columns.iter().map(|&(j, i)| Pair::Ndv(&o.ndv[j], &l.ndv[i])).collect();
     out.extend(ranges(o, l, columns));
     out
 }
 
 /// `Card(o.card, l.card)`, then their [`columns`].
-pub(crate) fn with_card<'a>(o: &'a Rel, l: &'a Rel, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
+pub(crate) fn with_card<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out = vec![Pair::Card(&o.card, &l.card)];
     out.extend(self::columns(o, l, columns));
     out
@@ -79,7 +79,7 @@ pub(crate) fn with_card<'a>(o: &'a Rel, l: &'a Rel, columns: &[(usize, usize)]) 
 
 /// `o`'s rows are `l`'s: their counts are [`same`](properties::same), and
 /// their ranges [`within`](properties::within).
-pub(crate) fn same_rows(o: &Rel, l: &Rel, columns: &[(usize, usize)]) -> Vec<Claim> {
+pub(crate) fn same_rows(o: &OpOutput, l: &OpOutput, columns: &[(usize, usize)]) -> Vec<Claim> {
     let (counts, ranges): (Vec<Pair>, Vec<Pair>) =
         with_card(o, l, columns).into_iter().partition(|p| matches!(p, Pair::Card(..) | Pair::Ndv(..)));
     let mut out = properties::same(&counts);
@@ -123,7 +123,7 @@ impl Analyzer<'_> {
     /// Every rule on `out`, the output of `plan`, once its rule has found
     /// what is known of its rows: its domains, then its subset bounds, then
     /// its keys.
-    pub(crate) fn on_op_output(&self, out: &Rel, plan: &LogicalPlan) {
+    pub(crate) fn on_op_output(&self, out: &OpOutput, plan: &LogicalPlan) {
         let schema = plan.schema();
         if out.facts.contradictory() {
             self.empty_domain(&out.card);
@@ -145,7 +145,7 @@ impl Analyzer<'_> {
     /// `empty domain`.
     ///
     /// - **Claim**: `X = 0`.
-    /// - **When**: the relation's value domains contradict (`x < 1 AND x >
+    /// - **When**: the op output's value domains contradict (`x < 1 AND x >
     ///   5`), or a column's domain holds no value.
     /// - **Why**: every row satisfies its domains, so there is none.
     pub fn empty_domain(&self, rows: &Int) {
@@ -169,7 +169,7 @@ impl Analyzer<'_> {
     /// - **Claim**: for a column with `min` and `max` variables: they lie
     ///   within its domain's integer range; `X ≥ 1 ⇒ min ≤ max` if it is
     ///   never NULL; and `ndv ≤ max − min + 1`, plus 1 if it may be NULL.
-    pub fn range_within_domain(&self, plan: &LogicalPlan, out: &Rel) {
+    pub fn range_within_domain(&self, plan: &LogicalPlan, out: &OpOutput) {
         let schema = plan.schema();
         for (j, (lo, hi)) in out.min.iter().zip(&out.max).enumerate() {
             let (Some(lo), Some(hi)) = (lo, hi) else { continue };
@@ -195,7 +195,7 @@ impl Analyzer<'_> {
     ///   key or NOT NULL UNIQUE column, through every operator that keeps it
     ///   unique.
     /// - **Why**: such a column takes a distinct value on every row.
-    pub fn key_ndv(&self, plan: &LogicalPlan, out: &Rel) {
+    pub fn key_ndv(&self, plan: &LogicalPlan, out: &OpOutput) {
         let schema = plan.schema();
         for j in 0..schema.fields().len() {
             let col = Column::from(schema.qualified_field(j));
@@ -213,7 +213,7 @@ impl Analyzer<'_> {
     ///   linear where it can.
     /// - **Why**: each row has its own combination of their values.
     ///
-    pub(crate) fn unique_columns(&self, plan: &LogicalPlan, out: &Rel) {
+    pub(crate) fn unique_columns(&self, plan: &LogicalPlan, out: &OpOutput) {
         let schema = plan.schema();
         for key in &out.subset_bounds.keys {
             let positions: Option<Vec<usize>> = key
@@ -249,7 +249,7 @@ impl Analyzer<'_> {
     ///   to at most `b` over the rows (a GROUP BY's counts), whose domain
     ///   holds only values `≥ k ≥ 1`.
     /// - **Why**: each row adds at least `k`.
-    pub fn bounded_sum(&self, plan: &LogicalPlan, out: &Rel) {
+    pub fn bounded_sum(&self, plan: &LogicalPlan, out: &OpOutput) {
         for (c, bound) in &out.subset_bounds.sums {
             if let Some(k) = out.facts.dom(c, plan.schema()).min()
                 && k >= 1
@@ -266,7 +266,7 @@ impl Analyzer<'_> {
     ///   join's padded rows) if its domain holds only NULL; `X ≤ v` for one
     ///   at most `v` rows have non-NULL if it is never NULL.
     /// - **Why**: every row is one of those counted.
-    pub fn nulls_and_values(&self, plan: &LogicalPlan, out: &Rel) {
+    pub fn nulls_and_values(&self, plan: &LogicalPlan, out: &OpOutput) {
         for (c, nulls, values) in &out.subset_bounds.nulls {
             let d = out.facts.dom(c, plan.schema());
             if d.is_null_only() {
@@ -298,7 +298,7 @@ impl Analyzer<'_> {
     ///   `S` need not be scanned. Not on a float column.
     /// - **Why**: each row's `cols` equal the key of one row of `S`, so
     ///   they take at most `|S|` combinations, and one column no more.
-    pub fn referenced_size(&self, scan: &TableScan, out: &Rel) {
+    pub fn referenced_size(&self, scan: &TableScan, out: &OpOutput) {
         let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
         let schema = &scan.projected_schema;
         for fk in self.foreign_keys.iter().filter(|fk| fk.table == display) {
@@ -319,7 +319,7 @@ impl Analyzer<'_> {
     /// - **Claim**: `|T| ≤ Π ndv` of a composite primary key's columns, or
     ///   of a composite UNIQUE constraint's on NOT NULL columns.
     /// - **Why**: each row has its own combination of key values.
-    pub fn composite_key(&self, scan: &TableScan, out: &Rel) {
+    pub fn composite_key(&self, scan: &TableScan, out: &OpOutput) {
         let Some(constraints) = scan.source.constraints() else {
             return;
         };

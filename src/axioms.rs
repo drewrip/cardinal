@@ -8,7 +8,7 @@
 //! # Spec
 //!
 //! - **Input**: what the [rules](crate::rules) recorded as they visited the
-//!   plan: each relation, with its rows, `ndv`, `min` and `max` variables
+//!   plan: each op output, with its rows, `ndv`, `min` and `max` variables
 //!   and the value domains, keys and origin found of its rows; the nodes;
 //!   and the declared keys.
 //! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
@@ -118,11 +118,11 @@ impl<'a> Analyzer<'a> {
     pub fn disjoint(&mut self) {
         // Nodes' outputs of distinct rows of one stored table, in node order.
         let mut of: Vec<(usize, Int, Origin)> = self
-            .relations
+            .op_outputs
             .iter()
-            .filter_map(|r| {
-                let o = r.rel.origin.as_ref().filter(|o| o.informative())?;
-                Some((r.node?, r.rel.card.clone(), o.clone()))
+            .filter_map(|out| {
+                let o = out.origin.as_ref().filter(|o| o.informative())?;
+                Some((out.node?, out.card.clone(), o.clone()))
             })
             .collect();
         of.sort_by_key(|(node, _, _)| *node);

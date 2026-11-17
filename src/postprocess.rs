@@ -96,14 +96,10 @@ impl Assertions {
             .collect();
         let mut column = HashMap::new();
         let mut node = vec![];
-        for r in &a.relations {
-            let n = r.frame.and_then(|f| a.frame_node.get(&f).copied());
-            for j in 0..r.rel.ndv.len() {
-                let vars = [
-                    Some(&r.rel.ndv[j]),
-                    r.rel.min[j].as_ref(),
-                    r.rel.max[j].as_ref(),
-                ];
+        for out in &a.op_outputs {
+            let n = out.frame.and_then(|f| a.frame_node.get(&f).copied());
+            for j in 0..out.ndv.len() {
+                let vars = [Some(&out.ndv[j]), out.min[j].as_ref(), out.max[j].as_ref()];
                 for v in vars.into_iter().flatten() {
                     column.insert(v.to_string(), node.len());
                 }

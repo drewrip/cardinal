@@ -7,7 +7,7 @@ use z3::ast::Int;
 
 use super::op_output::{columns, ranges, same_rows, with_card};
 use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
-use crate::analysis::{Analyzer, Rel, SubsetBounds, ScanKind, int, min};
+use crate::analysis::{Analyzer, OpOutput, SubsetBounds, ScanKind, int, min};
 use crate::domain::Facts;
 use crate::postprocess::Role;
 use crate::properties::within;
@@ -42,7 +42,7 @@ impl<'a> Analyzer<'a> {
     ///   once if each matches exactly once (inner, on a foreign key from it)
     ///   or at most once (outer, on the other side's unique key), so a
     ///   foreign key to such a side reaches every row of its table.
-    pub fn join(&mut self, plan: &LogicalPlan, join: &Join) -> Rel {
+    pub fn join(&mut self, plan: &LogicalPlan, join: &Join) -> OpOutput {
         let l = self.visit(&join.left);
         let r = self.visit(&join.right);
         let equi = !join.on.is_empty();
@@ -190,7 +190,7 @@ impl<'a> Analyzer<'a> {
     ///   NULL-aware), `r − m_r` (right anti). Each `m ≤` its side and `≤ i`,
     ///   `i ≥ 1 ⇒ m ≥ 1`; `m = i` if the other side's key is unique, and
     ///   `m = i =` its side on a foreign key from it.
-    pub fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: JoinKeys) {
+    pub fn join_parts(&mut self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput, inner: &Int, keys: JoinKeys) {
         let parts = auxiliary_joins(join);
         if parts.is_empty() {
             return;
@@ -243,15 +243,15 @@ impl<'a> Analyzer<'a> {
     /// (inclusion–exclusion), less one per side whose key may be NULL. An anti
     /// join (not NULL-aware) keeps each row whose key the other side lacks:
     /// `ndv ≥ ndv_l − 1 − ndv_r`.
-    pub fn join_overlap(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    pub fn join_overlap(&self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput) {
         if join.on.len() != 1 || join.null_equality == NullEquality::NullEqualsNull {
             return;
         }
         let (a, b) = &join.on[0];
         let Some((ia, ib)) = exact_pair(join, a, b) else { return };
-        let non_null = |side: &LogicalPlan, rel: &Rel, i: usize| {
-            let nullable = !rel.facts.dom(&col(side, i), side.schema()).never_null();
-            &rel.ndv[i] - int(nullable as u64)
+        let non_null = |side: &LogicalPlan, out: &OpOutput, i: usize| {
+            let nullable = !out.facts.dom(&col(side, i), side.schema()).never_null();
+            &out.ndv[i] - int(nullable as u64)
         };
         let (vl, vr) = (non_null(&join.left, l, ia), non_null(&join.right, r, ib));
         let out = match join.join_type {
@@ -273,7 +273,7 @@ impl<'a> Analyzer<'a> {
     /// exactly once (a foreign key to all of the other's table) keeps every
     /// value of its columns, `ndv ≥` its own; and each pair of equi-keys
     /// holds equal values on every row, so equal `ndv`.
-    pub fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, keys: JoinKeys) {
+    pub fn join_ndv_kept(&self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput, keys: JoinKeys) {
         if join.join_type != JoinType::Inner {
             return;
         }
@@ -436,7 +436,7 @@ impl<'a> Analyzer<'a> {
     /// are the same, and so are their ranges; its filter orders its columns'
     /// ([`Self::range_pairs`]). Disjoint ranges leave no row with a value, so
     /// none at all.
-    pub fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &Rel) {
+    pub fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &OpOutput) {
         if join.join_type != JoinType::Inner {
             return;
         }
@@ -461,7 +461,7 @@ impl<'a> Analyzer<'a> {
     /// or anti join is a [`subset`](super::op_output) of the kept side, a mark
     /// join the [same rows](super::op_output), and a semi join's equi-key
     /// holds the other side's key (not floats, merged by SQL equality).
-    pub fn join_sides(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    pub fn join_sides(&self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput) {
         let (nl, nr) = (l.ndv.len(), r.ndv.len());
         match join.join_type {
             JoinType::Inner => {
@@ -508,7 +508,7 @@ impl<'a> Analyzer<'a> {
 
     /// `side`'s columns, from `o`'s position `at` on, keep every value of
     /// `side`'s: each of its rows is one of `o`'s.
-    fn kept(&self, o: &Rel, side: &Rel, at: usize) {
+    fn kept(&self, o: &OpOutput, side: &OpOutput, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
             self.assert_as(Role::Flow, o.ndv[at + i].ge(v));
         }
@@ -516,7 +516,7 @@ impl<'a> Analyzer<'a> {
 
     /// `side`'s columns, from `o`'s position `at` on, hold a row of `side`
     /// or NULL.
-    fn padded(&self, o: &Rel, side: &Rel, at: usize) {
+    fn padded(&self, o: &OpOutput, side: &OpOutput, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
             self.assert_as(Role::Flow, o.ndv[at + i].le(v + int(1)));
         }
