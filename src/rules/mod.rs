@@ -458,12 +458,15 @@ impl<'a> Analyzer<'a> {
                     let mut raw = scan.clone();
                     raw.filters.clear();
                     raw.fetch = None;
+                    let raw = LogicalPlan::TableScan(raw);
+                    // Its keys are the table's, with no column pinned.
+                    self.relations[s.id].plan = raw.clone();
                     raw_scan = Some(RawScan {
                         var: name,
                         ndv_vars: self.names_of(&s),
                         min_vars: range_names(&s.min),
                         max_vars: range_names(&s.max),
-                        plan: LogicalPlan::TableScan(raw),
+                        plan: raw,
                     });
                 }
                 s

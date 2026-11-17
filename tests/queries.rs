@@ -433,6 +433,33 @@ async fn validate_catches_a_false_primary_key() {
     assert_eq!(v.rows["op0_Scan_people_c0"], 1);
 }
 
+#[tokio::test]
+async fn raw_scan_keys_ignore_pushed_filters() {
+    use datafusion::common::{Constraint, Constraints};
+    use datafusion::datasource::provider_as_source;
+    use datafusion::logical_expr::{LogicalPlanBuilder, col, lit};
+    // `(a, b)` is the key. Pushed `a = 1` makes `b` unique on the scan's
+    // rows, but not on the raw scan's.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int64, false),
+        Field::new("b", DataType::Int64, false),
+    ]));
+    let mem = Arc::new(
+        MemTable::try_new(schema, vec![vec![]])
+            .unwrap()
+            .with_constraints(Constraints::new_unverified(vec![Constraint::PrimaryKey(vec![0, 1])])),
+    );
+    let plan = LogicalPlanBuilder::scan_with_filters("pairs", provider_as_source(mem), None, vec![col("a").eq(lit(1i64))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // MemTable ignores pushed filters, so validating would count the
+    // filtered scan's rows wrong: check the claims instead.
+    let a = Analysis::logical(plan).build().unwrap();
+    assert!(a.constraints().contains("(= op1_ScanFilter_c1 op1_ScanFilter)"));
+    assert!(!a.constraints().contains("(= op0_Scan_pairs_c1 op0_Scan_pairs)"));
+}
+
 // --- Join keys: only declared keys count as unique --------------------------
 
 #[tokio::test]
