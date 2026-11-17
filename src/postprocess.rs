@@ -56,15 +56,6 @@ pub enum Role {
     Local,
 }
 
-/// The role of an axiom between contexts, by its rule name.
-pub(crate) fn axiom_role(rule: &str) -> Role {
-    match rule {
-        "same rows" | "subset" | "wider rows" => Role::Flow,
-        "fewer keys" => Role::Local,
-        _ => Role::Gen,
-    }
-}
-
 /// Every assertion of an analysis, with what [`Postprocess`] reads of it.
 #[derive(Debug, Clone)]
 pub(crate) struct Assertions {

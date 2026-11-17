@@ -81,6 +81,7 @@ pub mod joint;
 pub mod observed;
 mod origin;
 pub mod postprocess;
+mod properties;
 pub mod rows;
 pub mod rules;
 pub mod trace;

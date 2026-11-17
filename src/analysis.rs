@@ -27,7 +27,8 @@ use z3::{Params, Solver};
 use crate::ForeignKey;
 use crate::domain::{self, Facts};
 use crate::origin::Origin;
-use crate::postprocess::{Role, axiom_role};
+use crate::postprocess::Role;
+use crate::properties::Claim;
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,8 +227,8 @@ pub(crate) struct Logged {
     pub(crate) expr: Bool,
     pub(crate) frame: Option<usize>,
     pub(crate) at: &'static Location<'static>,
-    /// The axiom it is, for one asserted by name rather than by a function
-    /// of its own.
+    /// The property it is, for one asserted by name rather than by a
+    /// function of its own.
     pub(crate) rule: Option<&'static str>,
 }
 
@@ -517,14 +518,19 @@ impl<'a> Analyzer<'a> {
         self.solver.assert(b);
     }
 
-    /// Asserts `b`, an instance of axiom `rule`, for no node in particular.
+    /// Asserts each of `claims`, the [property](crate::properties) `name`,
+    /// for the node being visited, if any.
     #[track_caller]
-    pub(crate) fn assert_axiom(&self, rule: &'static str, b: Bool) {
-        self.roles.borrow_mut().push(axiom_role(rule));
-        if self.trace {
-            self.log.borrow_mut().push(Logged { expr: b.clone(), frame: None, at: Location::caller(), rule: Some(rule) });
+    pub(crate) fn assert_property(&self, name: &'static str, claims: Vec<Claim>) {
+        let at = Location::caller();
+        for Claim { role, claim } in claims {
+            self.roles.borrow_mut().push(role);
+            if self.trace {
+                let frame = self.owners.last().copied();
+                self.log.borrow_mut().push(Logged { expr: claim.clone(), frame, at, rule: Some(name) });
+            }
+            self.solver.assert(claim);
         }
-        self.solver.assert(b);
     }
 
     pub(crate) fn table(&mut self, key: &str, display: &str) -> Int {

@@ -95,6 +95,7 @@ use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
 use crate::postprocess::Role;
+use crate::properties::{self, Pair};
 
 impl<'a> Analyzer<'a> {
     /// Every non-NULL value of `o`'s column `j` is one of `l`'s column `i`.
@@ -104,12 +105,14 @@ impl<'a> Analyzer<'a> {
         if o.unit[j] != l.unit[i] {
             return;
         }
+        let mut pairs = vec![];
         if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
-            self.assert_as(Role::Flow, a.ge(b));
+            pairs.push(Pair::Min(a, b));
         }
         if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
-            self.assert_as(Role::Flow, a.le(b));
+            pairs.push(Pair::Max(a, b));
         }
+        self.assert_property("within", properties::within(&pairs));
     }
 
     /// The ranges `predicate` holds between two columns on every row of
