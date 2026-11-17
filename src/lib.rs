@@ -141,11 +141,12 @@ pub struct Analysis {
     nodes: Vec<Node>,
     /// [`Options::check_facts`].
     check_facts: bool,
-    /// [`Options::postprocess`].
-    postprocess: Postprocess,
-    /// Every assertion with its role, for [`postprocess`]; none for an
-    /// analysis it cannot read.
+    /// Every assertion before any reduction, with its role, if
+    /// [`Options::postprocess`] leaves out dead columns.
     parts: Option<postprocess::Assertions>,
+    /// With reference plans, the variables the constraints were reduced to
+    /// ([`joint`]): a postprocessed search is reduced to them too.
+    reduced_to: Option<Vec<String>>,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -252,21 +253,15 @@ impl Analysis {
     /// A search over the constraints, [postprocessed](postprocess) as
     /// [`Options::postprocess`] asks.
     pub(crate) fn search(&self) -> Result<bounds::Search> {
-        match &self.parts {
-            Some(parts) if self.postprocess.dead_columns => {
-                let (script, n) = parts.pruned();
+        let Some(parts) = &self.parts else { return self.search_all() };
+        let (script, n) = parts.pruned();
+        match &self.reduced_to {
+            Some(kept) => {
+                let (script, n) = joint::reduce(&script, kept);
                 search_of(&script, n, &self.root)
             }
-            _ => self.search_all(),
+            None => search_of(&script, n, &self.root),
         }
-    }
-
-    /// Whether each constraint, in order, is solved with when
-    /// [`Options::postprocess`] leaves out dead columns; `None` if the
-    /// analysis cannot tell.
-    #[doc(hidden)]
-    pub fn kept_constraints(&self) -> Option<Vec<bool>> {
-        self.parts.as_ref().map(|p| p.kept())
     }
 
     /// A search over every constraint.

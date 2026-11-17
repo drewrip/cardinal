@@ -247,12 +247,11 @@ fn analyze(
         assert_eq!(t.constraints.len(), n, "every assertion is traced");
         t
     });
-    let (constraints, assertions, parts) = if joint {
-        let reduced = joint::reduce(&a, own_vars, options.postprocess.dead_columns);
-        (reduced.to_string(), reduced.get_assertions().len(), None)
-    } else {
-        let parts = postprocess::Assertions::new(&a, &full);
-        (full, n, Some(parts))
+    let parts = options.postprocess.dead_columns.then(|| postprocess::Assertions::new(&a, &full));
+    let reduced_to = joint.then(|| joint::kept(&a, own_vars));
+    let (constraints, assertions) = match &reduced_to {
+        Some(kept) => joint::reduce(&full, kept),
+        None => (full, n),
     };
     let mut nodes = a.nodes;
     nodes.truncate(own);
@@ -265,10 +264,8 @@ fn analyze(
         assertions,
         nodes,
         check_facts: options.check_facts,
-        postprocess: options.postprocess.clone(),
-        // With plans, `solve-eqs` rewrote the assertions: their roles no
-        // longer apply.
         parts,
+        reduced_to,
     }
 }
 

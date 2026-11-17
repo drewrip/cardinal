@@ -9,8 +9,8 @@
 //!
 //! ```text
 //!  query ──────────┐
-//!                  ├─ rules ─ axioms ─ pins ─ dead columns ─ solve-eqs ─ dedup ─▶ Analysis
-//!  plans ─ select ─┘                 X = rows  (if asked)
+//!                  ├─ rules ─ axioms ─ pins ─ solve-eqs ─ dedup ─▶ Analysis
+//!  plans ─ select ─┘                 X = rows
 //! ```
 //!
 //! # Spec
@@ -27,13 +27,14 @@
 //!   early, holds its node's rows: `X = rows`, or `X ≥ rows` where a
 //!   runtime filter pruned them (`counts`). Plans that were not run, or
 //!   do not translate, are left out.
-//! - **Reduction**: if [`Options::postprocess`] asks, the assertions over
-//!   dead columns are left out first ([`crate::postprocess`]), the pins
-//!   counting as [`Role::Gen`]. Then each variable of the plans' or the
-//!   axioms' that an assertion defines by others is substituted away (Z3's
-//!   `solve-eqs`), and the assertions that then repeat are kept once. The
-//!   query's variables and the tables' sizes all stay, with exactly the
-//!   values they had, so every bound and claim on them is as before.
+//! - **Reduction**: each variable of the plans' or the axioms' that an
+//!   assertion defines by others is substituted away (Z3's `solve-eqs`),
+//!   and the assertions that then repeat are kept once. The query's
+//!   variables and the tables' sizes all stay, with exactly the values they
+//!   had, so every bound and claim on them is as before. A search that
+//!   [leaves out dead columns](crate::postprocess) leaves them out of the
+//!   assertions before the reduction, the pins counting as [`Role::Gen`],
+//!   then reduces what is left the same way.
 //! - **Trace**: with [`Options::trace`], every constraint before the
 //!   reduction, the plans' nodes named by their plan
 //!   ([`TraceNode::plan`](crate::TraceNode::plan)) and each pin as a fact
@@ -55,7 +56,7 @@ use crate::analysis::{Analyzer, Node, ranged_columns};
 use crate::facts::State;
 use crate::facts::state::{states, stopped};
 use crate::observed::{Catalog, ObservedPlan, Op};
-use crate::postprocess::{self, Role};
+use crate::postprocess::Role;
 use crate::trace::{FactClaim, FactInfo, FactRef};
 use crate::Options;
 
@@ -155,34 +156,36 @@ pub(crate) fn assert_pins(a: &Analyzer, pins: &[Pin]) -> Vec<FactClaim> {
     out
 }
 
-/// `a`'s assertions reduced (see the [spec](self#spec)): those over dead
-/// columns left out if `dead_columns`, then `solve-eqs` keeping the first
-/// `own_vars` variables and the tables' sizes, then each kept once.
-pub(crate) fn reduce(a: &Analyzer, own_vars: usize, dead_columns: bool) -> Solver {
-    let mut assertions = a.solver.get_assertions();
-    if dead_columns {
-        let kept = postprocess::Assertions::new(a, &a.solver.to_string()).kept();
-        assertions = assertions.into_iter().zip(kept).filter_map(|(b, k)| k.then_some(b)).collect();
-    }
-    // What may be read once the analysis is made: the query's variables,
-    // and the tables' sizes, which the referenced-size axiom may have
-    // made after the query's visit.
-    let kept: Vec<Int> = a.vars[..own_vars]
+/// The variables the reduction keeps: those that may be read once the
+/// analysis is made, the query's (the first `own_vars`), and the tables'
+/// sizes, which the referenced-size axiom may have made after the query's
+/// visit.
+pub(crate) fn kept(a: &Analyzer, own_vars: usize) -> Vec<String> {
+    a.vars[..own_vars]
         .iter()
-        .map(|(_, v)| v.clone())
-        .chain(a.tables.values().map(|t| t.var.clone()))
-        .collect();
+        .map(|(n, _)| n.clone())
+        .chain(a.tables.values().map(|t| t.symbol.clone()))
+        .collect()
+}
+
+/// The SMT-LIB `script` reduced (see the [spec](self#spec)): `solve-eqs`
+/// keeping the variables `kept` names, then each assertion kept once.
+/// Returns the reduced script and how many assertions it holds.
+pub(crate) fn reduce(script: &str, kept: &[String]) -> (String, usize) {
+    let parsed = Solver::new();
+    parsed.from_string(script);
+    let kept: Vec<Int> = kept.iter().map(|v| Int::new_const(v.as_str())).collect();
     // Substituted, a plan's copy of an operator the query has (a table's
     // scan, most often) asserts what the query's does: each assertion
     // once, the first kept in place.
     let solver = Solver::new();
     let mut seen = HashSet::new();
-    for f in solve_eqs(&assertions, &kept) {
+    for f in solve_eqs(&parsed.get_assertions(), &kept) {
         if seen.insert(f.clone()) {
             solver.assert(&f);
         }
     }
-    solver
+    (solver.to_string(), solver.get_assertions().len())
 }
 
 /// Each analyzer node of `nodes` an operator of `plan` became, by `built`
