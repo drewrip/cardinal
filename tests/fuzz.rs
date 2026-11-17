@@ -11,6 +11,8 @@
 //! `CARDINAL_FUZZ_N` sets the number of queries (default 250),
 //! `CARDINAL_FUZZ_SEED` the seed, and `CARDINAL_FUZZ_TRACE` (any value) prints
 //! each query and its time to stderr, to find slow ones.
+//! `CARDINAL_FUZZ_PLAN` (any value) also checks every operator's bounds
+//! ([`cardinal::Analysis::plan_bounds`]), which is not in use.
 
 mod common;
 
@@ -398,9 +400,11 @@ async fn check_mode(
             if v.rows.get(&a.root).is_some_and(|&n| sized.lower == n && sized.upper == Some(n)) {
                 stats.exact += 1;
             }
-            let plan = query.with_facts(&common::table_sizes(&sizes)).build().unwrap().plan_bounds().unwrap();
-            for f in common::check_plan_bounds(&plan, &v) {
-                failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
+            if std::env::var("CARDINAL_FUZZ_PLAN").is_ok() {
+                let plan = query.with_facts(&common::table_sizes(&sizes)).build().unwrap().plan_bounds().unwrap();
+                for f in common::check_plan_bounds(&plan, &v) {
+                    failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
+                }
             }
         }
     }

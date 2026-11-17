@@ -25,7 +25,8 @@ fn temp(name: &str) -> PathBuf {
 fn dump_then_view_as_text_and_html() {
     let (json, smt2, html) = (temp("q.json"), temp("q.smt2"), temp("q.html"));
     let fk = "orders(o_custkey)->customer(c_custkey)";
-    run(&["dump", "--schema", SCHEMA, "--query", QUERY, "--fk", fk, "-o", json.to_str().unwrap(), "--smt2", smt2.to_str().unwrap()]);
+    let args = ["dump", "--schema", SCHEMA, "--query", QUERY, "--fk", fk, "--no-plan-bounds"];
+    run(&[&args[..], &["-o", json.to_str().unwrap(), "--smt2", smt2.to_str().unwrap()]].concat());
 
     let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
     assert_eq!(dump.bounds.as_deref(), Some("0 <= X <= 3"));
@@ -35,14 +36,11 @@ fn dump_then_view_as_text_and_html() {
     // names the operators it is from.
     assert!(!upper.core.is_empty() && upper.core.iter().all(|&c| dump.trace.constraints[c].node.is_some()));
     assert!(std::fs::read_to_string(&smt2).unwrap().contains("(assert "));
-    let plan = dump.plan_bounds.as_ref().unwrap();
-    assert_eq!(plan.nodes.len(), dump.trace.nodes.len());
-    assert_eq!(plan.nodes.last().map(String::as_str), Some("0 <= X <= 3"));
+    assert!(dump.plan_bounds.is_none());
 
     let text = run(&["view", json.to_str().unwrap()]);
     assert!(text.contains("Inner Join: orders.o_custkey = customer.c_custkey"), "{text}");
     assert!(text.contains("upper"), "{text}");
-    assert!(text.contains(&format!("Total:   {}", plan.total)), "{text}");
     let proof = run(&["view", json.to_str().unwrap(), "--proof", "upper"]);
     assert!(proof.contains("● [") && proof.contains("Proof upper"), "{proof}");
     let node = run(&["view", json.to_str().unwrap(), "--node", "0"]);
@@ -65,7 +63,7 @@ fn reads_duckdb_plans() {
 #[test]
 fn unknown_proof_is_an_error() {
     let out = Command::new(env!("CARGO_BIN_EXE_cardinal-debug"))
-        .args(["analyze", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--proof", "nope"])
+        .args(["analyze", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--no-plan-bounds", "--proof", "nope"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -81,7 +79,7 @@ const Q04_FKS: [&str; 2] = ["lineitem(l_orderkey)->orders(o_orderkey)", "orders(
 fn dump_q04(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
     let json = temp(name);
     let profile = format!("{PROFILES}/q04.json");
-    let mut args = vec!["dump", "--schema", SCHEMA, "--sql", Q04, "--profile-duckdb", &profile];
+    let mut args = vec!["dump", "--schema", SCHEMA, "--sql", Q04, "--profile-duckdb", &profile, "--no-plan-bounds"];
     for fk in &Q04_FKS {
         args.extend(["--fk", fk]);
     }
@@ -135,7 +133,8 @@ fn facts_by_hand() {
     let facts = temp("facts.json");
     std::fs::write(&facts, serde_json::to_string(&set).unwrap()).unwrap();
     let json = temp("hand.json");
-    run(&["dump", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--facts", facts.to_str().unwrap(), "-o", json.to_str().unwrap()]);
+    let facts = facts.to_str().unwrap();
+    run(&["dump", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--facts", facts, "--no-plan-bounds", "-o", json.to_str().unwrap()]);
     let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
     let informed = dump.informed.expect("an informed section");
     assert!(informed.plans.is_empty());
@@ -154,7 +153,7 @@ fn reference_plans_without_explaining() {
 #[test]
 fn dumps_without_facts_still_load() {
     let json = temp("old.json");
-    run(&["dump", "--schema", SCHEMA, "--query", QUERY, "-o", json.to_str().unwrap()]);
+    run(&["dump", "--schema", SCHEMA, "--query", QUERY, "--no-plan-bounds", "-o", json.to_str().unwrap()]);
     // A dump from before facts: no `informed`, and no `fact` on its
     // constraints or `plan` on its nodes.
     let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();

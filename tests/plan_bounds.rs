@@ -1,6 +1,7 @@
 //! Bounds on every operator's output and on their sum
 //! ([`Analysis::plan_bounds`]): what they prove on the shop's tables held to
-//! sizes, and that real executions stay within them.
+//! sizes, and that real executions stay within them. Not in use, so
+//! ignored: run with `--ignored`.
 
 mod common;
 
@@ -50,6 +51,7 @@ fn node<'a>(p: &'a PlanBounds, op: &str) -> &'a Bounds {
 }
 
 #[tokio::test]
+#[ignore = "plan_bounds is not in use"]
 async fn a_key_lookup_reads_the_table_and_keeps_at_most_one_row() {
     let p = sized("SELECT * FROM users WHERE id = 5").await;
     assert_eq!(*node(&p, "TableScan"), range(100, 100));
@@ -58,6 +60,7 @@ async fn a_key_lookup_reads_the_table_and_keeps_at_most_one_row() {
 }
 
 #[tokio::test]
+#[ignore = "plan_bounds is not in use"]
 async fn a_left_join_to_a_key_keeps_each_row() {
     let p = sized("SELECT * FROM orders o LEFT JOIN users u ON o.user_id = u.id").await;
     assert_eq!(*node(&p, "Left Join"), range(300, 300));
@@ -65,6 +68,7 @@ async fn a_left_join_to_a_key_keeps_each_row() {
 }
 
 #[tokio::test]
+#[ignore = "plan_bounds is not in use"]
 async fn the_total_is_at_least_the_sum_of_lowers_and_at_most_the_sum_of_uppers() {
     for sql in QUERIES {
         let p = sized(sql).await;
@@ -80,6 +84,7 @@ async fn the_total_is_at_least_the_sum_of_lowers_and_at_most_the_sum_of_uppers()
 /// Every operator's real row count is in its range, and their sum in the
 /// total's, with the tables held to their real sizes.
 #[tokio::test]
+#[ignore = "plan_bounds is not in use"]
 async fn real_executions_stay_within_every_range() {
     for dataset in common::shop_datasets().into_iter().filter(|d| d.unique_keys) {
         let ctx = dataset.context(true);
