@@ -5,10 +5,12 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Join, LogicalPlan};
 use z3::ast::Int;
 
+use super::op_output::{columns, ranges, same_rows, with_card};
 use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
-use crate::analysis::{Analyzer, LinkKind, Rel, SubsetBounds, ScanKind, int, min};
+use crate::analysis::{Analyzer, Rel, SubsetBounds, ScanKind, int, min};
 use crate::domain::Facts;
 use crate::postprocess::Role;
+use crate::properties::within;
 
 impl<'a> Analyzer<'a> {
     /// `Join` of every kind. Notation as in [the module](super#notation).
@@ -22,13 +24,13 @@ impl<'a> Analyzer<'a> {
     ///     ≤ inner + l`; right: the mirror;
     ///   - full: `X ≥ l`, `X ≥ r`, `X ≤ inner + l + r`, and `≤ l + r` with a
     ///     unique key;
-    ///   - semi and anti: a [`subset`](Self::subset) of the kept side; on a
+    ///   - semi and anti: a [`subset`](super::op_output) of the kept side; on a
     ///     foreign key from it, semi `X =` it and anti `X = 0`;
-    ///   - mark: the [`same rows`](Self::same_rows) as the kept side.
+    ///   - mark: the [`same rows`](super::op_output) as the kept side.
     ///
     ///   Outer and anti joins are also stated in terms of their auxiliary
     ///   joins ([`Self::join_parts`]). Columns ([`Self::join_sides`]): a side
-    ///   no row pads [holds](Self::wider) its rows, a preserved side every
+    ///   no row pads [holds](super::op_output) its rows, a preserved side every
     ///   value; a padded side's `ndv ≤` its own `+ 1` (NULL), within its
     ///   range; a semi join's equi-key holds the other side's key. On an
     ///   inner join, the two equi-keys' `ndv` are equal, and a side on a
@@ -453,37 +455,41 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Part of [`Self::join`]: what a join's output columns hold of its
-    /// inputs'. A side no row pads [holds](Self::wider) its rows, and a
+    /// inputs'. A side no row pads [holds](super::op_output) its rows, and a
     /// preserved side (left of a left join) every value. A padded side's
     /// rows, or NULL: `ndv ≤` its own `+ 1`, values within its range. A semi
-    /// or anti join is a [`subset`](Self::subset) of the kept side, a mark
-    /// join the [same rows](Self::same_rows), and a semi join's equi-key
+    /// or anti join is a [`subset`](super::op_output) of the kept side, a mark
+    /// join the [same rows](super::op_output), and a semi join's equi-key
     /// holds the other side's key (not floats, merged by SQL equality).
     pub fn join_sides(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
         let (nl, nr) = (l.ndv.len(), r.ndv.len());
         match join.join_type {
             JoinType::Inner => {
-                self.link(o, LinkKind::Wider, l, &aligned(nl, 0));
-                self.link(o, LinkKind::Wider, r, &aligned(nr, nl));
+                self.assert_property("wider", within(&columns(o, l, &aligned(nl, 0))));
+                self.assert_property("wider", within(&columns(o, r, &aligned(nr, nl))));
             }
             JoinType::Left => {
-                self.link(o, LinkKind::Wider, l, &aligned(nl, 0));
+                self.assert_property("wider", within(&columns(o, l, &aligned(nl, 0))));
                 self.kept(o, l, 0);
                 self.padded(o, r, nl);
             }
             JoinType::Right => {
                 self.padded(o, l, 0);
-                self.link(o, LinkKind::Wider, r, &aligned(nr, nl));
+                self.assert_property("wider", within(&columns(o, r, &aligned(nr, nl))));
                 self.kept(o, r, nl);
             }
             JoinType::Full => {
                 self.padded(o, l, 0);
                 self.padded(o, r, nl);
             }
-            JoinType::LeftSemi | JoinType::LeftAnti => self.link(o, LinkKind::Subset, l, &aligned(nl, 0)),
-            JoinType::RightSemi | JoinType::RightAnti => self.link(o, LinkKind::Subset, r, &aligned(nr, 0)),
-            JoinType::LeftMark => self.link(o, LinkKind::SameRows, l, &aligned(nl, 0)),
-            JoinType::RightMark => self.link(o, LinkKind::SameRows, r, &aligned(nr, 0)),
+            JoinType::LeftSemi | JoinType::LeftAnti => {
+                self.assert_property("subset", within(&with_card(o, l, &aligned(nl, 0))))
+            }
+            JoinType::RightSemi | JoinType::RightAnti => {
+                self.assert_property("subset", within(&with_card(o, r, &aligned(nr, 0))))
+            }
+            JoinType::LeftMark => self.assert_property("same rows", same_rows(o, l, &aligned(nl, 0))),
+            JoinType::RightMark => self.assert_property("same rows", same_rows(o, r, &aligned(nr, 0))),
         }
         // Matched equi-key values exist on both sides.
         let semi = match join.join_type {
@@ -497,7 +503,7 @@ impl<'a> Analyzer<'a> {
             .filter_map(|(a, b)| exact_pair(join, a, b))
             .map(|(ia, ib)| if semi { (ia, ib) } else { (ib, ia) })
             .collect();
-        self.link(o, LinkKind::Wider, if semi { r } else { l }, &keys);
+        self.assert_property("wider", within(&columns(o, if semi { r } else { l }, &keys)));
     }
 
     /// `side`'s columns, from `o`'s position `at` on, keep every value of
@@ -513,8 +519,8 @@ impl<'a> Analyzer<'a> {
     fn padded(&self, o: &Rel, side: &Rel, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
             self.assert_as(Role::Flow, o.ndv[at + i].le(v + int(1)));
-            self.within(o, at + i, side, i);
         }
+        self.assert_property("within", within(&ranges(o, side, &aligned(side.ndv.len(), at))));
     }
 }
 

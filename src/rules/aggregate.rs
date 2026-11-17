@@ -5,11 +5,13 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Aggregate, LogicalPlan};
 use z3::ast::Int;
 
+use super::op_output::{self, ranges};
 use super::{col, column_index, determined, key_column, strip_alias, unproject};
-use crate::analysis::{Analyzer, LinkKind, Rel, int, product};
+use crate::analysis::{Analyzer, Rel, int, product};
 use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
 use crate::postprocess::Role;
+use crate::properties::within;
 
 impl<'a> Analyzer<'a> {
     /// `Aggregate`: one row per group. Notation as in
@@ -20,7 +22,7 @@ impl<'a> Analyzer<'a> {
     ///   determine the rest, or of one column determining every key,
     ///   [`Self::determining_column`]), and `X = l` if `K`, or the columns
     ///   it determines, cover a unique key. A key column holds an input
-    ///   row's value ([`wider rows`](Self::wider)), and every one, `ndv ≥`
+    ///   row's value ([`wider rows`](super::op_output)), and every one, `ndv ≥`
     ///   its input's (not for floats, merged by SQL equality); another key
     ///   has its expression's `ndv` bound ([`Self::expr_ndv`]). `count`
     ///   columns sum to at most `l`; `min` and `max` take their argument's
@@ -70,7 +72,7 @@ impl<'a> Analyzer<'a> {
             }
             factors.push(&o.ndv[j]);
         }
-        self.link(&o, LinkKind::Wider, &l, &columns);
+        self.assert_property("wider", within(&op_output::columns(&o, &l, &columns)));
         if let Some(p) = product(&factors, self.max_product) {
             self.assert(o.card.le(p));
         }
@@ -148,7 +150,7 @@ impl<'a> Analyzer<'a> {
             };
             let j = groups + j;
             if let Some(i) = column_index(&agg.input, arg) {
-                self.within(o, j, l, i);
+                self.assert_property("within", within(&ranges(o, l, &[(j, i)])));
             }
         }
     }

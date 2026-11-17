@@ -5,9 +5,9 @@
 //! cardinality and, per output column, one bounding its number of distinct
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
-//! inputs' and records the relation, and how its rows are its inputs', in
-//! the [`Analyzer`]'s ledger; once the walk is done, the
-//! [axioms](crate::axioms) pass asserts what holds of them.
+//! inputs' and records the relation in the [`Analyzer`]'s ledger; once the
+//! walk is done, the [axioms](crate::axioms) pass asserts what holds of
+//! them.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -101,28 +101,6 @@ pub(crate) struct Relation {
     pub(crate) node: Option<usize>,
 }
 
-/// How a rule found one relation's rows are another's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LinkKind {
-    /// [`Analyzer::same_rows`].
-    SameRows,
-    /// [`Analyzer::subset`].
-    Subset,
-    /// [`Analyzer::wider`].
-    Wider,
-}
-
-/// That relation `o`'s rows are relation `l`'s, as `kind` says, with
-/// `columns` pairing a column of `o` with the column of `l` it holds.
-pub(crate) struct Link {
-    pub(crate) kind: LinkKind,
-    pub(crate) o: RelId,
-    pub(crate) l: RelId,
-    pub(crate) columns: Vec<(usize, usize)>,
-    /// The frame of the node whose rule found it.
-    pub(crate) frame: Option<usize>,
-}
-
 /// Bounds on an output's rows that hold of any subset of them too, so they
 /// carry up through operators that keep some rows as they are. Each waits on
 /// a domain to apply: a column of counts summing to `b`, a unique key, a
@@ -167,7 +145,8 @@ impl SubsetBounds {
 /// The state of one analysis: the Z3 solver and every variable and
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
-/// and records its relations and links; the [axioms](crate::axioms) pass
+/// and how its rows are its inputs', and records its relations; the
+/// [axioms](crate::axioms) pass
 /// then asserts what holds of them. Each rule and axiom is one of its
 /// methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
@@ -185,8 +164,6 @@ pub struct Analyzer<'a> {
     pub(crate) nodes: Vec<Node>,
     /// Every relation the rules made, by [`RelId`], for the axioms.
     pub(crate) relations: Vec<Relation>,
-    /// Every link the rules found between relations, for the axioms.
-    pub(crate) links: RefCell<Vec<Link>>,
     /// Every count variable (rows, distinct values, a table's size), with
     /// the frame it was made in, for the axioms: none is negative.
     pub(crate) counts: Vec<(Int, Option<usize>)>,
@@ -376,7 +353,6 @@ impl<'a> Analyzer<'a> {
             frontier: Vec::new(),
             counter: 0,
             relations: Vec::new(),
-            links: RefCell::new(Vec::new()),
             counts: Vec::new(),
             max_product,
             foreign_keys,
@@ -467,14 +443,6 @@ impl<'a> Analyzer<'a> {
         let r = &mut self.relations[rel.id];
         r.rel = rel.clone();
         r.node = node;
-    }
-
-    /// Records that `o`'s rows are `l`'s as `kind` says, with `columns`
-    /// pairing their columns: [`Self::same_rows`], [`Self::subset`] or
-    /// [`Self::wider`], asserted by the axioms.
-    pub(crate) fn link(&self, o: &Rel, kind: LinkKind, l: &Rel, columns: &[(usize, usize)]) {
-        let frame = self.owners.last().copied();
-        self.links.borrow_mut().push(Link { kind, o: o.id, l: l.id, columns: columns.to_vec(), frame });
     }
 
     /// The unquoted name of a variable created by `new_var`.

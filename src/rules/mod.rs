@@ -22,9 +22,8 @@
 //!   output cardinality; per column `ndv`, and `min` and `max` for integer,
 //!   date, timestamp and decimal columns some range or key reads, related
 //!   only between columns of one unit and scale), Z3 assertions relating
-//!   them to the inputs' (`l`, `r`), and records for the
-//!   [axioms](crate::axioms): the relation, with what is known of its rows,
-//!   and each link between it and an input.
+//!   them to the inputs' (`l`, `r`), and a record of the relation, with
+//!   what is known of its rows, for the [axioms](crate::axioms).
 //! - **Guarantees**: every assertion holds for every execution of the
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
@@ -32,12 +31,7 @@
 //! - **Not done**: no axiom is asserted here. What holds of every relation
 //!   whatever its operator (`ndv ≤ X`, a key's `ndv = X`, value domains
 //!   bounding `ndv`, disjoint filters over one table) is asserted by the
-//!   [axioms](crate::axioms) pass once every rule is done. So is what
-//!   follows from rows being another's: a rule records a link, that its
-//!   output is the [same rows](Analyzer::same_rows) as an input, a
-//!   [subset](Analyzer::subset) of them, or [holds](Analyzer::wider) their
-//!   rows, and the axiom states what follows. The rule states only what the
-//!   operator adds.
+//!   [axioms](crate::axioms) pass once every rule is done.
 //!
 //! # Notation
 //!
@@ -68,14 +62,19 @@
 //! Unnest, recursive CTEs and the rest get no rule: only the axioms on
 //! their variables. Their inputs are still visited, so their scans count.
 //!
+//! A rule also states what follows from its output's rows being an
+//! input's: the same rows, a subset of them, or each holding one
+//! ([`op_output`]).
+//!
 //! A trace names each constraint's rule by the function that asserted it:
 //! the rule's own, or a part of it it calls ([`Analyzer::join_sides`],
-//! [`Analyzer::within`], ...). An axiom asserted for a relation or link a
-//! rule recorded is given to that rule's node, under the axiom's function
-//! ([`Analyzer::subset`], ...).
+//! ...), or the [property](crate::properties) it is (`subset`, ...). An
+//! axiom asserted for a relation a rule recorded is given to that rule's
+//! node, under the axiom's function.
 
 mod aggregate;
 pub(crate) mod join;
+pub(crate) mod op_output;
 
 use std::collections::BTreeSet;
 
@@ -90,31 +89,15 @@ use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::Int;
 
-use crate::analysis::{Analyzer, LinkKind, RawScan, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
+use crate::analysis::{Analyzer, RawScan, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
 use crate::postprocess::Role;
-use crate::properties::{self, Pair};
+use crate::properties::within;
+use op_output::{same_rows, with_card};
 
 impl<'a> Analyzer<'a> {
-    /// Every non-NULL value of `o`'s column `j` is one of `l`'s column `i`.
-    /// Their ends relate only if they count in one unit: a cast of an
-    /// integer to a decimal keeps the value, not the count.
-    pub fn within(&self, o: &Rel, j: usize, l: &Rel, i: usize) {
-        if o.unit[j] != l.unit[i] {
-            return;
-        }
-        let mut pairs = vec![];
-        if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
-            pairs.push(Pair::Min(a, b));
-        }
-        if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
-            pairs.push(Pair::Max(a, b));
-        }
-        self.assert_property("within", properties::within(&pairs));
-    }
-
     /// The ranges `predicate` holds between two columns on every row of
     /// `o`, the output of `plan` keeping only rows that satisfy it: equal
     /// columns take the same values, and `a < b` puts `b`'s least above
@@ -185,7 +168,7 @@ impl<'a> Analyzer<'a> {
 
     /// `Projection`: the same rows, each column computed from them.
     ///
-    /// - **Claim**: [`same rows`](Self::same_rows) as the input, a column or
+    /// - **Claim**: [`same rows`](op_output) as the input, a column or
     ///   an injective cast of one holding its value. Another deterministic
     ///   expression has `ndv ≤ Π ndv` of the columns it reads; a literal `≤
     ///   1` ([`Self::expr_ndv`]).
@@ -199,7 +182,7 @@ impl<'a> Analyzer<'a> {
                 None => self.expr_ndv(&o.ndv[j], e, &p.input, &l),
             }
         }
-        self.link(&o, LinkKind::SameRows, &l, &columns);
+        self.assert_property("same rows", same_rows(&o, &l, &columns));
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
         o.subset_bounds = l.subset_bounds.rename(&|c| passed_column(plan, &p.expr, c));
         o.origin = l.origin.as_ref().map(|origin| {
@@ -225,7 +208,7 @@ impl<'a> Analyzer<'a> {
 
     /// `Filter`: some of the input's rows, each satisfying the predicate.
     ///
-    /// - **Claim**: a [`subset`](Self::subset) of the input. For `a = b`:
+    /// - **Claim**: a [`subset`](op_output) of the input. For `a = b`:
     ///   `ndv(a) = ndv(b)` ([`Self::filter_ndv`]). `a < b` orders their
     ///   ranges ([`Self::range_pairs`]). The predicate's domains hold above.
     /// - **When**: `a = b` skips floats, whose SQL equality merges values
@@ -233,7 +216,7 @@ impl<'a> Analyzer<'a> {
     pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> Rel {
         let l = self.visit(&f.input);
         let mut o = self.fresh("Filter", plan);
-        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
+        self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         self.filter_ndv(&f.predicate, &f.input, &o);
         self.range_pairs(&f.predicate, plan, &o);
         o.inherit(&l);
@@ -244,7 +227,7 @@ impl<'a> Analyzer<'a> {
 
     /// `Distinct`: one row per distinct input row.
     ///
-    /// - **Claim**: a [`subset`](Self::subset) of the input; `l ≥ 1 ⇒ X ≥
+    /// - **Claim**: a [`subset`](op_output) of the input; `l ≥ 1 ⇒ X ≥
     ///   1`, `X ≤ Π ndv` of the input's columns, or of the columns that
     ///   determine the rest. Columns keep every value ([`Self::kept_values`]).
     ///   A unique input: `X = l`.
@@ -252,7 +235,7 @@ impl<'a> Analyzer<'a> {
         let l = self.visit(input);
         let mut o = self.fresh("Distinct", plan);
         o.inherit(&l);
-        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
+        self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
         self.kept_values(plan, &o, &l);
         let all: Vec<&Int> = l.ndv.iter().collect();
@@ -309,18 +292,18 @@ impl<'a> Analyzer<'a> {
 
     /// `Sort`: the input's rows in order, or its first `n` with `fetch n`.
     ///
-    /// - **Claim**: [`same rows`](Self::same_rows) as the input; with `fetch
-    ///   n`, a [`subset`](Self::subset) of it with `X = min(n, l)`.
+    /// - **Claim**: [`same rows`](op_output) as the input; with `fetch
+    ///   n`, a [`subset`](op_output) of it with `X = min(n, l)`.
     pub fn sort(&mut self, plan: &LogicalPlan, s: &Sort) -> Rel {
         let l = self.visit(&s.input);
         let mut o = self.fresh("Sort", plan);
         let columns = aligned(l.ndv.len(), 0);
         o.inherit(&l);
         match s.fetch {
-            None => self.link(&o, LinkKind::SameRows, &l, &columns),
+            None => self.assert_property("same rows", same_rows(&o, &l, &columns)),
             // Top-k: exactly the first n rows.
             Some(n) => {
-                self.link(&o, LinkKind::Subset, &l, &columns);
+                self.assert_property("subset", within(&with_card(&o, &l, &columns)));
                 self.assert(o.card.eq(min(&int(n as u64), &l.card)));
             }
         }
@@ -329,14 +312,14 @@ impl<'a> Analyzer<'a> {
 
     /// `Limit`: the input's rows after skipping `k`, at most `n` of them.
     ///
-    /// - **Claim**: a [`subset`](Self::subset) of the input. Literal skip `k`
+    /// - **Claim**: a [`subset`](op_output) of the input. Literal skip `k`
     ///   and fetch `n`: `X = min(n, max(l − k, 0))`; otherwise `X ≤ n` for a
     ///   literal fetch.
     pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> Rel {
         let l = self.visit(&lim.input);
         let mut o = self.fresh("Limit", plan);
         o.inherit(&l);
-        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
+        self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         let skip = match lim.get_skip_type() {
             Ok(SkipType::Literal(k)) => Some(k as u64),
             _ => None,
@@ -363,7 +346,7 @@ impl<'a> Analyzer<'a> {
 
     /// `Union` (`UNION ALL`): every input's rows.
     ///
-    /// - **Claim**: each input a [`subset`](Self::subset) of the output; `X
+    /// - **Claim**: each input a [`subset`](op_output) of the output; `X
     ///   = Σ` inputs; `ndv ≤ Σ ndv` per column; each range within the
     ///   inputs' together.
     pub fn union(&mut self, plan: &LogicalPlan, u: &Union) -> Rel {
@@ -378,7 +361,7 @@ impl<'a> Analyzer<'a> {
         let cards: Vec<&Int> = inputs.iter().map(|r| &r.card).collect();
         self.assert(o.card.eq(Int::add(&cards)));
         for input in &inputs {
-            self.link(input, LinkKind::Subset, &o, &aligned(o.ndv.len(), 0));
+            self.assert_property("subset", within(&with_card(input, &o, &aligned(o.ndv.len(), 0))));
         }
         for (j, v) in o.ndv.iter().enumerate() {
             let parts: Vec<&Int> = inputs.iter().map(|r| &r.ndv[j]).collect();
@@ -433,7 +416,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X = |T|`, the table's variable, shared by every scan of
     ///   it. Pushed-down filters add a filter over the scan (`ScanFilter`),
-    ///   a [`subset`](Self::subset) of the scan's rows with the filters'
+    ///   a [`subset`](op_output) of the scan's rows with the filters'
     ///   domains, unless the provider applies them inexactly. A pushed-down
     ///   `fetch` bounds nothing.
     /// - **Why**: a provider must return at least `fetch` rows and may return
@@ -484,7 +467,7 @@ impl<'a> Analyzer<'a> {
         if !scan.filters.is_empty() {
             self.finish(&out, None);
             let mut f = self.fresh("ScanFilter", plan);
-            self.link(&f, LinkKind::Subset, &out, &aligned(out.ndv.len(), 0));
+            self.assert_property("subset", within(&with_card(&f, &out, &aligned(out.ndv.len(), 0))));
             f.facts = out.facts.clone();
             // Filters applied inexactly may let through rows that fail them.
             if !inexact_filters(scan) {
@@ -528,12 +511,12 @@ impl<'a> Analyzer<'a> {
     /// `Subquery`, `SubqueryAlias` and `Repartition`: the input's rows, whose
     /// columns come first and unchanged. `kind` names the operator.
     ///
-    /// - **Claim**: [`same rows`](Self::same_rows) as the input, column for
+    /// - **Claim**: [`same rows`](op_output) as the input, column for
     ///   column.
     pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
         let mut o = self.fresh(kind, plan);
-        self.link(&o, LinkKind::SameRows, &l, &aligned(l.ndv.len(), 0));
+        self.assert_property("same rows", same_rows(&o, &l, &aligned(l.ndv.len(), 0)));
         o.facts = l.facts.by_position(input.schema(), plan.schema());
         let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;

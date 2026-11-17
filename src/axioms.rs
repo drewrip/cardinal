@@ -10,9 +10,8 @@
 //!
 //! - **Input**: what the [rules](crate::rules) recorded as they visited the
 //!   plan: each relation, with its rows, `ndv`, `min` and `max` variables
-//!   and the value domains, keys and origin found of its rows; each link
-//!   between two relations; every count variable; the nodes; and the
-//!   declared keys.
+//!   and the value domains, keys and origin found of its rows; every count
+//!   variable; the nodes; and the declared keys.
 //! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
 //!   names the function that asserted it, or the axiom's name, and the node
 //!   it is about. No quantifiers: Rust decides where an axiom applies, Z3
@@ -45,25 +44,6 @@
 //! | `unique columns` | `Analyzer::unique_columns` |
 //! | `bounded sum` | [`Analyzer::bounded_sum`] |
 //! | `nulls and values` | [`Analyzer::nulls_and_values`] |
-//!
-//! # Axioms on each link
-//!
-//! A rule that finds its output's rows are an input's records a link
-//! (`Analyzer::link`); the axiom states what follows, so the rule states
-//! only what its operator adds:
-//!
-//! | Axiom | Claim |
-//! |---|---|
-//! | `same rows` | [`Analyzer::same_rows`] |
-//! | `subset` | [`Analyzer::subset`] |
-//! | `wider rows` | [`Analyzer::wider`] |
-//!
-//! ```text
-//! Filter: subset(o, l)  ⇒  X ≤ l, ndv(c) ≤ ndv_l(c), c's range within l's
-//! ```
-//!
-//! These also hold between contexts, but rows need no context to be
-//! related: a filter on a subquery's value has no [`Context`].
 //!
 //! # Axioms on one table's rows
 //!
@@ -130,7 +110,7 @@ use datafusion::logical_expr::{Expr, Operator};
 use z3::ast::Int;
 
 use crate::builder::bare_kind;
-use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, ScanKind, int, product};
+use crate::analysis::{Analyzer, Dependency, Node, Rel, Relation, ScanKind, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
@@ -143,8 +123,7 @@ use crate::postprocess::Role;
 use crate::properties::{self, Claim, Pair};
 use crate::rules::col;
 
-/// [Axioms on each relation](self#axioms-on-each-relation), on each
-/// [link](self#axioms-on-each-link) and on
+/// [Axioms on each relation](self#axioms-on-each-relation) and on
 /// [one table's rows](self#axioms-on-one-tables-rows), one function each, so
 /// a trace names the axiom a constraint is from.
 impl<'a> Analyzer<'a> {
@@ -364,51 +343,6 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// `same rows`, between relations. [`same_rows`](fn@same_rows) and
-    /// [`subset`](fn@subset) find it between contexts.
-    ///
-    /// - **Claim**: `X = l`; for each pair `(j, i)` of `columns`, `ndv(o.j)
-    ///   = ndv(l.i)` and `o.j`'s range within `l.i`'s.
-    /// - **When**: a rule finds `o`'s rows are `l`'s, one for one, and each
-    ///   pair's column of `o` holds the other's value, or an injective image
-    ///   of it.
-    pub fn same_rows(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
-        let mut pairs = vec![Pair::Card(&o.card, &l.card)];
-        pairs.extend(columns.iter().map(|&(j, i)| Pair::Ndv(&o.ndv[j], &l.ndv[i])));
-        self.assert_property("same rows", properties::same(&pairs));
-        for &(j, i) in columns {
-            self.within(o, j, l, i);
-        }
-    }
-
-    /// `subset`, between relations. [`subset`](fn@subset) finds it between
-    /// contexts.
-    ///
-    /// - **Claim**: `X ≤ l`, and the claim of [`Self::wider`].
-    /// - **When**: a rule finds `o`'s rows are among `l`'s, as many times or
-    ///   fewer, with `columns` as in [`Self::wider`].
-    pub fn subset(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
-        self.assert_property("subset", properties::within(&[Pair::Card(&o.card, &l.card)]));
-        self.wider(o, l, columns);
-    }
-
-    /// `wider rows`, between relations. [`wider`](fn@wider) finds it between
-    /// contexts.
-    ///
-    /// - **Claim**: for each pair `(j, i)` of `columns`, `ndv(o.j) ≤
-    ///   ndv(l.i)` and `o.j`'s range within `l.i`'s.
-    /// - **When**: a rule finds each row of `o` holds a row of `l`, each
-    ///   pair's column of `o` the other's value on that row, or an injective
-    ///   image of it. For a float, SQL equality merges values distinct as
-    ///   bits (`-0.0 = 0.0`), so a column equal to `l.i` by a predicate is
-    ///   not paired.
-    pub fn wider(&self, o: &Rel, l: &Rel, columns: &[(usize, usize)]) {
-        for &(j, i) in columns {
-            self.assert_property("wider rows", properties::within(&[Pair::Ndv(&o.ndv[j], &l.ndv[i])]));
-            self.within(o, j, l, i);
-        }
-    }
-
     /// Every [axiom on a relation](self#axioms-on-each-relation) of `r`,
     /// but `non-negative` and `disjoint`. Returns the functional dependency
     /// [`Self::unique_columns`] relied on, for `r`'s node to record.
@@ -549,8 +483,8 @@ impl<'a> Analyzer<'a> {
 }
 
 /// Asserts every axiom of `a`, once its rules have visited the plan: that
-/// no count is negative, those on each relation the rules made, on each
-/// link they found, on the rows of one table, and between contexts. Z3's
+/// no count is negative, those on each relation the rules made, on the
+/// rows of one table, and between contexts. Z3's
 /// time depends on the order: with the counts last, plan bounds took
 /// several times as long on some queries.
 pub fn assert_all(a: &mut Analyzer) {
@@ -582,15 +516,6 @@ pub fn assert_all(a: &mut Analyzer) {
                 }
             }
         }
-    }
-    // Between relations the rules linked.
-    for l in a.links.take() {
-        let (o, from) = (&relations[l.o].rel, &relations[l.l].rel);
-        a.in_frame(l.frame, |a| match l.kind {
-            LinkKind::SameRows => a.same_rows(o, from, &l.columns),
-            LinkKind::Subset => a.subset(o, from, &l.columns),
-            LinkKind::Wider => a.wider(o, from, &l.columns),
-        });
     }
     a.relations = relations;
     // The rows of one table.
