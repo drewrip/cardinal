@@ -423,7 +423,7 @@ fn node(id: usize, n: &Node) -> TraceNode {
         var: n.var.clone(),
         columns,
         inputs: n.inputs.clone(),
-        raw_var: n.raw_scan.as_ref().map(|(v, _, _)| v.clone()),
+        raw_var: n.raw_scan.as_ref().map(|r| r.var.clone()),
         plan: None,
     }
 }

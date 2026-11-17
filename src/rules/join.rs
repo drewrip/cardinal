@@ -46,13 +46,14 @@ impl<'a> Analyzer<'a> {
         let equi = !join.on.is_empty();
         let cross = !equi && join.filter.is_none();
         let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
-        // A unique key on one side means each row of the other side matches at
-        // most once.
-        let ru = equi && self.key_is_unique(join, &join.right, &rk);
-        let lu = equi && self.key_is_unique(join, &join.left, &lk);
-        // A foreign key from one side to every row of the other's table: each
-        // of the first side's rows matches exactly once.
-        let (fl, fr) = self.foreign_key(join);
+        let (fk_left, fk_right) = self.foreign_key(join);
+        let keys = JoinKeys {
+            right_unique: equi && self.key_is_unique(join, &join.right, &rk),
+            left_unique: equi && self.key_is_unique(join, &join.left, &lk),
+            fk_left,
+            fk_right,
+        };
+        let JoinKeys { right_unique: ru, left_unique: lu, fk_left: fl, fk_right: fr } = keys;
         let kind = format!(
             "{:?}{}Join",
             join.join_type,
@@ -127,10 +128,10 @@ impl<'a> Analyzer<'a> {
             | JoinType::LeftMark
             | JoinType::RightMark => {}
         }
-        self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
+        self.join_parts(join, &o, &l, &r, &inner, keys);
         self.join_overlap(join, &o, &l, &r);
         self.join_sides(join, &o, &l, &r);
-        self.join_ndv_kept(join, &o, &l, &r, (fl, fr));
+        self.join_ndv_kept(join, &o, &l, &r, keys);
         self.join_ranges(plan, join, &o);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
@@ -187,15 +188,12 @@ impl<'a> Analyzer<'a> {
     ///   NULL-aware), `r − m_r` (right anti). Each `m ≤` its side and `≤ i`,
     ///   `i ≥ 1 ⇒ m ≥ 1`; `m = i` if the other side's key is unique, and
     ///   `m = i =` its side on a foreign key from it.
-    ///
-    /// `keys` says whether the right and left keys are unique, and whether a
-    /// foreign key goes from the left or the right side to all of the other.
-    pub fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: (bool, bool, bool, bool)) {
+    pub fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: JoinKeys) {
         let parts = auxiliary_joins(join);
         if parts.is_empty() {
             return;
         }
-        let (ru, lu, fl, fr) = keys;
+        let JoinKeys { right_unique: ru, left_unique: lu, fk_left: fl, fk_right: fr } = keys;
         let name = self.name_of(&o.card);
         let mut count = |suffix: &str| {
             parts.iter().any(|(s, _)| *s == suffix).then(|| self.new_var(format!("{name}_{suffix}")))
@@ -273,15 +271,15 @@ impl<'a> Analyzer<'a> {
     /// exactly once (a foreign key to all of the other's table) keeps every
     /// value of its columns, `ndv ≥` its own; and each pair of equi-keys
     /// holds equal values on every row, so equal `ndv`.
-    pub fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, (fl, fr): (bool, bool)) {
+    pub fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, keys: JoinKeys) {
         if join.join_type != JoinType::Inner {
             return;
         }
         let nl = l.ndv.len();
-        if fl {
+        if keys.fk_left {
             self.kept(o, l, 0);
         }
-        if fr {
+        if keys.fk_right {
             self.kept(o, r, nl);
         }
         for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
@@ -529,6 +527,20 @@ impl<'a> Analyzer<'a> {
             self.within(o, at + i, side, i);
         }
     }
+}
+
+/// What a join's keys say of how its rows match.
+#[derive(Debug, Clone, Copy)]
+pub struct JoinKeys {
+    /// The right key is unique: each left row matches at most once.
+    pub right_unique: bool,
+    /// The left key is unique: each right row matches at most once.
+    pub left_unique: bool,
+    /// The keys are a foreign key from the left to every row of the right
+    /// side's table: each left row matches exactly once.
+    pub fk_left: bool,
+    /// The mirror: each right row matches exactly once.
+    pub fk_right: bool,
 }
 
 /// The positions of equi-key pair `a = b` in `join`'s left and right

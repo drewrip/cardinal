@@ -90,7 +90,7 @@ impl Logical {
         let unsupported = || Err(Taint::Unsupported(plan_name(&node.plan)));
         match &node.plan {
             LogicalPlan::TableScan(scan) => {
-                let var = node.raw_scan.as_ref().map_or(&node.var, |(v, _, _)| v);
+                let var = node.raw_scan.as_ref().map_or(&node.var, |r| &r.var);
                 let Some((_, table)) = scans.iter().find(|(s, _)| s == var) else {
                     return (unsupported(), None, vec![]);
                 };

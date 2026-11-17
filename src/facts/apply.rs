@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use datafusion::logical_expr::Expr;
 use z3::ast::{Bool, Int};
 
-use crate::analysis::{Node, Unit, unit};
+use crate::analysis::{Node, RawScan, Unit, unit};
 use crate::axioms::bases;
 use crate::postprocess::Role;
 use crate::facts::{Context, Fact, FactKind, FactSet, Term};
@@ -274,7 +274,7 @@ impl<'a> Lookup<'a> {
         }
         for (i, node) in self.nodes.iter().enumerate() {
             let Some(instance) = &self.logical.instances[i] else { continue };
-            let vars = node.raw_scan.as_ref().map_or(&node.ndv_vars, |(_, raw, _)| raw);
+            let vars = node.raw_scan.as_ref().map_or(&node.ndv_vars, |r| &r.ndv_vars);
             let schema = node.plan.schema();
             let over = Context::table(instance);
             for (j, var) in vars.iter().enumerate() {
@@ -306,8 +306,8 @@ impl<'a> Lookup<'a> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
             let mut rows = vec![];
-            if let (Some(_), Some(instance)) = (&node.raw_scan, &self.logical.instances[i]) {
-                rows.push((Context::table(instance), &node.raw_min_vars, &node.raw_max_vars));
+            if let (Some(raw), Some(instance)) = (&node.raw_scan, &self.logical.instances[i]) {
+                rows.push((Context::table(instance), &raw.min_vars, &raw.max_vars));
             }
             if let Ok(ctx) = &self.logical.contexts[i] {
                 rows.push((ctx.clone(), &node.min_vars, &node.max_vars));
@@ -380,7 +380,7 @@ impl<'a> Lookup<'a> {
     fn sizes(&self) -> Vec<(usize, String, u64, FactRef)> {
         let mut out = vec![];
         for (i, node) in self.nodes.iter().enumerate() {
-            if let (Some((raw, _, _)), Some(instance)) = (&node.raw_scan, &self.logical.instances[i])
+            if let (Some(RawScan { var: raw, .. }), Some(instance)) = (&node.raw_scan, &self.logical.instances[i])
                 && let Some(f) = self.get(FactKind::Cardinality(Context::table(instance)))
                 && let Some(n) = f.value.as_int()
             {

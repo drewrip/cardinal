@@ -90,7 +90,7 @@ use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::Int;
 
-use crate::analysis::{Analyzer, LinkKind, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
+use crate::analysis::{Analyzer, LinkKind, RawScan, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
@@ -149,9 +149,8 @@ impl<'a> Analyzer<'a> {
 
     /// Visits `plan`'s inputs and applies its operator's rule
     /// ([the table](self#rules)). A scan also returns its raw scan, before
-    /// pushed-down filters: its cardinality and `ndv` variables, and plan.
-    #[allow(clippy::type_complexity)]
-    pub fn visit_node(&mut self, plan: &LogicalPlan) -> (Rel, Option<(String, Vec<String>, LogicalPlan)>) {
+    /// pushed-down filters.
+    pub fn visit_node(&mut self, plan: &LogicalPlan) -> (Rel, Option<RawScan>) {
         let out = match plan {
             LogicalPlan::TableScan(scan) => return self.scan(plan, scan),
             LogicalPlan::Projection(p) => self.projection(plan, p),
@@ -234,10 +233,9 @@ impl<'a> Analyzer<'a> {
         self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
         self.filter_ndv(&f.predicate, &f.input, &o);
         self.range_pairs(&f.predicate, plan, &o);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
+        o.inherit(&l);
         o.facts.assume(&f.predicate, plan.schema());
-        o.origin = l.origin.clone().map(|x| x.narrow(&o.facts, plan.schema()));
+        o.origin = o.origin.take().map(|x| x.narrow(&o.facts, plan.schema()));
         o
     }
 
@@ -250,9 +248,7 @@ impl<'a> Analyzer<'a> {
     pub fn distinct(&mut self, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
         let l = self.visit(input);
         let mut o = self.fresh("Distinct", plan);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
-        o.origin = l.origin.clone();
+        o.inherit(&l);
         self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
         self.kept_values(plan, &o, &l);
@@ -316,9 +312,7 @@ impl<'a> Analyzer<'a> {
         let l = self.visit(&s.input);
         let mut o = self.fresh("Sort", plan);
         let columns = aligned(l.ndv.len(), 0);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
-        o.origin = l.origin.clone();
+        o.inherit(&l);
         match s.fetch {
             None => self.link(&o, LinkKind::SameRows, &l, &columns),
             // Top-k: exactly the first n rows.
@@ -338,9 +332,7 @@ impl<'a> Analyzer<'a> {
     pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> Rel {
         let l = self.visit(&lim.input);
         let mut o = self.fresh("Limit", plan);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
-        o.origin = l.origin.clone();
+        o.inherit(&l);
         self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
         let skip = match lim.get_skip_type() {
             Ok(SkipType::Literal(k)) => Some(k as u64),
@@ -443,12 +435,7 @@ impl<'a> Analyzer<'a> {
     ///   `fetch` bounds nothing.
     /// - **Why**: a provider must return at least `fetch` rows and may return
     ///   more; DataFusion keeps the limit above.
-    #[allow(clippy::type_complexity)]
-    pub fn scan(
-        &mut self,
-        plan: &LogicalPlan,
-        scan: &TableScan,
-    ) -> (Rel, Option<(String, Vec<String>, LogicalPlan)>) {
+    pub fn scan(&mut self, plan: &LogicalPlan, scan: &TableScan) -> (Rel, Option<RawScan>) {
         let mut raw_scan = None;
         let mut out = match (self.resolve)(scan) {
             ScanKind::Base { key, display } => {
@@ -471,8 +458,13 @@ impl<'a> Analyzer<'a> {
                     let mut raw = scan.clone();
                     raw.filters.clear();
                     raw.fetch = None;
-                    raw_scan = Some((name, self.names_of(&s), LogicalPlan::TableScan(raw)));
-                    self.raw_ranges = (range_names(&s.min), range_names(&s.max));
+                    raw_scan = Some(RawScan {
+                        var: name,
+                        ndv_vars: self.names_of(&s),
+                        min_vars: range_names(&s.min),
+                        max_vars: range_names(&s.max),
+                        plan: LogicalPlan::TableScan(raw),
+                    });
                 }
                 s
             }

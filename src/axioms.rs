@@ -621,8 +621,8 @@ fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<C
             (j < schema.fields().len() && !schema.field(j).data_type().is_floating()).then(|| Term::new(e.clone()))
         };
         let mut rows = vec![];
-        if let (Some((raw, ndvs, _)), Some(instance)) = (&node.raw_scan, &logical.instances[i]) {
-            rows.push((Context::table(instance), raw, ndvs, &node.raw_min_vars, &node.raw_max_vars));
+        if let (Some(raw), Some(instance)) = (&node.raw_scan, &logical.instances[i]) {
+            rows.push((Context::table(instance), &raw.var, &raw.ndv_vars, &raw.min_vars, &raw.max_vars));
         }
         if let Ok(ctx) = &logical.contexts[i] {
             rows.push((ctx.clone(), &node.var, &node.ndv_vars, &node.min_vars, &node.max_vars));

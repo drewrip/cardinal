@@ -72,6 +72,16 @@ pub struct Rel {
     pub(crate) origin: Option<Origin>,
 }
 
+impl Rel {
+    /// Takes what is known of `l`'s rows, for an operator that keeps some of
+    /// them as they are, columns unchanged.
+    pub(crate) fn inherit(&mut self, l: &Rel) {
+        self.facts = l.facts.clone();
+        self.rows = l.rows.clone();
+        self.origin = l.origin.clone();
+    }
+}
+
 /// A relation's index in [`Analyzer::relations`].
 pub(crate) type RelId = usize;
 
@@ -206,8 +216,6 @@ pub struct Analyzer<'a> {
     /// Whether to assert [`referenced size`](Self::referenced_size) on each
     /// scan, with reference plans ([`crate::joint`]).
     pub(crate) referenced_sizes: bool,
-    /// The last base scan's raw min and max variables, for its node to take.
-    pub(crate) raw_ranges: (Vec<Option<String>>, Vec<Option<String>>),
 }
 
 /// One assertion: the frame of the node it was made for (none for
@@ -231,19 +239,26 @@ pub(crate) struct Node {
     pub(crate) plan: LogicalPlan,
     /// Node ids of `plan.inputs()`, in order.
     pub(crate) inputs: Vec<usize>,
-    /// For a base scan with pushed-down filters: the raw scan's cardinality and
-    /// NDV variables, and the scan without filters or fetch.
-    pub(crate) raw_scan: Option<(String, Vec<String>, LogicalPlan)>,
+    /// For a base scan with pushed-down filters: the scan before them.
+    pub(crate) raw_scan: Option<RawScan>,
     /// The min and max variable of each output column that has them
     /// ([`Rel::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
     pub(crate) min_vars: Vec<Option<String>>,
     pub(crate) max_vars: Vec<Option<String>>,
-    /// The raw scan's, for a base scan with pushed-down filters.
-    pub(crate) raw_min_vars: Vec<Option<String>>,
-    pub(crate) raw_max_vars: Vec<Option<String>>,
     /// The functional dependencies the rules relied on among the output
     /// columns, for [`crate::Analysis::validate`] to check.
     pub(crate) dependencies: Vec<Dependency>,
+}
+
+/// A base scan before its pushed-down filters and fetch: its cardinality,
+/// `ndv`, min and max variables, and the scan without them.
+#[derive(Debug, Clone)]
+pub struct RawScan {
+    pub(crate) var: String,
+    pub(crate) ndv_vars: Vec<String>,
+    pub(crate) min_vars: Vec<Option<String>>,
+    pub(crate) max_vars: Vec<Option<String>>,
+    pub(crate) plan: LogicalPlan,
 }
 
 /// Rows agreeing on `on` (output positions, NULLs equal) agree on these
@@ -372,7 +387,6 @@ impl<'a> Analyzer<'a> {
             relied: RefCell::new(Vec::new()),
             ranged: BTreeSet::new(),
             referenced_sizes: false,
-            raw_ranges: Default::default(),
         }
     }
 
@@ -547,7 +561,6 @@ impl<'a> Analyzer<'a> {
         self.frontier.truncate(mark);
         self.owners.push(frame);
         let (out, raw_scan) = self.visit_node(plan);
-        let (raw_min_vars, raw_max_vars) = std::mem::take(&mut self.raw_ranges);
         let inputs = self.frontier.split_off(mark);
         debug_assert_eq!(inputs.len(), plan.inputs().len());
         let var = self.name_of(&out.card);
@@ -560,8 +573,6 @@ impl<'a> Analyzer<'a> {
             raw_scan,
             min_vars: range_names(&out.min),
             max_vars: range_names(&out.max),
-            raw_min_vars,
-            raw_max_vars,
             dependencies: vec![],
         });
         self.node_at.insert(address(plan), self.nodes.len() - 1);

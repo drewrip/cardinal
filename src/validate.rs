@@ -54,16 +54,11 @@ pub(crate) async fn evaluate(
             measured.push(None);
             continue;
         }
-        if let Some((var, ndv_vars, raw)) = &node.raw_scan
-            && let Some(batches) = run(&state, raw).await
+        if let Some(raw) = &node.raw_scan
+            && let Some(batches) = run(&state, &raw.plan).await
         {
-            record(
-                &mut counts,
-                var,
-                ndv_vars,
-                &measure(&batches, ndv_vars.len()),
-            );
-            ranges(&mut ends, counts.len(), &batches, &node.raw_min_vars, &node.raw_max_vars);
+            record(&mut counts, &raw.var, &raw.ndv_vars, &measure(&batches, raw.ndv_vars.len()));
+            ranges(&mut ends, counts.len(), &batches, &raw.min_vars, &raw.max_vars);
         }
         // A subquery's result is its plan's result; the wrapper has no physical
         // form of its own.

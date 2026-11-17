@@ -100,8 +100,8 @@ pub(crate) struct Search {
     solver: Solver,
     output: Int,
     stats: Cell<SearchStats>,
-    /// The variables a [`Search::plan`] bounds, and what the checks so far
-    /// tell of each.
+    /// The variables searched for bounds, and what the checks so far tell
+    /// of each: every model a check finds narrows each one's search.
     targets: RefCell<Vec<(Int, Known)>>,
 }
 
@@ -224,22 +224,10 @@ impl Search {
         }
     }
 
-    /// The largest `N` with `x >= N`.
-    fn lower(&self, x: &Int) -> u64 {
-        smallest(0, CAP, |n| !self.proves(x.ge(Int::from_u64(n + 1))))
-    }
-
-    /// The smallest `N` with `x <= N`.
-    fn constant(&self, x: &Int) -> Option<u64> {
-        if !self.proves(x.le(Int::from_u64(CAP))) {
-            return None;
-        }
-        Some(smallest(0, CAP, |n| self.proves(x.le(Int::from_u64(n)))))
-    }
-
-    /// The proven range of `x`.
+    /// The proven range of `x`, a target of the search.
     fn range(&self, x: &Int) -> Bounds {
-        Bounds { lower: self.lower(x), upper: self.constant(x) }
+        let i = self.target(x);
+        self.range_of(i)
     }
 
     /// The proven range of `X`.
@@ -247,9 +235,21 @@ impl Search {
         self.range(&self.output)
     }
 
+    /// The index of target `x`, made one if it is not yet.
+    fn target(&self, x: &Int) -> usize {
+        let mut targets = self.targets.borrow_mut();
+        match targets.iter().position(|(t, _)| t == x) {
+            Some(i) => i,
+            None => {
+                targets.push((x.clone(), Known::default()));
+                targets.len() - 1
+            }
+        }
+    }
+
     /// The largest `N` with `x >= N` of target `i`, searched only where the
     /// checks so far leave it: from what is proven up to the least value seen.
-    fn lower_of(&self, i: usize) -> u64 {
+    fn lower(&self, i: usize) -> u64 {
         let k = self.known(i);
         let mut hi = [k.least, k.ceil, Some(CAP)].into_iter().flatten().min().unwrap_or(CAP);
         let mut lo = k.floor.min(hi);
@@ -267,7 +267,7 @@ impl Search {
     /// The smallest `N` with `x <= N` of target `i`, searched only where the
     /// checks so far leave it: from the greatest value seen up to what is
     /// proven.
-    fn constant_of(&self, i: usize) -> Option<u64> {
+    fn upper(&self, i: usize) -> Option<u64> {
         if self.known(i).most.is_some_and(|m| m > CAP) {
             return None;
         }
@@ -289,7 +289,7 @@ impl Search {
     }
 
     fn range_of(&self, i: usize) -> Bounds {
-        Bounds { lower: self.lower_of(i), upper: self.constant_of(i) }
+        Bounds { lower: self.lower(i), upper: self.upper(i) }
     }
 
     /// The proven range of each of `cards`, and of their sum. Each card is
@@ -323,19 +323,6 @@ impl Search {
         }
         (out, self.range_of(t))
     }
-}
-
-/// The smallest value in `lo..=hi` satisfying a monotone `pred` that holds at `hi`.
-fn smallest(mut lo: u64, mut hi: u64, pred: impl Fn(u64) -> bool) -> u64 {
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if pred(mid) {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    hi
 }
 
 #[cfg(test)]
