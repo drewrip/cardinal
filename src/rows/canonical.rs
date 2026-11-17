@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::rewrite::Classes;
-use super::{Context, Exists, ExistsKind, Term, rewrite};
+use super::{Context, Term, rewrite};
 use crate::facts::FactKind;
 use crate::observed::base_table;
 
@@ -35,9 +35,6 @@ pub(crate) struct Canonicals {
     /// The same, of contexts whose instances are numbered as canonical
     /// forms number them ([`Canonicals::numbered`]).
     numbered: HashMap<Context, Arc<Canonical>>,
-    /// Lookups that found their context, and those that searched.
-    pub(crate) hits: usize,
-    pub(crate) misses: usize,
 }
 
 /// A context's canonical form.
@@ -54,7 +51,7 @@ pub(crate) struct Canonical {
 
 impl std::fmt::Debug for Canonicals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Canonicals({} contexts, {} hits, {} misses)", self.entries.len(), self.hits, self.misses)
+        write!(f, "Canonicals({} contexts)", self.entries.len() + self.numbered.len())
     }
 }
 
@@ -62,10 +59,8 @@ impl Canonicals {
     /// The canonical form of `c`, searched for once.
     pub(crate) fn of(&mut self, c: &Context) -> Arc<Canonical> {
         if let Some(e) = self.entries.get(c) {
-            self.hits += 1;
             return e.clone();
         }
-        self.misses += 1;
         let entry = Arc::new(Canonical::search(c));
         self.entries.insert(c.clone(), entry.clone());
         entry
@@ -76,10 +71,8 @@ impl Canonicals {
     /// rename those names.
     pub(crate) fn numbered(&mut self, c: &Context) -> Arc<Canonical> {
         if let Some(e) = self.numbered.get(c) {
-            self.hits += 1;
             return e.clone();
         }
-        self.misses += 1;
         let names = numbered(c);
         let spelled: Names = names.iter().map(|r| (r.clone(), r.replacen('@', "#@", 1))).collect();
         let back: Names = spelled.iter().map(|(r, s)| (s.clone(), r.clone())).collect();
@@ -162,20 +155,18 @@ impl FactKind {
     /// [`FactKind::canonical`], finding its context's canonical form in
     /// `canonicals`, or adding it.
     pub(crate) fn canonical_in(&self, canonicals: &mut Canonicals) -> FactKind {
-        // Lookups no term reads taken out, and decorrelated first: what they
-        // take out is no instance to name.
+        // Lookups no term reads taken out first: what they take out is no
+        // instance to name.
         let ungrouped = self.ungrouped();
         let this = ungrouped.as_ref().unwrap_or(self);
         let unpadded = this.unpadded();
-        let this = unpadded.as_ref().unwrap_or(this);
-        let decorrelated = this.decorrelated();
-        decorrelated.as_ref().unwrap_or(this).named_in(canonicals)
+        unpadded.as_ref().unwrap_or(this).named_in(canonicals)
     }
 
     /// This fact with its instances renamed in the least order, the rest
     /// of [`FactKind::canonical_in`] already done.
     fn named_in(&self, canonicals: &mut Canonicals) -> FactKind {
-        let Some(over) = self.over_only() else { return self.search() };
+        let over = self.over();
         // Keys over instances the rows do not have are named with them.
         let mut instances = vec![];
         context_instances(over, &mut instances);
@@ -212,7 +203,7 @@ impl FactKind {
     }
 
     /// This fact as stored, its keys renamed as [`FactKind::canonical`]
-    /// names them now: a stored distinct count, uniqueness, least or
+    /// names them now: a stored distinct count, least or
     /// greatest value may be spelled as an older canonical form, which
     /// compared keys before rows. Its instances `t@1`, `t@2`, ... are named
     /// again, as a plan's would be; nothing else
@@ -220,10 +211,10 @@ impl FactKind {
     /// renamed, as derived facts are spelled as the facts they came from.
     pub(crate) fn recanonical_in(&self, canonicals: &mut Canonicals) -> FactKind {
         match self {
-            FactKind::Distinct { .. } | FactKind::Unique { .. } | FactKind::Min { .. } | FactKind::Max { .. } => {
+            FactKind::Distinct { .. } | FactKind::Min { .. } | FactKind::Max { .. } => {
                 self.respelled().as_ref().unwrap_or(self).named_in(canonicals)
             }
-            _ => self.clone(),
+            FactKind::Cardinality(_) => self.clone(),
         }
     }
 
@@ -290,95 +281,31 @@ impl FactKind {
                 }
             }
         };
-        let contexts: Vec<&Context> = match self {
-            FactKind::Cardinality(c) => vec![c],
-            FactKind::Selectivity { pred, over } => {
-                terms(pred, &mut read, &mut values);
-                vec![over]
-            }
-            FactKind::Match { on, kept, other } => {
-                terms(on, &mut read, &mut values);
-                vec![kept, other]
-            }
-            FactKind::Distinct { keys, over } | FactKind::Unique { keys, over } => {
-                terms(keys, &mut read, &mut values);
-                vec![over]
-            }
-            FactKind::Min { key, over } | FactKind::Max { key, over } => {
-                terms(&[key.clone()].into(), &mut read, &mut values);
-                vec![over]
-            }
-        };
-        for c in &contexts {
-            rewrite::reads(c, &mut read, &mut values);
+        match self {
+            FactKind::Cardinality(_) => {}
+            FactKind::Distinct { keys, .. } => terms(keys, &mut read, &mut values),
+            FactKind::Min { key, .. } | FactKind::Max { key, .. } => terms(&[key.clone()].into(), &mut read, &mut values),
         }
+        rewrite::reads(self.over(), &mut read, &mut values);
         if values {
             return None;
         }
         let f = |c: &Context| rewrite::unpadded(c, &read);
         Some(match self {
             FactKind::Cardinality(c) => FactKind::Cardinality(f(c)),
-            FactKind::Selectivity { pred, over } => FactKind::Selectivity { pred: pred.clone(), over: f(over) },
-            FactKind::Match { on, kept, other } => FactKind::Match { on: on.clone(), kept: f(kept), other: f(other) },
             FactKind::Distinct { keys, over } => FactKind::Distinct { keys: keys.clone(), over: f(over) },
-            FactKind::Unique { keys, over } => FactKind::Unique { keys: keys.clone(), over: f(over) },
             FactKind::Min { key, over } => FactKind::Min { key: key.clone(), over: f(over) },
             FactKind::Max { key, over } => FactKind::Max { key: key.clone(), over: f(over) },
         })
     }
 
-    /// A match share on a copy of its kept side grouped on the correlated
-    /// columns, as a semi join of the kept side itself (see
-    /// [`rewrite::decorrelate`]). `None` if it is not one.
-    fn decorrelated(&self) -> Option<FactKind> {
-        let FactKind::Match { on, kept, other: before } = self else { return None };
-        let e = Exists { kind: ExistsKind::Semi, on: on.clone(), other: before.clone() };
-        let Exists { on, other, .. } = rewrite::decorrelate(kept, e);
-        (other != *before).then(|| FactKind::Match { on, kept: kept.clone(), other })
-    }
-
     /// This fact with its instances renamed by `names`, in normal form:
-    /// contexts as [`rewrite`] builds them, a selectivity's predicates as its
-    /// rows with them write them, and keys and conditions with columns
-    /// written as the least column equal to them.
+    /// contexts as [`rewrite`] builds them, and keys with columns written as
+    /// the least column equal to them.
     pub(crate) fn rename(&self, names: &HashMap<String, String>) -> FactKind {
-        let f = |r: &str| names.get(r).cloned();
-        let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
-        if let Some(over) = self.over_only() {
-            let over = over.rename(&f);
-            let classes = rewrite::key_classes(&over);
-            return self.around_in(names, over, &classes);
-        }
-        match self {
-            FactKind::Selectivity { pred, over } => {
-                let (pred, over) = (terms(pred), over.rename(&f));
-                let delta = rewrite::delta(&over, &pred);
-                FactKind::Selectivity { pred: if delta.is_empty() { pred } else { delta }, over }
-            }
-            FactKind::Match { on, kept, other } => {
-                let (kept, other) = (kept.rename(&f), other.rename(&f));
-                let on = rewrite::on(&other, &rewrite::on(&kept, &terms(on)));
-                FactKind::Match { on, kept, other }
-            }
-            FactKind::Cardinality(_)
-            | FactKind::Distinct { .. }
-            | FactKind::Unique { .. }
-            | FactKind::Min { .. }
-            | FactKind::Max { .. } => unreachable!("over one context"),
-        }
-    }
-
-    /// The one context a size, distinct count, uniqueness, least or
-    /// greatest value is over; `None` for a share.
-    fn over_only(&self) -> Option<&Context> {
-        match self {
-            FactKind::Cardinality(over)
-            | FactKind::Distinct { over, .. }
-            | FactKind::Unique { over, .. }
-            | FactKind::Min { over, .. }
-            | FactKind::Max { over, .. } => Some(over),
-            FactKind::Selectivity { .. } | FactKind::Match { .. } => None,
-        }
+        let over = self.over().rename(&|r: &str| names.get(r).cloned());
+        let classes = rewrite::key_classes(&over);
+        self.around_in(names, over, &classes)
     }
 
     /// This fact, over one context, renamed by `names` given its context
@@ -389,7 +316,6 @@ impl FactKind {
         let terms = |s: &BTreeSet<Term>| s.iter().map(|t| t.rename(&f)).collect::<BTreeSet<_>>();
         match self {
             FactKind::Distinct { keys, .. } => FactKind::Distinct { keys: classes.keys(&terms(keys)), over },
-            FactKind::Unique { keys, .. } => FactKind::Unique { keys: classes.keys(&terms(keys)), over },
             FactKind::Min { key, .. } | FactKind::Max { key, .. } => {
                 let key = classes.keys(&[key.rename(&f)].into()).into_iter().next().unwrap_or_else(|| key.rename(&f));
                 match self {
@@ -416,25 +342,11 @@ impl FactKind {
                 term_relations(t, is, out);
             }
         };
+        relations(self.over(), is, out);
         match self {
-            FactKind::Cardinality(c) => relations(c, is, out),
-            FactKind::Selectivity { pred, over } => {
-                relations(over, is, out);
-                terms(&mut pred.iter(), is, out);
-            }
-            FactKind::Match { on, kept, other } => {
-                relations(kept, is, out);
-                relations(other, is, out);
-                terms(&mut on.iter(), is, out);
-            }
-            FactKind::Distinct { keys, over } | FactKind::Unique { keys, over } => {
-                relations(over, is, out);
-                terms(&mut keys.iter(), is, out);
-            }
-            FactKind::Min { key, over } | FactKind::Max { key, over } => {
-                relations(over, is, out);
-                terms(&mut std::iter::once(key), is, out);
-            }
+            FactKind::Cardinality(_) => {}
+            FactKind::Distinct { keys, .. } => terms(&mut keys.iter(), is, out),
+            FactKind::Min { key, .. } | FactKind::Max { key, .. } => terms(&mut std::iter::once(key), is, out),
         }
     }
 }
@@ -616,7 +528,7 @@ mod tests {
             FactKind::Distinct { over: over.clone(), keys: keys(&[(b, "dept")]) },
             FactKind::Distinct { over: over.clone(), keys: keys(&[(c, "dept"), (a, "salary")]) },
             FactKind::Distinct { over: over.clone(), keys: keys(&[(b, "id")]) },
-            FactKind::Unique { over: over.clone(), keys: keys(&[(a, "id"), (c, "id")]) },
+            FactKind::Distinct { over: over.clone(), keys: keys(&[(a, "id"), (c, "id")]) },
             FactKind::Min { over: over.clone(), key: Term::new(e(c, "salary")) },
             FactKind::Max { over, key: Term::new(e(a, "dept")) },
         ]
@@ -647,7 +559,7 @@ mod tests {
             assert_eq!(renamed, forms, "{a}{b}{c}");
         }
         // One search per context, here one context in seven orders.
-        assert_eq!(canonicals.misses, 7);
+        assert_eq!(canonicals.entries.len() + canonicals.numbered.len(), 7);
         // As a search over every order of the whole fact would find.
         for (k, form) in first.iter().zip(&forms) {
             assert_eq!(&least(k), form, "{k}");

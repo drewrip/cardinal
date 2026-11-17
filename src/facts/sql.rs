@@ -25,15 +25,6 @@ use datafusion::sql::unparser::dialect::PostgreSqlDialect;
 use super::{Context, ExistsKind, FactKind, FactSet, Term};
 use crate::observed::Catalog;
 
-/// The queries for a fact's value: a count, and for a share or a
-/// uniqueness, the count it is a share of (a fact of uniqueness holds when
-/// the two are equal).
-#[derive(Debug, Clone)]
-pub struct Counts {
-    pub value: String,
-    pub of: Option<String>,
-}
-
 /// The engine a fact's queries are written for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CountDialect {
@@ -43,18 +34,18 @@ pub enum CountDialect {
 }
 
 impl FactKind {
-    /// Queries counting this fact's value, with tables' columns from
+    /// A query counting this fact's value, with tables' columns from
     /// `catalog` and aggregate values' definitions from `facts`. `None` if it
     /// reads what no query can name: a value no GROUP BY of its rows
     /// computes, a grouping key that is not a column, the first rows of a
-    /// sort. The queries are DuckDB's SQL: [`FactKind::count_sql_in`]
+    /// sort. The query is DuckDB's SQL: [`FactKind::count_sql_in`]
     /// writes another engine's.
-    pub fn count_sql(&self, catalog: &Catalog, facts: &FactSet) -> Option<Counts> {
+    pub fn count_sql(&self, catalog: &Catalog, facts: &FactSet) -> Option<String> {
         self.count_sql_in(catalog, facts, CountDialect::DuckDb)
     }
 
     /// [`FactKind::count_sql`], in `dialect`.
-    pub fn count_sql_in(&self, catalog: &Catalog, facts: &FactSet, dialect: CountDialect) -> Option<Counts> {
+    pub fn count_sql_in(&self, catalog: &Catalog, facts: &FactSet, dialect: CountDialect) -> Option<String> {
         let r = Render {
             catalog,
             facts,
@@ -97,16 +88,7 @@ fn wanted(kind: &FactKind, facts: &FactSet) -> BTreeSet<String> {
     }
     match kind {
         FactKind::Cardinality(c) => context(c, &mut terms),
-        FactKind::Selectivity { pred, over } => {
-            terms.extend(pred);
-            context(over, &mut terms);
-        }
-        FactKind::Match { on, kept, other } => {
-            terms.extend(on);
-            context(kept, &mut terms);
-            context(other, &mut terms);
-        }
-        FactKind::Distinct { keys, over } | FactKind::Unique { keys, over } => {
+        FactKind::Distinct { keys, over } => {
             terms.extend(keys);
             context(over, &mut terms);
         }
@@ -157,40 +139,21 @@ struct Render<'a> {
 }
 
 impl Render<'_> {
-    /// The queries counting `kind`'s value.
-    fn counts(&self, kind: &FactKind) -> Option<Counts> {
+    /// The query counting `kind`'s value.
+    fn counts(&self, kind: &FactKind) -> Option<String> {
         let r = self;
-        let count = |c: &Context| r.count(c);
-        let distinct = |keys: &BTreeSet<Term>, over: &Context| {
-            let keys = keys.iter().map(|k| r.expr(k)).collect::<Option<Vec<_>>>()?.join(", ");
-            Some(format!("SELECT count(*) FROM (SELECT DISTINCT {keys} FROM {})", r.from(over)?))
-        };
         Some(match kind {
-            FactKind::Cardinality(c) => Counts { value: count(c)?, of: None },
-            FactKind::Distinct { keys, over } => Counts { value: distinct(keys, over)?, of: None },
-            FactKind::Unique { keys, over } => Counts { value: distinct(keys, over)?, of: Some(count(over)?) },
+            FactKind::Cardinality(c) => r.count(c)?,
+            FactKind::Distinct { keys, over } => {
+                let keys = keys.iter().map(|k| r.expr(k)).collect::<Option<Vec<_>>>()?.join(", ");
+                format!("SELECT count(*) FROM (SELECT DISTINCT {keys} FROM {})", r.from(over)?)
+            }
             // With no value, the least is above every floor and the greatest
             // below every bound: the values are non-negative integers.
-            FactKind::Min { key, over } => Counts {
-                value: format!("SELECT coalesce(min({}), {}) FROM {}", r.expr(key)?, i64::MAX, r.from(over)?),
-                of: None,
-            },
-            FactKind::Max { key, over } => {
-                Counts { value: format!("SELECT coalesce(max({}), 0) FROM {}", r.expr(key)?, r.from(over)?), of: None }
+            FactKind::Min { key, over } => {
+                format!("SELECT coalesce(min({}), {}) FROM {}", r.expr(key)?, i64::MAX, r.from(over)?)
             }
-            FactKind::Selectivity { pred, over } => Counts {
-                value: format!("SELECT count(*) FROM {} WHERE {}", r.from(over)?, r.conjunction(pred)?),
-                of: Some(count(over)?),
-            },
-            FactKind::Match { on, kept, other } => Counts {
-                value: format!(
-                    "SELECT count(*) FROM {} WHERE EXISTS (SELECT 1 FROM {} WHERE {})",
-                    r.from(kept)?,
-                    r.from(other)?,
-                    r.conjunction(on)?
-                ),
-                of: Some(count(kept)?),
-            },
+            FactKind::Max { key, over } => format!("SELECT coalesce(max({}), 0) FROM {}", r.expr(key)?, r.from(over)?),
         })
     }
 

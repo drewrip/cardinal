@@ -331,7 +331,7 @@ fn table_of(instance: &str) -> &str {
 
 /// The terms of a condition `on` relating the rows of `c` to another
 /// context, with `c`'s columns written as their class's least.
-pub(crate) fn on(c: &Context, on: &BTreeSet<Term>) -> BTreeSet<Term> {
+fn on(c: &Context, on: &BTreeSet<Term>) -> BTreeSet<Term> {
     match c {
         Context::Spj { preds, .. } => Classes::of(preds).on(on),
         _ => on.clone(),
@@ -344,18 +344,6 @@ pub(crate) fn key_classes(c: &Context) -> Classes {
     match c {
         Context::Spj { preds, .. } => Classes::of(preds),
         _ => Classes::default(),
-    }
-}
-
-/// `pred` over the rows of `over`, written as `over ∧ pred` writes it: the
-/// same rows, whichever of several equal columns `pred` names. Empty if
-/// `over` implies `pred`.
-pub(crate) fn delta(over: &Context, pred: &BTreeSet<Term>) -> BTreeSet<Term> {
-    let full = over.filter(pred);
-    let (Context::Spj { preds: all, .. }, base) = (&full, over) else { return pred.clone() };
-    match base {
-        Context::Spj { preds, .. } => all.difference(preds).cloned().collect(),
-        _ => all.clone(),
     }
 }
 

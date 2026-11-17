@@ -21,8 +21,7 @@
 //!   data satisfying the declared keys. The tests deciding where an
 //!   axiom applies are conservative: missing a case loses an axiom, never
 //!   adds a wrong one.
-//! - **Not done**: selectivities and match shares get no axioms; contexts
-//!   outside the relevant set are not related.
+//! - **Not done**: contexts outside the relevant set are not related.
 //!
 //! [`assert_all`] asserts every axiom, once the rules are done, before any
 //! fact. They are grouped by what they range over.
@@ -792,15 +791,7 @@ impl Space {
 
 /// The rows `q` is a quantity of.
 fn over(q: &FactKind) -> &Context {
-    match q {
-        FactKind::Cardinality(c) => c,
-        FactKind::Selectivity { over, .. }
-        | FactKind::Distinct { over, .. }
-        | FactKind::Unique { over, .. }
-        | FactKind::Min { over, .. }
-        | FactKind::Max { over, .. } => over,
-        FactKind::Match { kept, .. } => kept,
-    }
+    q.over()
 }
 
 /// `same rows`, between the terms of one quantity. [`subset`] states it
@@ -1001,7 +992,7 @@ pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
 /// How many keys `q` is of.
 fn width(q: &FactKind) -> usize {
     match q {
-        FactKind::Distinct { keys, .. } | FactKind::Unique { keys, .. } => keys.len(),
+        FactKind::Distinct { keys, .. } => keys.len(),
         _ => 1,
     }
 }

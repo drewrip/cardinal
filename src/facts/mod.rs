@@ -20,18 +20,15 @@
 //!   conditions match too.
 //! - `C ∧ P`: `C` with the predicates `P` added ([`Context::filter`]).
 //! - `|C|`: how many rows `C` has.
-//! - `s(P | C)`: the share of `C`'s rows satisfying `P`, `|C ∧ P| / |C|`.
-//! - `m(on | K ⋉ O)`: the share of `K`'s rows with a partner in `O` under
-//!   `on`. A semi join keeps `m·|K|` rows, an anti join `(1 − m)·|K|`.
 //! - `ndv(K | C)`: the distinct combinations of keys `K` in `C`'s rows,
-//!   NULL counting as a value. `unique(K | C)`: `ndv(K | C) = |C|`.
+//!   NULL counting as a value.
 //! - `min(k | C)`, `max(k | C)`: the least and greatest non-NULL value of
 //!   `k` in `C`'s rows, as an integer.
 //!
 //! These are [`FactKind`]s. A *fact* gives one its exact value, a *bound* an
-//! upper limit and a *floor* a lower one ([`FactSet`] keeps all three). A
-//! *quantity* is a kind among `|C|`, `ndv`, `min` and `max`: what a query's
-//! operators have variables for.
+//! upper limit and a *floor* a lower one ([`FactSet`] keeps all three).
+//! Each kind is a *quantity* of one context: what a query's operators have
+//! variables for.
 //!
 //! # Pipeline
 //!
@@ -56,8 +53,8 @@
 //!    operators' quantities in every analysis, so Z3 carries each claim to
 //!    the rest.
 //!
-//! A fact's queries ([`FactKind::count_sql_in`]) count it on an engine, to
-//! check it or to give it ([`FactKind::counted`]).
+//! A fact's query ([`FactKind::count_sql_in`]) counts it on an engine, to
+//! check it or to give it.
 
 pub(crate) mod apply;
 mod sql;
@@ -66,7 +63,7 @@ pub(crate) mod state;
 pub use crate::rows::{Context, Exists, ExistsKind, Term};
 pub use state::{Pending, State, Taint, Value, states};
 pub use apply::Facts;
-pub use sql::{CountDialect, Counts};
+pub use sql::CountDialect;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,31 +113,6 @@ impl Ratio {
         (self.den == 1).then_some(self.num)
     }
 
-    pub fn times(self, o: Ratio) -> Option<Ratio> {
-        let (a, b) = (gcd(self.num, o.den), gcd(o.num, self.den));
-        let num = (self.num / a).checked_mul(o.num / b)?;
-        let den = (self.den / b).checked_mul(o.den / a)?;
-        Ratio::new(num, den)
-    }
-
-    pub fn over(self, o: Ratio) -> Option<Ratio> {
-        self.times(Ratio::new(o.den, o.num)?)
-    }
-
-    pub fn plus(self, o: Ratio) -> Option<Ratio> {
-        let g = gcd(self.den, o.den);
-        let den = (self.den / g).checked_mul(o.den)?;
-        let num = self.num.checked_mul(o.den / g)?.checked_add(o.num.checked_mul(self.den / g)?)?;
-        Ratio::new(num, den)
-    }
-
-    /// `self − o`; `None` if negative.
-    pub fn minus(self, o: Ratio) -> Option<Ratio> {
-        let g = gcd(self.den, o.den);
-        let den = (self.den / g).checked_mul(o.den)?;
-        let num = self.num.checked_mul(o.den / g)?.checked_sub(o.num.checked_mul(self.den / g)?)?;
-        Ratio::new(num, den)
-    }
 }
 
 /// A ratio as read, before it is checked and reduced.
@@ -191,11 +163,6 @@ impl fmt::Display for Ratio {
 pub enum FactKind {
     /// `|ctx|`: the rows in a context.
     Cardinality(Context),
-    /// `s(pred | over)`: the share of `over`'s rows satisfying `pred`.
-    Selectivity { pred: BTreeSet<Term>, over: Context },
-    /// `m(on | kept ⋉ other)`: the share of `kept`'s rows with a partner in
-    /// `other` under `on`. A semi join keeps `m`, an anti join `1 − m`.
-    Match { on: BTreeSet<Term>, kept: Context, other: Context },
     /// `ndv(keys | over)`: the distinct combinations of `keys` over `over`.
     ///
     /// `over` comes first in this and the kinds below so the derived order
@@ -203,8 +170,6 @@ pub enum FactKind {
     /// context as it is named alone, once for all its kinds
     /// (see [`FactKind::canonical`]).
     Distinct { over: Context, keys: BTreeSet<Term> },
-    /// `keys` take a different value in each of `over`'s rows. Its value is 1.
-    Unique { over: Context, keys: BTreeSet<Term> },
     /// `min(key | over)`: the least non-NULL value of `key` in `over`'s
     /// rows, an integer (a date as days). Known only by its bounds so far.
     Min { over: Context, key: Term },
@@ -213,19 +178,14 @@ pub enum FactKind {
 }
 
 impl FactKind {
-    /// This fact, with the value its queries counted ([`Counts`]): `value`,
-    /// and for a share or a uniqueness, `of`. `None` if they give it no
-    /// value: a share of no rows, or keys that are not unique.
-    pub fn counted(&self, value: u64, of: Option<u64>) -> Option<Fact> {
-        let value = match (self, of) {
-            (FactKind::Cardinality(_) | FactKind::Distinct { .. } | FactKind::Min { .. } | FactKind::Max { .. }, _) => {
-                Ratio::int(value)
-            }
-            (FactKind::Unique { .. }, Some(of)) if value == of => Ratio::int(1),
-            (FactKind::Selectivity { .. } | FactKind::Match { .. }, Some(of)) => Ratio::new(value, of)?,
-            _ => return None,
-        };
-        Some(Fact { kind: self.clone(), value, origins: vec![Origin::Counted] })
+    /// The rows this is a quantity of.
+    pub fn over(&self) -> &Context {
+        match self {
+            FactKind::Cardinality(over)
+            | FactKind::Distinct { over, .. }
+            | FactKind::Min { over, .. }
+            | FactKind::Max { over, .. } => over,
+        }
     }
 }
 
@@ -233,10 +193,7 @@ impl fmt::Display for FactKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FactKind::Cardinality(c) => write!(f, "|{c}|"),
-            FactKind::Selectivity { pred, over } => write!(f, "s({} | {over})", join(pred, " and ")),
-            FactKind::Match { on, kept, other } => write!(f, "m({} | {kept} ⋉ {other})", join(on, " and ")),
             FactKind::Distinct { keys, over } => write!(f, "ndv({} | {over})", join(keys, ", ")),
-            FactKind::Unique { keys, over } => write!(f, "unique({} | {over})", join(keys, ", ")),
             FactKind::Min { key, over } => write!(f, "min({key} | {over})"),
             FactKind::Max { key, over } => write!(f, "max({key} | {over})"),
         }
@@ -248,7 +205,7 @@ impl fmt::Display for FactKind {
 pub enum Origin {
     /// Read off operator `node` of plan `query` by `rule`.
     Observed { query: String, node: usize, rule: Cow<'static, str> },
-    /// Counted by a query of its own (see [`FactKind::counted`]).
+    /// Counted by a query of its own ([`FactKind::count_sql_in`]).
     Counted,
 }
 

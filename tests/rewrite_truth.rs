@@ -515,7 +515,7 @@ async fn check(engine: Engine) {
         let tree = g.tree(3);
         let mut facts = FactSet::default();
         let context = tree.context(&mut facts);
-        let Some(counts) = FactKind::Cardinality(context.clone()).canonical().count_sql_in(&catalog, &facts, engine.dialect()) else {
+        let Some(count) = FactKind::Cardinality(context.clone()).canonical().count_sql_in(&catalog, &facts, engine.dialect()) else {
             if std::env::var("CARDINAL_REWRITE_SHOW").is_ok() {
                 eprintln!("not writable: {}\n  values: {:?}\n  tree: {tree:?}", context.canonical(), facts.values().map(|v| &v.name).collect::<Vec<_>>());
             }
@@ -523,7 +523,7 @@ async fn check(engine: Engine) {
             continue;
         };
         queries.push(format!("SELECT count(*) FROM ({}) AS \"_s0\"", tree.sql(&mut 0)));
-        queries.push(counts.value);
+        queries.push(count);
         cases.push((tree, context));
     }
     let counted = engine.values(&queries);

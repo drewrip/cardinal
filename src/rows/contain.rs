@@ -3,9 +3,9 @@
 //! A fact is about one context, but it also bounds others: dropping a filter
 //! can only add rows, so `|σp(C)| ≤ |C|` whatever the data. A fact about a
 //! context with more or narrower filters (`c < 5` against `c < 10`) is a
-//! lower bound on one with fewer or wider, and the reverse an upper bound. Facts are matched to contexts that have no
-//! variable of their own in a plan with these; the constraints relate the
-//! ones that do.
+//! lower bound on one with fewer or wider, and the reverse an upper bound.
+//! Facts are matched to contexts that have no variable of their own in a
+//! plan with these; the constraints relate the ones that do.
 //!
 //! Each test is conservative: `false` loses a bound, `true` must hold for any
 //! data.

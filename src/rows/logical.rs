@@ -1,12 +1,10 @@
 //! The contexts of a DataFusion plan's operators, named as facts name them.
 //!
-//! Facts are read off plans an engine ran; a query to bound is a DataFusion
-//! [`LogicalPlan`]. To look up what is known about an operator, its rows are
-//! named the way [`crate::facts::states`] names an executed operator's: each
-//! scan is a table instance (`lineitem#4`, by node), predicates are written
-//! over instance columns through every projection and alias, and the rules
-//! for building contexts are the same, so the same rows read the same from
-//! either side. Expressions go through the same [`normalize`] facts' do.
+//! To look up what is known about an operator's rows, they are named as a
+//! [`Context`]: each scan is a table instance (`lineitem#4`, by node), and
+//! predicates are written over instance columns through every projection and
+//! alias, so the same rows read the same whichever plan computed them.
+//! Expressions go through the same [`normalize`] facts' do.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
