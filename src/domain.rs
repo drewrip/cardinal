@@ -1157,18 +1157,23 @@ fn normalize(e: &Expr, schema: &DFSchema) -> Expr {
 /// Casts that keep every value, and its order, unchanged.
 fn widening(from: &DataType, to: &DataType) -> bool {
     use DataType::*;
-    from == to
-        || matches!((from, to), (Decimal128(p, s), Decimal128(q, t)) if s == t && q >= p)
-        || matches!(
-            (from, to),
-            (Int8, Int16 | Int32 | Int64)
-                | (Int16, Int32 | Int64)
-                | (Int32, Int64)
-                | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
-                | (UInt16, UInt32 | UInt64 | Int32 | Int64)
-                | (UInt32, UInt64 | Int64)
-                | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
-        )
+    from == to || matches!((from, to), (Decimal128(p, s), Decimal128(q, t)) if s == t && q >= p) || wider_type(from, to)
+}
+
+/// Casts from an integer type to one holding all its values, and between
+/// string types: each value, and its order, kept.
+pub(crate) fn wider_type(from: &DataType, to: &DataType) -> bool {
+    use DataType::*;
+    matches!(
+        (from, to),
+        (Int8, Int16 | Int32 | Int64)
+            | (Int16, Int32 | Int64)
+            | (Int32, Int64)
+            | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
+            | (UInt16, UInt32 | UInt64 | Int32 | Int64)
+            | (UInt32, UInt64 | Int64)
+            | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
+    )
 }
 
 /// The proleptic Gregorian year of a day count since 1970-01-01.

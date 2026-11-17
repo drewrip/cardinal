@@ -29,11 +29,7 @@ impl<'a> Analyzer<'a> {
     ///   more rows than they read.
     pub fn aggregate(&mut self, plan: &LogicalPlan, agg: &Aggregate) -> Rel {
         let l = self.visit(&agg.input);
-        if agg
-            .group_expr
-            .iter()
-            .any(|e| matches!(e, Expr::GroupingSet(_)))
-        {
+        if super::grouping_sets(agg) {
             // ROLLUP / CUBE / GROUPING SETS can emit more rows than they read.
             return self.fresh("GroupingSets", plan);
         }

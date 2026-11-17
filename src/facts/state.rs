@@ -405,11 +405,8 @@ fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<(Vec<Exp
     let node = &plan.nodes[i];
     let Op::Filter { predicate } = &node.op else { return None };
     let w = first_row_test(predicate)?;
-    let Expr::WindowFunction(f) = w else { return None };
-    if f.fun.name() != "row_number" || f.params.filter.is_some() || f.params.partition_by.is_empty() {
-        return None;
-    }
-    if !f.params.partition_by.iter().all(|p| matches!(p, Expr::Column(_))) {
+    let partition = crate::rules::row_number(w).filter(|p| !p.is_empty())?;
+    if !partition.iter().all(|p| matches!(p, Expr::Column(_))) {
         return None;
     }
     let mut c = *node.children.first()?;
@@ -426,7 +423,7 @@ fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<(Vec<Exp
             _ => return None,
         }
     }
-    let keys = f.params.partition_by.clone();
+    let keys = partition.to_vec();
     keys.iter().all(|k| values.settle(i, k).as_ref() == Some(k)).then_some((keys, again))
 }
 
@@ -434,9 +431,7 @@ fn first_rows(plan: &ObservedPlan, i: usize, values: &Values) -> Option<(Vec<Exp
 fn first_row_test(predicate: &[Pred]) -> Option<&Expr> {
     let [p] = predicate else { return None };
     let Some(Expr::BinaryExpr(BinaryExpr { left, op, right })) = &p.expr else { return None };
-    let one = |e: &Expr| {
-        matches!(e, Expr::Literal(v, _) if v.cast_to(&datafusion::arrow::datatypes::DataType::Int64).is_ok_and(|v| v == datafusion::common::ScalarValue::Int64(Some(1))))
-    };
+    let one = |e: &Expr| matches!(e, Expr::Literal(v, _) if crate::rows::first::one(v));
     match (op, left.as_ref(), right.as_ref()) {
         (Operator::Eq | Operator::LtEq, w @ Expr::WindowFunction(_), l) if one(l) => Some(w),
         (Operator::Eq | Operator::GtEq, l, w @ Expr::WindowFunction(_)) if one(l) => Some(w),

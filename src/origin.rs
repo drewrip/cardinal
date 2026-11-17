@@ -9,10 +9,10 @@
 //! about the rows after `age` is projected away. Relations over the same table
 //! whose domains are disjoint on some column share no row of it.
 
-use datafusion::common::{Column, DFSchema};
-use datafusion::logical_expr::Expr;
+use datafusion::common::DFSchema;
 
 use crate::domain::{Dom, Facts};
+use crate::rules::field_col;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Origin {
@@ -42,7 +42,7 @@ impl Origin {
             if j >= schema.fields().len() {
                 break;
             }
-            let d = facts.dom(&Expr::Column(Column::from(schema.qualified_field(j))), schema);
+            let d = facts.dom(&field_col(schema, j), schema);
             match self.doms.iter_mut().find(|(n, _)| n == name) {
                 Some((_, old)) => *old = old.intersect(&d),
                 None => self.doms.push((name.clone(), d)),

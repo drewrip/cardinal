@@ -83,7 +83,7 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Column, DFSchema};
 use datafusion::logical_expr::logical_plan::{
-    Distinct, DistinctOn, EmptyRelation, FetchType, Filter, Limit, LogicalPlan, Projection, SkipType, Sort, TableScan,
+    Aggregate, Distinct, DistinctOn, EmptyRelation, FetchType, Filter, Limit, LogicalPlan, Projection, SkipType, Sort, TableScan,
     Union, Values, Window,
 };
 use datafusion::logical_expr::utils::split_conjunction;
@@ -376,11 +376,9 @@ impl<'a> Analyzer<'a> {
         let mut o = self.fresh("Union", plan);
         for j in 0..plan.schema().fields().len() {
             let dom = u.inputs.iter().zip(&inputs).fold(Dom::nothing(), |acc, (input, rel)| {
-                let col = Expr::Column(Column::from(input.schema().qualified_field(j)));
-                acc.union(&rel.facts.dom(&col, input.schema()))
+                acc.union(&rel.facts.dom(&col(input, j), input.schema()))
             });
-            let col = Expr::Column(Column::from(plan.schema().qualified_field(j)));
-            o.facts.add(&col, dom, plan.schema());
+            o.facts.add(&col(plan, j), dom, plan.schema());
         }
         let cards: Vec<&Int> = inputs.iter().map(|r| &r.card).collect();
         self.assert(o.card.eq(Int::add(&cards)));
@@ -421,8 +419,7 @@ impl<'a> Analyzer<'a> {
                 .values
                 .iter()
                 .fold(Dom::nothing(), |acc, row| acc.union(&Facts::default().dom(&row[j], plan.schema())));
-            let col = Expr::Column(Column::from(plan.schema().qualified_field(j)));
-            o.facts.add(&col, dom, plan.schema());
+            o.facts.add(&col(plan, j), dom, plan.schema());
         }
         o
     }
@@ -462,8 +459,7 @@ impl<'a> Analyzer<'a> {
                 let schema = plan.schema();
                 for (j, field) in schema.fields().iter().enumerate() {
                     if !field.is_nullable() {
-                        let col = Expr::Column(Column::from(schema.qualified_field(j)));
-                        s.facts.add(&col, Dom::non_null(), schema);
+                        s.facts.add(&field_col(schema, j), Dom::non_null(), schema);
                     }
                 }
                 self.relations[s.id].scan = Some(scan.clone());
@@ -519,19 +515,12 @@ impl<'a> Analyzer<'a> {
             }
             let c = col(plan, n + i);
             o.facts.add(&c, Dom::at_least(1), plan.schema());
-            if name != "row_number" {
-                continue;
-            }
-            let partition: Option<Vec<Expr>> = w
-                .params
-                .partition_by
+            let Some(partition) = row_number(e) else { continue };
+            let key: Option<Vec<Expr>> = partition
                 .iter()
-                .map(|p| match strip_alias(p) {
-                    Expr::Column(_) => Some(strip_alias(p).clone()),
-                    _ => None,
-                })
+                .map(|p| matches!(strip_alias(p), Expr::Column(_)).then(|| strip_alias(p).clone()))
                 .collect();
-            if let Some(mut key) = partition {
+            if let Some(mut key) = key {
                 key.push(c);
                 o.rows.keys.push(key);
             }
@@ -579,23 +568,9 @@ impl<'a> Analyzer<'a> {
     /// `ndv(a) = ndv(b)` on `o`, the output of filtering `input` by
     /// `predicate`, for each `a = b` it holds.
     pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &Rel) {
-        // SQL equality on floats identifies values that are distinct as bits
-        // (`-0.0 = 0.0`), so these rules skip float columns.
-        let index = |e: &Expr| {
-            let i = key_column(input, e).and_then(|c| input.schema().index_of_column(&c).ok())?;
-            (!input.schema().field(i).data_type().is_floating()).then_some(i)
-        };
-        for conj in split_conjunction(predicate) {
-            if let Expr::BinaryExpr(BinaryExpr {
-                left,
-                op: Operator::Eq,
-                right,
-            }) = conj
-                && let (Some(a), Some(b)) = (index(left), index(right))
-            {
-                // Every surviving row has a = b (neither NULL).
-                self.assert_as(Role::Link, o.ndv[a].eq(&o.ndv[b]));
-            }
+        // Every surviving row has a = b (neither NULL).
+        for (a, b) in equalities(predicate, input) {
+            self.assert_as(Role::Link, o.ndv[a].eq(&o.ndv[b]));
         }
     }
 }
@@ -634,7 +609,12 @@ pub(crate) fn unproject(e: &Expr, plan: &LogicalPlan, exprs: &[Expr]) -> Option<
 
 /// Output column `j` of `plan`, as an expression.
 pub(crate) fn col(plan: &LogicalPlan, j: usize) -> Expr {
-    Expr::Column(Column::from(plan.schema().qualified_field(j)))
+    field_col(plan.schema(), j)
+}
+
+/// Column `j` of `schema`, as an expression.
+pub(crate) fn field_col(schema: &DFSchema, j: usize) -> Expr {
+    Expr::Column(Column::from(schema.qualified_field(j)))
 }
 
 /// Facts on the output of an operator computing `exprs` over the rows of
@@ -666,6 +646,21 @@ pub(crate) fn strip_alias(e: &Expr) -> &Expr {
         Expr::Alias(a) => strip_alias(&a.expr),
         e => e,
     }
+}
+
+/// The partition of `e`, if it is an unfiltered `row_number()`: it numbers
+/// each partition's rows 1, 2, 3, ..., so it is unique with them.
+pub(crate) fn row_number(e: &Expr) -> Option<&[Expr]> {
+    match strip_alias(e) {
+        Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => Some(&f.params.partition_by),
+        _ => None,
+    }
+}
+
+/// True if `agg` groups by ROLLUP, CUBE or GROUPING SETS, which may emit
+/// more rows than they read and repeat keys across grouping levels.
+pub(crate) fn grouping_sets(agg: &Aggregate) -> bool {
+    agg.group_expr.iter().any(|e| matches!(e, Expr::GroupingSet(_)))
 }
 
 /// True unless `e` is a deterministic function of the columns it reads: it
@@ -793,18 +788,11 @@ pub(crate) fn injective_cast(from: &DataType, to: &DataType) -> bool {
         _ => None,
     };
     from == to
+        || domain::wider_type(from, to)
         || matches!(
             (from, to),
-            (Int8, Int16 | Int32 | Int64)
-                | (Int16, Int32 | Int64)
-                | (Int32, Int64)
-                | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
-                | (UInt16, UInt32 | UInt64 | Int32 | Int64)
-                | (UInt32, UInt64 | Int64)
-                | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
-                // Floats hold integers exactly up to 2^24 and 2^53.
-                | (Int8 | Int16 | UInt8 | UInt16, Float32)
-                | (Int8 | Int16 | Int32 | UInt8 | UInt16 | UInt32, Float64)
+            // Floats hold integers exactly up to 2^24 and 2^53.
+            (Int8 | Int16 | UInt8 | UInt16, Float32) | (Int8 | Int16 | Int32 | UInt8 | UInt16 | UInt32, Float64)
         )
         || match (digits, to) {
             (Some(d), Decimal128(p, s) | Decimal256(p, s)) => i16::from(*p) - i16::from(*s) >= d,

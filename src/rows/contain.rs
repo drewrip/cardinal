@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use super::canonical::{Canonical, Canonicals, MAX_ORDERS, Names, each_order, term_numbered};
 use super::{Context, Exists, ExistsKind, Term};
-use crate::axioms::comparison;
 use crate::facts::FactKind;
 use super::rewrite::Spj;
 
@@ -86,6 +85,30 @@ pub(crate) fn implied(preds: &BTreeSet<Term>, q: &Term) -> bool {
     have.is_some_and(|h| disjuncts.into_iter().any(|(_, op, v)| h.within(&Interval::of(op, v))))
 }
 
+/// `e op v`, for a comparison of an expression with a non-NULL literal, the
+/// literal on the right as [`Term`] writes it.
+pub(crate) fn comparison(e: &Expr) -> Option<(&Expr, Operator, ScalarValue)> {
+    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = e else { return None };
+    if !matches!(op, Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq) {
+        return None;
+    }
+    let v = match right.as_ref() {
+        Expr::Literal(v, _) => v.clone(),
+        Expr::Cast(c) => match c.expr.as_ref() {
+            Expr::Literal(v, _) => v.cast_to(c.field.data_type()).ok()?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!v.is_null() && !matches!(left.as_ref(), Expr::Literal(..))).then_some((left.as_ref(), *op, v))
+}
+
+/// True if no value satisfies both `_ x.0 x.1` and `_ y.0 y.1`. Values that
+/// do not compare are taken to meet.
+pub(crate) fn apart(x: &(Operator, ScalarValue), y: &(Operator, ScalarValue)) -> bool {
+    Interval::of(x.0, x.1.clone()).and(&Interval::of(y.0, y.1.clone())).is_some_and(|i| i.is_empty())
+}
+
 /// An interval's end: the value, and whether it is let through. `None` is
 /// open.
 type End = Option<(ScalarValue, bool)>;
@@ -122,6 +145,17 @@ impl Interval {
             })
         };
         Some(Interval { lo: pick(&self.lo, &o.lo, Ordering::Greater)?, hi: pick(&self.hi, &o.hi, Ordering::Less)? })
+    }
+
+    /// True if no value is let through: the ends cross, or meet at a value
+    /// one of them excludes.
+    fn is_empty(&self) -> bool {
+        let (Some((lo, lin)), Some((hi, hin))) = (&self.lo, &self.hi) else { return false };
+        match lo.partial_cmp(hi) {
+            Some(Ordering::Greater) => true,
+            Some(Ordering::Equal) => !(*lin && *hin),
+            _ => false,
+        }
     }
 
     /// True if every value `self` lets through, `o` does.

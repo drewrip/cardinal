@@ -24,6 +24,7 @@ use datafusion::sql::unparser::dialect::PostgreSqlDialect;
 
 use super::{Context, ExistsKind, FactKind, FactSet, Term};
 use crate::observed::Catalog;
+use crate::rows::canonical::{MAX_ORDERS, permutations};
 
 /// The engine a fact's queries are written for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -473,10 +474,11 @@ fn renaming(from: &Context, to: &Context) -> Option<HashMap<String, String>> {
     }
     let groups: Vec<(&Vec<String>, &Vec<String>)> = a.iter().map(|(t, xs)| (xs, &b[t])).collect();
     let mut choice: Vec<usize> = vec![0; groups.len()];
-    let orders: Vec<Vec<Vec<usize>>> = groups.iter().map(|(xs, _)| permutations(xs.len())).collect();
-    if orders.iter().map(Vec::len).try_fold(1usize, |n, k| n.checked_mul(k)).is_none_or(|n| n > 5040) {
+    let factorial = |n: usize| (1..=n).try_fold(1usize, |p, k| p.checked_mul(k));
+    if groups.iter().try_fold(1usize, |n, (xs, _)| n.checked_mul(factorial(xs.len())?)).is_none_or(|n| n > MAX_ORDERS) {
         return None;
     }
+    let orders: Vec<Vec<Vec<usize>>> = groups.iter().map(|(xs, _)| permutations(&(0..xs.len()).collect::<Vec<_>>())).collect();
     loop {
         let mut names = HashMap::new();
         for (g, (xs, ys)) in groups.iter().enumerate() {
@@ -501,21 +503,6 @@ fn renaming(from: &Context, to: &Context) -> Option<HashMap<String, String>> {
             g += 1;
         }
     }
-}
-
-fn permutations(n: usize) -> Vec<Vec<usize>> {
-    if n == 0 {
-        return vec![vec![]];
-    }
-    let mut out = vec![];
-    for p in permutations(n - 1) {
-        for i in 0..=p.len() {
-            let mut q = p.clone();
-            q.insert(i, n - 1);
-            out.push(q);
-        }
-    }
-    out
 }
 
 fn quote(name: &str) -> String {

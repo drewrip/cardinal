@@ -14,6 +14,8 @@ use datafusion::logical_expr::logical_plan::{Filter, LogicalPlan};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
+use crate::rules::{row_number, strip_alias};
+
 /// A filter keeping the first row of each partition of a `row_number()`.
 #[derive(Debug, Clone)]
 pub(crate) struct FirstRows {
@@ -35,7 +37,7 @@ pub(crate) fn first_rows(filter: &Filter) -> Option<FirstRows> {
     let Expr::BinaryExpr(BinaryExpr { left, op, right }) = conjunct else {
         return None;
     };
-    let rn = match (op, strip(left), strip(right)) {
+    let rn = match (op, strip_alias(left), strip_alias(right)) {
         (Operator::Eq | Operator::LtEq, Expr::Column(c), Expr::Literal(v, _)) if one(v) => c,
         (Operator::Eq | Operator::GtEq, Expr::Literal(v, _), Expr::Column(c)) if one(v) => c,
         _ => return None,
@@ -46,17 +48,10 @@ pub(crate) fn first_rows(filter: &Filter) -> Option<FirstRows> {
             let i = plan.schema().index_of_column(&col).ok()?;
             let n = w.input.schema().fields().len();
             if i >= n {
-                let Expr::WindowFunction(f) = strip(&w.window_expr[i - n]) else {
-                    return None;
-                };
-                if f.fun.name() != "row_number" || f.params.filter.is_some() || f.params.partition_by.is_empty() {
-                    return None;
-                }
-                let partition = f
-                    .params
-                    .partition_by
+                let partition = row_number(&w.window_expr[i - n]).filter(|p| !p.is_empty())?;
+                let partition = partition
                     .iter()
-                    .map(|p| match strip(p) {
+                    .map(|p| match strip_alias(p) {
                         Expr::Column(c) => Some(c.clone()),
                         _ => None,
                     })
@@ -75,7 +70,7 @@ pub(crate) fn first_rows(filter: &Filter) -> Option<FirstRows> {
 pub(crate) fn on_partition(side: &LogicalPlan, keys: &[&Expr]) -> bool {
     let Some(mut cols) = keys
         .iter()
-        .map(|k| match strip(k) {
+        .map(|k| match strip_alias(k) {
             Expr::Column(c) => Some(c.clone()),
             _ => None,
         })
@@ -127,7 +122,7 @@ fn step<'a>(plan: &'a LogicalPlan, col: &Column) -> Option<(&'a LogicalPlan, Col
     let i = plan.schema().index_of_column(col).ok()?;
     let input = match plan {
         LogicalPlan::Projection(p) => {
-            return match strip(&p.expr[i]) {
+            return match strip_alias(&p.expr[i]) {
                 Expr::Column(c) => Some((p.input.as_ref(), c.clone())),
                 _ => None,
             };
@@ -141,15 +136,8 @@ fn step<'a>(plan: &'a LogicalPlan, col: &Column) -> Option<(&'a LogicalPlan, Col
     Some((input, Column::from(input.schema().qualified_field(i))))
 }
 
-fn strip(e: &Expr) -> &Expr {
-    match e {
-        Expr::Alias(a) => strip(&a.expr),
-        e => e,
-    }
-}
-
 /// True if `v` is the number 1.
-fn one(v: &ScalarValue) -> bool {
+pub(crate) fn one(v: &ScalarValue) -> bool {
     v.cast_to(&datafusion::arrow::datatypes::DataType::Int64)
         .is_ok_and(|v| v == ScalarValue::Int64(Some(1)))
 }

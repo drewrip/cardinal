@@ -119,17 +119,17 @@
 //!   tables, atoms, conditions and predicates.
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{Column, Constraint, ScalarValue};
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
-use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+use datafusion::logical_expr::{Expr, Operator};
 
 use z3::ast::{Bool, Int};
 
+use crate::builder::bare_kind;
 use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, ScanKind, int, product};
 use crate::facts::FactKind;
 use crate::keys::Nulls;
@@ -140,6 +140,7 @@ use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term};
 use crate::postprocess::Role;
+use crate::rules::col;
 
 /// [Axioms on each relation](self#axioms-on-each-relation), on each
 /// [link](self#axioms-on-each-link) and on
@@ -207,8 +208,7 @@ impl<'a> Analyzer<'a> {
         let schema = plan.schema();
         for (j, (lo, hi)) in rel.min.iter().zip(&rel.max).enumerate() {
             let (Some(lo), Some(hi)) = (lo, hi) else { continue };
-            let col = Expr::Column(Column::from(schema.qualified_field(j)));
-            let d = rel.facts.dom(&col, schema);
+            let d = rel.facts.dom(&col(plan, j), schema);
             let (from, to) = d.int_range();
             if let Some(from) = from.and_then(|v| i64::try_from(v).ok()) {
                 self.assert_as(Role::Local, lo.ge(Int::from_i64(from)));
@@ -247,7 +247,7 @@ impl<'a> Analyzer<'a> {
         let refs: Vec<String> =
             self.foreign_keys.iter().filter(|fk| fk.table == display).map(|fk| fk.references.clone()).collect();
         for t in refs {
-            if let ScanKind::Base { key, display } = referenced(&t) {
+            if let ScanKind::Base { key, display } = bare_kind(&t) {
                 self.table(&key, &display);
             }
         }
@@ -265,7 +265,7 @@ impl<'a> Analyzer<'a> {
         let ScanKind::Base { display, .. } = (self.resolve)(scan) else { return };
         let schema = &scan.projected_schema;
         for fk in self.foreign_keys.iter().filter(|fk| fk.table == display) {
-            let ScanKind::Base { key, .. } = referenced(&fk.references) else { continue };
+            let ScanKind::Base { key, .. } = bare_kind(&fk.references) else { continue };
             let Some(t) = self.tables.get(&key) else { continue };
             for c in &fk.columns {
                 if let Some(j) = schema.fields().iter().position(|f| f.name() == c)
@@ -431,7 +431,7 @@ impl<'a> Analyzer<'a> {
             self.empty_domain(&rel.card);
         }
         for (j, v) in rel.ndv.iter().enumerate() {
-            match rel.facts.dom(&key_col(plan, j), schema).size() {
+            match rel.facts.dom(&col(plan, j), schema).size() {
                 Some(0) => self.empty_domain(&rel.card),
                 Some(n) if n <= u64::MAX as u128 => self.ndv_within_domain(v, n as u64),
                 _ => {}
@@ -465,13 +465,13 @@ impl<'a> Analyzer<'a> {
                 })
                 .collect();
             let Some(positions) = positions else { continue };
-            let sizes: Vec<Option<u128>> = positions.iter().map(|&i| rel.facts.dom(&key_col(plan, i), schema).size()).collect();
+            let sizes: Vec<Option<u128>> = positions.iter().map(|&i| rel.facts.dom(&col(plan, i), schema).size()).collect();
             let (determining, dependency) = self.determining_with(plan, &positions, &sizes);
             relied.extend(dependency);
             let mut constant: u128 = 1;
             let mut factors: Vec<&Int> = vec![];
             for i in determining {
-                match rel.facts.dom(&key_col(plan, i), schema).size() {
+                match rel.facts.dom(&col(plan, i), schema).size() {
                     Some(k) => constant = constant.saturating_mul(k),
                     None => factors.push(&rel.ndv[i]),
                 }
@@ -601,16 +601,6 @@ pub fn assert_all(a: &mut Analyzer) {
     a.between_contexts();
 }
 
-/// The scan kind of the table a foreign key references, by its bare name.
-fn referenced(table: &str) -> ScanKind {
-    crate::builder::base_kind(&datafusion::common::TableReference::bare(table), "datafusion", "public")
-}
-
-/// Output column `i` of `plan`, as an expression.
-fn key_col(plan: &LogicalPlan, i: usize) -> Expr {
-    Expr::Column(Column::from(plan.schema().qualified_field(i)))
-}
-
 /// Adds the quantities of `nodes`' rows, named by `logical`, to `space`.
 /// Returns the contexts of the nodes' rows.
 fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<Context> {
@@ -718,6 +708,11 @@ impl Space {
         self.terms.get(q).and_then(|t| t.first())
     }
 
+    /// The term standing for `|c|`, if any has been added.
+    fn card(&self, c: &Context) -> Option<&Int> {
+        self.term(&FactKind::Cardinality(c.clone()))
+    }
+
     /// The [relevant contexts](self#relevant-contexts): `seeds`, those
     /// related to one ([`Self::related`]), those related to one of them,
     /// and those any of these is a join of ([`joins`]).
@@ -746,7 +741,6 @@ impl Space {
 
     /// Every axiom over the quantities of `relevant` contexts.
     fn axioms(&self, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
-        let card = |c: &Context| self.term(&FactKind::Cardinality(c.clone()));
         // Each relevant context's key quantities.
         let mut keys: BTreeMap<&Context, Vec<&FactKind>> = BTreeMap::new();
         for q in self.terms.keys() {
@@ -757,7 +751,7 @@ impl Space {
         let mut out = same_rows(self, relevant);
         let buckets = self.buckets();
         for a in relevant {
-            if card(a).is_none() {
+            if self.card(a).is_none() {
                 continue;
             }
             for b in buckets.get(&bases(a)).into_iter().flatten().filter(|b| relevant.contains(**b) && **b != a) {
@@ -822,8 +816,7 @@ pub fn same_rows(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
 ///   B)`.
 /// - **Why**: fewer rows have fewer values, within the same range.
 pub fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Context, b: &Context) -> Vec<Axiom> {
-    let card = |c: &Context| space.term(&FactKind::Cardinality(c.clone()));
-    let (Some(ca), Some(cb)) = (card(a), card(b)) else { return vec![] };
+    let (Some(ca), Some(cb)) = (space.card(a), space.card(b)) else { return vec![] };
     let mut out = vec![Axiom { claim: ca.le(cb), rule: "subset" }];
     // Each key of `a` that is one of `b`'s, over rows among `b`'s, and the
     // same once there are as many rows.
@@ -859,8 +852,7 @@ pub fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Cont
 ///   be among the other's (a row may lose its partner and be padded), so
 ///   nothing is said of their values.
 pub fn fewer(space: &Space, a: &Context, b: &Context) -> Vec<Axiom> {
-    let card = |c: &Context| space.term(&FactKind::Cardinality(c.clone()));
-    match (card(a), card(b)) {
+    match (space.card(a), space.card(b)) {
         (Some(ca), Some(cb)) if space.fewer(a, b) => vec![Axiom { claim: ca.le(cb), rule: "fewer" }],
         _ => vec![],
     }
@@ -900,8 +892,7 @@ fn key_within(a: &FactKind, b: &FactKind) -> bool {
 /// ⇒ |D| − |D ∧ P| ≤ |orders| − |orders ∧ P|
 /// ```
 pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
-    let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
-    let (Some(cd), Some(cc), true) = (card(d), card(c), contain::subset(d, c)) else { return vec![] };
+    let (Some(cd), Some(cc), true) = (space.card(d), space.card(c), contain::subset(d, c)) else { return vec![] };
     let Context::Spj { preds: pc, .. } = c else { return vec![] };
     let mut out = vec![];
     for cp in relevant {
@@ -914,7 +905,7 @@ pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Con
         if dp == *d {
             continue;
         }
-        if let (Some(ccp), Some(cdp)) = (card(cp), card(&dp)) {
+        if let (Some(ccp), Some(cdp)) = (space.card(cp), space.card(&dp)) {
             let claim = Int::sub(&[cd, cdp]).le(Int::sub(&[cc, ccp]));
             out.push(Axiom { claim, rule: "failing rows" });
         }
@@ -936,25 +927,23 @@ pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Con
 /// ⇒ |lineitem ∧ P| = |lineitem| ⇒ |D ∧ P| = |D|
 /// ```
 pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
-    let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let mut out = vec![];
     for c in relevant {
-        let (Context::Spj { tables: tc, atoms: ac, preds: pc, exists: ec }, Some(cc)) = (c, card(c)) else { continue };
+        let (Context::Spj { preds: pc, .. }, Some(cc)) = (c, space.card(c)) else { continue };
         for cp in relevant {
             let Context::Spj { preds, .. } = cp else { continue };
             if cp == c || !same_inputs(cp, c) || !preds.is_superset(pc) {
                 continue;
             }
-            let Some(ccp) = card(cp) else { continue };
+            let Some(ccp) = space.card(cp) else { continue };
             let p: BTreeSet<_> = preds.difference(pc).cloned().collect();
             for d in relevant {
-                let Context::Spj { tables: td, atoms: ad, preds: pd, exists: ed } = d else { continue };
-                let wider = td.len() + ad.len() > tc.len() + ac.len();
-                if !wider || !td.is_superset(tc) || !ad.is_superset(ac) || !ed.is_superset(ec) || !pd.is_superset(pc) || pd.is_superset(&p) {
+                let Context::Spj { preds: pd, .. } = d else { continue };
+                if !joins(d, c) || pd.is_superset(&p) {
                     continue;
                 }
                 let dp = d.filter(&p).canonical();
-                if let (Some(cd), Some(cdp)) = (card(d), card(&dp)) {
+                if let (Some(cd), Some(cdp)) = (space.card(d), space.card(&dp)) {
                     out.push(Axiom { claim: ccp.eq(cc).implies(cdp.eq(cd)), rule: "implied" });
                 }
             }
@@ -970,9 +959,8 @@ pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
 ///   on the same `on` and `O` instead.
 /// - **Why**: each row of `K` has a partner or has none.
 pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
-    let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let Context::Spj { tables, atoms, preds, exists } = s else { return vec![] };
-    let Some(semi) = card(s) else { return vec![] };
+    let Some(semi) = space.card(s) else { return vec![] };
     let mut out = vec![];
     for e in exists.iter().filter(|e| e.kind == ExistsKind::Semi) {
         let mut rest = exists.clone();
@@ -982,7 +970,7 @@ pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
         let mut with_anti = rest;
         with_anti.insert(Exists { kind: ExistsKind::Anti, on: e.on.clone(), other: e.other.clone() });
         let anti = spj(with_anti).canonical();
-        if let (Some(k), Some(a)) = (card(&kept), card(&anti)) {
+        if let (Some(k), Some(a)) = (space.card(&kept), space.card(&anti)) {
             out.push(Axiom { claim: Int::add(&[semi, a]).eq(k), rule: "semi and anti" });
         }
     }
@@ -1054,7 +1042,6 @@ fn of_tables(keys: &BTreeSet<Term>, tables: &BTreeSet<String>) -> bool {
 /// ⇒ ndv(o_custkey | D) ≤ ndv(o_custkey | orders) and ≤ |orders|
 /// ```
 pub fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
-    let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let mut out = vec![];
     for d in relevant {
         let Some(qds) = keys.get(d) else { continue };
@@ -1067,7 +1054,7 @@ pub fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant:
                 let td = space.term(qd).unwrap();
                 match qd {
                     FactKind::Distinct { keys: kd, .. } if of_tables(kd, tc) => {
-                        if let Some(n) = card(c) {
+                        if let Some(n) = space.card(c) {
                             out.push(Axiom { claim: td.le(n), rule: "wider rows" });
                         }
                         for qc in keys.get(c).into_iter().flatten() {
@@ -1110,10 +1097,9 @@ pub fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant:
 /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
 /// ```
 pub fn disjoint(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
-    let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
     let mut groups: BTreeMap<_, Vec<(&BTreeSet<Term>, &Int)>> = BTreeMap::new();
     for c in relevant {
-        if let (Context::Spj { tables, atoms, preds, exists }, Some(n)) = (c, card(c)) {
+        if let (Context::Spj { tables, atoms, preds, exists }, Some(n)) = (c, space.card(c)) {
             groups.entry((tables, atoms, exists)).or_default().push((preds, n));
         }
     }
@@ -1145,58 +1131,14 @@ fn contradict(a: &BTreeSet<Term>, b: &BTreeSet<Term>) -> bool {
     let ranges = |preds: &BTreeSet<Term>| {
         let mut out: BTreeMap<String, Vec<(Operator, ScalarValue)>> = BTreeMap::new();
         for p in preds {
-            if let Some((e, op, v)) = comparison(&p.expr) {
+            if let Some((e, op, v)) = contain::comparison(&p.expr) {
                 out.entry(e.to_string()).or_default().push((op, v));
             }
         }
         out
     };
     let (ra, rb) = (ranges(a), ranges(b));
-    ra.iter().any(|(e, xs)| rb.get(e).is_some_and(|ys| xs.iter().any(|x| ys.iter().any(|y| apart(x, y)))))
-}
-
-/// `e op v`, for a comparison of an expression with a non-NULL literal, the
-/// literal on the right as [`Term`] writes it.
-pub(crate) fn comparison(e: &Expr) -> Option<(&Expr, Operator, ScalarValue)> {
-    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = e else { return None };
-    if !matches!(op, Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq) {
-        return None;
-    }
-    let v = match right.as_ref() {
-        Expr::Literal(v, _) => v.clone(),
-        Expr::Cast(c) => match c.expr.as_ref() {
-            Expr::Literal(v, _) => v.cast_to(c.field.data_type()).ok()?,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    (!v.is_null() && !matches!(left.as_ref(), Expr::Literal(..))).then_some((left.as_ref(), *op, v))
-}
-
-/// True if no value satisfies both `_ x.0 x.1` and `_ y.0 y.1`.
-fn apart(x: &(Operator, ScalarValue), y: &(Operator, ScalarValue)) -> bool {
-    // Each as the least and greatest value it lets through, and whether
-    // that end is let through itself.
-    type End = Option<(ScalarValue, bool)>;
-    let ends = |(op, v): &(Operator, ScalarValue)| -> (End, End) {
-        match op {
-            Operator::Eq => (Some((v.clone(), true)), Some((v.clone(), true))),
-            Operator::Lt => (None, Some((v.clone(), false))),
-            Operator::LtEq => (None, Some((v.clone(), true))),
-            Operator::Gt => (Some((v.clone(), false)), None),
-            _ => (Some((v.clone(), true)), None),
-        }
-    };
-    let below = |hi: &End, lo: &End| match (hi, lo) {
-        (Some((h, hin)), Some((l, lin))) => match h.partial_cmp(l) {
-            Some(Ordering::Less) => true,
-            Some(Ordering::Equal) => !(*hin && *lin),
-            _ => false,
-        },
-        _ => false,
-    };
-    let ((xlo, xhi), (ylo, yhi)) = (ends(x), ends(y));
-    below(&xhi, &ylo) || below(&yhi, &xlo)
+    ra.iter().any(|(e, xs)| rb.get(e).is_some_and(|ys| xs.iter().any(|x| ys.iter().any(|y| contain::apart(x, y)))))
 }
 
 /// The tables `ctx` draws on, by base table, each as often as it does.

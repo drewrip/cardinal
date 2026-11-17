@@ -5,7 +5,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 use z3::ast::Int;
 
-use super::{aligned, child_column, col, column_index, exact_index, key_column, strip_alias};
+use super::{aligned, child_column, col, exact_index, key_column, strip_alias};
 use crate::analysis::{Analyzer, LinkKind, Rel, Rows, ScanKind, int, min};
 use crate::domain::Facts;
 use crate::postprocess::Role;
@@ -248,10 +248,7 @@ impl<'a> Analyzer<'a> {
             return;
         }
         let (a, b) = &join.on[0];
-        let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { return };
-        if join.left.schema().field(ia).data_type().is_floating() || join.right.schema().field(ib).data_type().is_floating() {
-            return;
-        }
+        let Some((ia, ib)) = exact_pair(join, a, b) else { return };
         let non_null = |side: &LogicalPlan, rel: &Rel, i: usize| {
             let nullable = !rel.facts.dom(&col(side, i), side.schema()).never_null();
             &rel.ndv[i] - int(nullable as u64)
@@ -287,11 +284,8 @@ impl<'a> Analyzer<'a> {
         if fr {
             self.kept(o, r, nl);
         }
-        for (a, b) in &join.on {
-            let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { continue };
-            if !join.left.schema().field(ia).data_type().is_floating() && !join.right.schema().field(ib).data_type().is_floating() {
-                self.assert_as(Role::Link, o.ndv[ia].eq(&o.ndv[nl + ib]));
-            }
+        for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
+            self.assert_as(Role::Link, o.ndv[ia].eq(&o.ndv[nl + ib]));
         }
     }
 
@@ -458,8 +452,7 @@ impl<'a> Analyzer<'a> {
             return;
         }
         let nl = join.left.schema().fields().len();
-        for (a, b) in &join.on {
-            let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { continue };
+        for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
             if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib])
                 && o.unit[ia] == o.unit[nl + ib]
             {
@@ -514,10 +507,8 @@ impl<'a> Analyzer<'a> {
         let keys: Vec<(usize, usize)> = join
             .on
             .iter()
-            .filter_map(|(a, b)| {
-                let (ia, ib) = (exact_index(&join.left, a)?, exact_index(&join.right, b)?);
-                Some(if semi { (ia, ib) } else { (ib, ia) })
-            })
+            .filter_map(|(a, b)| exact_pair(join, a, b))
+            .map(|(ia, ib)| if semi { (ia, ib) } else { (ib, ia) })
             .collect();
         self.link(o, LinkKind::Wider, if semi { r } else { l }, &keys);
     }
@@ -540,6 +531,12 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+/// The positions of equi-key pair `a = b` in `join`'s left and right
+/// inputs, if both are columns and not floats ([`exact_index`]).
+pub(crate) fn exact_pair(join: &Join, a: &Expr, b: &Expr) -> Option<(usize, usize)> {
+    Some((exact_index(&join.left, a)?, exact_index(&join.right, b)?))
+}
+
 /// Positions of `side`'s columns that are never NULL on a row matched by
 /// `join`: those never NULL on `side`, and its equi-key columns `keys`
 /// (unless NULL keys match).
@@ -548,7 +545,7 @@ pub(crate) fn never_null_when_matched(join: &Join, side: &LogicalPlan, facts: &F
     let keys_non_null = join.null_equality != NullEquality::NullEqualsNull;
     (0..schema.fields().len())
         .filter(|&i| {
-            let c = Expr::Column(Column::from(schema.qualified_field(i)));
+            let c = super::field_col(schema, i);
             let key = keys_non_null && keys.iter().any(|k| strip_alias(k) == &c);
             key || facts.dom(&c, schema).never_null()
         })

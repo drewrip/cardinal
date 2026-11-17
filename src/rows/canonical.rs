@@ -471,7 +471,8 @@ pub(crate) fn each_order<'a>(
     }
 }
 
-fn permutations<'a>(items: &[&'a String]) -> Vec<Vec<&'a String>> {
+/// Every order of `items`.
+pub(crate) fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
     if items.len() <= 1 {
         return vec![items.to_vec()];
     }
@@ -480,7 +481,7 @@ fn permutations<'a>(items: &[&'a String]) -> Vec<Vec<&'a String>> {
         let mut rest = items.to_vec();
         let first = rest.remove(i);
         for mut p in permutations(&rest) {
-            p.insert(0, first);
+            p.insert(0, first.clone());
             out.push(p);
         }
     }

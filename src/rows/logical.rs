@@ -174,7 +174,7 @@ impl Logical {
                 (ctx, keys, pass(0))
             }
             LogicalPlan::Aggregate(agg) => {
-                if agg.group_expr.iter().any(|e| matches!(e, Expr::GroupingSet(_))) {
+                if crate::rules::grouping_sets(agg) {
                     return (unsupported(), None, vec![]);
                 }
                 let keys: Option<Vec<Expr>> = agg.group_expr.iter().map(|e| self.resolve(nodes, i, e).ok()).collect();

@@ -135,8 +135,7 @@ impl Analysis {
     /// DataFusion's default catalog and schema (`datafusion.public`). It
     /// takes no reference plans.
     pub fn logical(plan: LogicalPlan) -> Builder<'static> {
-        let defaults = ("datafusion".to_string(), "public".to_string());
-        Builder::new(Query::DataFusion { plan, base: None, defaults }, None)
+        Builder::new(Query::DataFusion { plan, base: None, defaults: default_names() }, None)
     }
 }
 
@@ -180,27 +179,27 @@ impl<'c> Builder<'c> {
     pub fn build(self) -> Result<Analysis> {
         let options = &self.options;
         let catalog = self.catalog.as_ref().map(CatalogRef::get);
-        let observed = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
         let (plan, defaults, base) = match &self.query {
             Query::DataFusion { plan, base, defaults } => (plan.clone(), defaults.clone(), base.as_ref()),
             Query::Observed(p) => {
                 let catalog = catalog.expect("an engine's plan comes with its catalog");
-                (catalog.to_logical(p)?, ("datafusion".into(), "public".into()), None)
+                (catalog.to_logical(p)?, default_names(), None)
             }
         };
+        // An engine's plan, and a reference plan, scan the catalog's tables
+        // by their bare names.
+        let referenced = |scan: &TableScan| base_kind(&scan.table_name, &defaults.0, &defaults.1);
         let resolve = |scan: &TableScan| match (&self.query, base) {
-            (Query::Observed(_), _) => observed(scan),
+            (Query::Observed(_), _) => referenced(scan),
             (_, Some(base)) => source_as_provider(&scan.source)
                 .ok()
                 .and_then(|p| base.get(&provider_ptr(&p)).cloned())
                 .unwrap_or(ScanKind::NonBase),
             (_, None) => {
                 let work = source_as_provider(&scan.source).is_ok_and(|p| p.downcast_ref::<CteWorkTable>().is_some());
-                if work { ScanKind::NonBase } else { base_kind(&scan.table_name, &defaults.0, &defaults.1) }
+                if work { ScanKind::NonBase } else { referenced(scan) }
             }
         };
-        // A reference plan scans the catalog's tables, by their bare names.
-        let referenced = |scan: &TableScan| base_kind(&scan.table_name, &defaults.0, &defaults.1);
         let plans = match (self.plans.is_empty(), catalog) {
             (true, _) => vec![],
             (false, Some(c)) => joint::translate(c, &self.plans),
@@ -277,6 +276,19 @@ fn analyze(
 /// it stay `Send`.
 fn provider_ptr(p: &Arc<dyn TableProvider>) -> usize {
     Arc::as_ptr(p) as *const () as usize
+}
+
+/// DataFusion's default catalog and schema, which names without a catalog
+/// of their own resolve in.
+fn default_names() -> (String, String) {
+    ("datafusion".to_string(), "public".to_string())
+}
+
+/// The scan kind of a table by its bare name, in the default catalog and
+/// schema.
+pub(crate) fn bare_kind(table: &str) -> ScanKind {
+    let (catalog, schema) = default_names();
+    base_kind(&TableReference::bare(table), &catalog, &schema)
 }
 
 /// Canonical identity and display name for a base table reference.
