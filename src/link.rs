@@ -1,57 +1,55 @@
-//! Axioms: what holds of any data, relating the quantities of rows.
+//! Link: properties between rows that only their contexts relate.
 //!
-//! A rule ([`crate::rules`]) relates one operator to its inputs. An axiom
-//! holds of rows whatever operator made them: rows among another's are
-//! fewer, two filters that cannot both hold split their input. Notation as
-//! in [`crate::facts`](crate::facts#notation).
-//!
-//! # Spec
-//!
-//! - **Input**: what the [rules](crate::rules) recorded as they visited the
-//!   plan: each op output, with its rows, `ndv`, `min` and `max` variables
-//!   and the value domains, keys and origin found of its rows; the nodes;
-//!   and the declared keys.
-//! - **Output**: ground Z3 assertions, each tagged by its axiom: a trace
-//!   names the function that asserted it, or the axiom's name, and the node
-//!   it is about. No quantifiers: Rust decides where an axiom applies, Z3
-//!   does the arithmetic.
-//! - **Guarantees**: each axiom holds for any data; a schema axiom for any
-//!   data satisfying the declared keys. The tests deciding where an
-//!   axiom applies are conservative: missing a case loses an axiom, never
-//!   adds a wrong one.
-//! - **Not done**: contexts outside the relevant set are not related.
-//!
-//! [`assert_all`] asserts every axiom, once the rules are done, before any
-//! fact. They are grouped by what they range over.
-//!
-//! # Axioms between contexts
-//!
-//! [`Analyzer::between_contexts`] gives each operator's rows its
-//! [`Context`], canonicalized, and collects the quantities of those
-//! contexts in a [`Space`]. The functions below relate them, wherever terms
-//! for them exist, and each [`Axiom`] carries its name.
+//! The [rules](crate::rules) apply [properties] where the
+//! plan's shape makes the relationship plain: an operator and its input,
+//! one op output, one table's origins. Link finds the rest: properties
+//! between the rows of operators whose canonical [`Context`]s are equal or
+//! contain one another, though no path of the plan relates them. Notation
+//! as in [`crate::facts`](crate::facts#notation).
 //!
 //! ```text
-//!  operators ──context──▶ Space: |C|, ndv(K | C), min, max ──axioms──▶ Z3
+//!  operators ──context──▶ Space: |C|, ndv(K | C), min, max ──finders──▶ Z3
 //!                         of the relevant contexts
 //! ```
 //!
-//! | Axiom | Claim |
-//! |---|---|
-//! | `same rows` | [`same_rows`], [`subset`] |
-//! | `subset` | [`subset`] |
-//! | `fewer` | [`fewer`] |
-//! | `failing rows` | [`failing`] |
-//! | `implied` | [`implied`] |
-//! | `semi and anti` | [`split`] |
-//! | `fewer keys` | [`fewer_keys`] |
-//! | `wider rows` | [`wider`] |
-//! | `disjoint` | [`disjoint`] |
+//! [`link_all`] gives each operator's rows its context, canonicalized, and
+//! collects the quantities of those contexts in a [`Space`], each with the
+//! terms (variables) that stand for it. Each finder below decides where a
+//! property applies, and the property gives the claims. No quantifiers:
+//! Rust decides where a property applies, Z3 does the arithmetic.
+//!
+//! # Soundness
+//!
+//! Each claim holds for any data (satisfying the declared keys) if its
+//! premise does. The premises rest on:
+//!
+//! - equal canonical contexts being the same rows on every run: how plans
+//!   name their rows (`rows::logical`, `facts::state`) and canonicalize
+//!   the names (`rows::canonical`);
+//! - `contain::subset`, `contain::fewer` and `joins` holding for any data;
+//! - renamings of a table's instances (`contain::renamed_in`,
+//!   `renamed_kind`) renaming keys with their contexts.
+//!
+//! Missing a case loses a claim, never adds a wrong one.
+//!
+//! # Finders
+//!
+//! | Finder | Property | Rule name |
+//! |---|---|---|
+//! | [`eq_context`] | [`same`](properties::same), one pair per quantity | `eq context` |
+//! | [`subset_context`] | [`within`](properties::within), [`same_if_as_many`](properties::same_if_as_many) | `subset` |
+//! | [`fewer`] | [`fewer`](properties::fewer) | `fewer` |
+//! | [`failing`] | [`failing`](properties::failing) | `failing rows` |
+//! | [`implied`] | [`implied`](properties::implied) | `implied` |
+//! | [`split`] | [`split`](properties::split) | `semi and anti` |
+//! | [`fewer_keys`] | [`fewer_keys`](properties::fewer_keys) | `fewer keys` |
+//! | [`wider_context`] | [`values_of_rows`](properties::values_of_rows), [`within`](properties::within) | `wider rows` |
+//! | [`disjoint_context`] | [`disjoint`](properties::disjoint) | `disjoint` |
 //!
 //! ## Relevant contexts
 //!
-//! Only contexts near the query's are related. Starting from the contexts
-//! of the query's operators, add each context two contexts relate to (one
+//! Only contexts near the operators' are related. Starting from the
+//! contexts of the operators' rows, add each context two contexts relate to (one
 //! is ⊆ or has fewer rows than the other, or both are SPJs with the same
 //! inputs and conditions) among those over the same base tables, twice;
 //! then each context any of these [joins](#relations-between-contexts).
@@ -70,6 +68,12 @@
 //!   `B` a full join on the same condition, inputs pairwise `⊆` either way.
 //! - `D` joins `C`: both SPJs, `D` with more inputs, and all of `C`'s
 //!   tables, atoms, conditions and predicates.
+//!
+//! # Known gaps
+//!
+//! `contain::apart` orders strings by their bytes, which is sound only for
+//! byte-order collations. Only plans or facts from engines with other
+//! collations reach it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,29 +89,22 @@ use crate::rows::canonical::Canonicals;
 use crate::rows::contain::{self, renamed_kind};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
-use crate::rows::{Context, Exists, ExistsKind, Term};
+use crate::rows::{Context, Exists, ExistsKind, Term, bases};
 use crate::properties::{self, Claim, Pair};
 
-impl<'a> Analyzer<'a> {
-    /// Every [axiom between contexts](self#axioms-between-contexts)
-    /// over the quantities of this analysis's own operators, each
-    /// operator's rows given the context facts give them, among the
-    /// [relevant contexts](self#relevant-contexts).
-    pub fn between_contexts(&mut self) {
-        let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
-        let logical = Logical::new(&self.nodes, &scans);
-        let mut space = Space::default();
-        let seeds = add_nodes(&mut space, &self.nodes, &logical);
-        let relevant = space.relevant(&seeds);
-        for a in space.axioms(&relevant) {
-            self.assert_property(a.rule, a.claims);
-        }
+/// Asserts every property link finds between the rows of `a`'s operators,
+/// once its rules have visited every plan: each operator's rows given the
+/// context facts give them, among the
+/// [relevant contexts](self#relevant-contexts).
+pub fn link_all(a: &Analyzer) {
+    let scans: Vec<(String, String)> = a.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
+    let logical = Logical::new(&a.nodes, &scans);
+    let mut space = Space::default();
+    let seeds = add_nodes(&mut space, &a.nodes, &logical);
+    let relevant = space.relevant(&seeds);
+    for axiom in space.axioms(&relevant) {
+        a.assert_property(axiom.rule, axiom.claims);
     }
-}
-
-/// Asserts every axiom of `a`, once its rules have visited every plan.
-pub fn assert_all(a: &mut Analyzer) {
-    a.between_contexts();
 }
 
 /// Adds the quantities of `nodes`' rows, named by `logical`, to `space`.
@@ -164,9 +161,9 @@ fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<C
     contexts
 }
 
-/// The claims of a property, where an axiom found it applies, and the
-/// axiom's name.
-pub(crate) struct Axiom {
+/// The claims of a property where a finder found it applies, and the
+/// finder's rule name.
+pub struct Axiom {
     pub rule: &'static str,
     pub claims: Vec<Claim>,
 }
@@ -264,7 +261,7 @@ impl Space {
                 keys.entry(over(q)).or_default().push(q);
             }
         }
-        let mut out = same_rows(self, relevant);
+        let mut out = eq_context(self, relevant);
         let buckets = self.buckets();
         for a in relevant {
             if self.card(a).is_none() {
@@ -272,7 +269,7 @@ impl Space {
             }
             for b in buckets.get(&bases(a)).into_iter().flatten().filter(|b| relevant.contains(**b) && **b != a) {
                 if self.subset(a, b) {
-                    out.extend(subset(self, &keys, a, b));
+                    out.extend(subset_context(self, &keys, a, b));
                     out.extend(failing(self, relevant, a, b));
                 } else {
                     out.extend(fewer(self, a, b));
@@ -282,8 +279,8 @@ impl Space {
             out.extend(fewer_keys(self, &keys, a));
         }
         out.extend(implied(self, relevant));
-        out.extend(wider(self, &keys, relevant));
-        out.extend(disjoint(self, relevant));
+        out.extend(wider_context(self, &keys, relevant));
+        out.extend(disjoint_context(self, relevant));
         out
     }
 
@@ -304,19 +301,16 @@ fn over(q: &FactKind) -> &Context {
     q.over()
 }
 
-/// `same rows`, between the terms of one quantity. [`subset`] states it
-/// between rows among others' too.
+/// `eq context`, between the terms of one quantity.
 ///
-/// - **Claim**: `t = t'` for any two terms of one quantity. And for `A ⊆ B`:
-///   `|A| = |B| ⇒` each key quantity of `A` equals `B`'s of the same keys.
-/// - **Why**: one quantity has one value; `A ⊆ B` with as many rows makes
-///   them the same rows.
-pub(crate) fn same_rows(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+/// - **Claim**: `t = t'` for any two terms of one quantity.
+/// - **Why**: they count the same rows, of one context.
+pub fn eq_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let mut out = vec![];
     for (q, terms) in &space.terms {
         if relevant.contains(over(q)) {
             for t in &terms[1..] {
-                out.push(Axiom::new("same rows", properties::same(&[pair(q, t, &terms[0])])));
+                out.push(Axiom::new("eq context", properties::same(&[pair(q, t, &terms[0])])));
             }
         }
     }
@@ -334,14 +328,15 @@ fn pair<'a>(q: &FactKind, a: &'a Int, b: &'a Int) -> Pair<'a> {
 }
 
 /// `subset`, for `A ⊆ B` ([relations](self#relations-between-contexts)),
-/// with `keys` each context's key quantities. Also the `same rows` claim
-/// between them ([`same_rows`]).
+/// with `keys` each context's key quantities.
 ///
 /// - **Claim**: for `A ⊆ B`, `A ≠ B`: `|A| ≤ |B|`; `ndv(K | A) ≤ ndv(K' |
 ///   B)` for `K ⊆ K'`; `min(k | A) ≥ min(k | B)`; `max(k | A) ≤ max(k |
-///   B)`.
-/// - **Why**: fewer rows have fewer values, within the same range.
-pub(crate) fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Context, b: &Context) -> Vec<Axiom> {
+///   B)`. And `|A| = |B| ⇒` each key quantity of `A` equals `B`'s of the
+///   same keys.
+/// - **Why**: fewer rows have fewer values, within the same range; as many
+///   are the same rows.
+pub fn subset_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Context, b: &Context) -> Vec<Axiom> {
     let (Some(ca), Some(cb)) = (space.card(a), space.card(b)) else { return vec![] };
     // Each key of `a` that is one of `b`'s, over rows among `b`'s, and the
     // same once there are as many rows.
@@ -360,7 +355,7 @@ pub(crate) fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a
     }
     vec![
         Axiom::new("subset", properties::within(&within)),
-        Axiom::new("same rows", properties::same_if_as_many(ca, cb, &same)),
+        Axiom::new("subset", properties::same_if_as_many(ca, cb, &same)),
     ]
 }
 
@@ -371,7 +366,7 @@ pub(crate) fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a
 ///   once padded, so narrowing an input never adds rows. Its rows need not
 ///   be among the other's (a row may lose its partner and be padded), so
 ///   nothing is said of their values.
-pub(crate) fn fewer(space: &Space, a: &Context, b: &Context) -> Vec<Axiom> {
+pub fn fewer(space: &Space, a: &Context, b: &Context) -> Vec<Axiom> {
     match (space.card(a), space.card(b)) {
         (Some(ca), Some(cb)) if space.fewer(a, b) => vec![Axiom::new("fewer", properties::fewer(ca, cb))],
         _ => vec![],
@@ -411,7 +406,7 @@ fn key_within(a: &FactKind, b: &FactKind) -> bool {
 /// D = orders ∧ o_status = 'F' ⊆ C = orders, P = {o_price > 100}
 /// ⇒ |D| − |D ∧ P| ≤ |orders| − |orders ∧ P|
 /// ```
-pub(crate) fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
+pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
     let (Some(cd), Some(cc), true) = (space.card(d), space.card(c), contain::subset(d, c)) else { return vec![] };
     let Context::Spj { preds: pc, .. } = c else { return vec![] };
     let mut out = vec![];
@@ -445,7 +440,7 @@ pub(crate) fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, 
 /// C = lineitem, P = {l_quantity >= 1}, D = lineitem ⋈ orders
 /// ⇒ |lineitem ∧ P| = |lineitem| ⇒ |D ∧ P| = |D|
 /// ```
-pub(crate) fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let mut out = vec![];
     for c in relevant {
         let (Context::Spj { preds: pc, .. }, Some(cc)) = (c, space.card(c)) else { continue };
@@ -477,7 +472,7 @@ pub(crate) fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom>
 ///   condition, `K` it without it, and `K ▷ O` it with the anti condition
 ///   on the same `on` and `O` instead.
 /// - **Why**: each row of `K` has a partner or has none.
-pub(crate) fn split(space: &Space, s: &Context) -> Vec<Axiom> {
+pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
     let Context::Spj { tables, atoms, preds, exists } = s else { return vec![] };
     let Some(semi) = space.card(s) else { return vec![] };
     let mut out = vec![];
@@ -508,7 +503,7 @@ fn width(q: &FactKind) -> usize {
 ///
 /// - **Claim**: `ndv(K | C) ≤ ndv(K' | C)` for `K ⊊ K'`.
 /// - **Why**: fewer keys have no more combinations.
-pub(crate) fn fewer_keys(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, c: &Context) -> Vec<Axiom> {
+pub fn fewer_keys(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, c: &Context) -> Vec<Axiom> {
     let mut out = vec![];
     for qa in keys.get(c).into_iter().flatten() {
         let FactKind::Distinct { keys: ka, .. } = qa else { continue };
@@ -560,7 +555,7 @@ fn of_tables(keys: &BTreeSet<Term>, tables: &BTreeSet<String>) -> bool {
 /// D = orders ⋈ lineitem on o_orderkey = l_orderkey
 /// ⇒ ndv(o_custkey | D) ≤ ndv(o_custkey | orders) and ≤ |orders|
 /// ```
-pub(crate) fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn wider_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let mut out = vec![];
     for d in relevant {
         let Some(qds) = keys.get(d) else { continue };
@@ -615,7 +610,7 @@ pub(crate) fn wider(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, re
 /// ```text
 /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
 /// ```
-pub(crate) fn disjoint(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn disjoint_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
     let mut groups: BTreeMap<_, Vec<(&BTreeSet<Term>, &Int)>> = BTreeMap::new();
     for c in relevant {
         if let (Context::Spj { tables, atoms, preds, exists }, Some(n)) = (c, space.card(c)) {
@@ -660,13 +655,6 @@ fn contradict(a: &BTreeSet<Term>, b: &BTreeSet<Term>) -> bool {
     ra.iter().any(|(e, xs)| rb.get(e).is_some_and(|ys| xs.iter().any(|x| ys.iter().any(|y| contain::apart(x, y)))))
 }
 
-/// The tables `ctx` draws on, by base table, each as often as it does.
-pub(crate) fn bases(ctx: &Context) -> Vec<String> {
-    let mut out: Vec<String> = ctx.tables().iter().map(|t| crate::observed::base_table(t).unwrap_or(t).to_string()).collect();
-    out.sort();
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use datafusion::prelude::{cast, col, lit};
@@ -706,7 +694,7 @@ mod tests {
             space.add(FactKind::Cardinality(c.clone()), Int::new_const(v));
         }
         let relevant: BTreeSet<Context> = [orders, early, late].into();
-        let axioms = disjoint(&space, &relevant);
+        let axioms = disjoint_context(&space, &relevant);
         assert_eq!(axioms.len(), 1);
         assert_eq!(axioms[0].claims[0].claim.to_string(), "(<= (+ x y) n)");
     }
@@ -725,7 +713,7 @@ mod tests {
         let mut keys: BTreeMap<&Context, Vec<&FactKind>> = BTreeMap::new();
         let q = key(&joined);
         keys.entry(&joined).or_default().push(&q);
-        let axioms: Vec<String> = wider(&space, &keys, &relevant).iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect();
+        let axioms: Vec<String> = wider_context(&space, &keys, &relevant).iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect();
         assert_eq!(axioms, ["(<= k n)"]);
     }
 }

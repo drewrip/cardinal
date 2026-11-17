@@ -16,7 +16,7 @@ use datafusion::prelude::SessionContext;
 use crate::analysis::{Analyzer, ScanKind};
 use crate::observed::{self, Catalog, ObservedPlan};
 use crate::trace::Trace;
-use crate::{Analysis, Error, Facts, Options, Result, axioms, joint, postprocess};
+use crate::{Analysis, Error, Facts, Options, Result, joint, link, postprocess};
 
 /// An [`Analysis`] being made: the query to bound, the [`Options`], the
 /// executed plans of other queries to analyze it with
@@ -234,7 +234,7 @@ fn analyze(
     a.resolve = referenced;
     let (pins, owners) = joint::visit(&mut a, plan, plans, options);
     a.disjoint_origins();
-    axioms::assert_all(&mut a);
+    link::link_all(&a);
     let pinned = joint::assert_pins(&a, &pins);
 
     let root_name = a.name_of(&root);

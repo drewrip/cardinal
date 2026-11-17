@@ -49,9 +49,9 @@
 //!    rows related to them, among the query's constraints as a claim on the
 //!    operator's variable (with
 //!    [`Options::check_facts`](crate::Options::check_facts), only where it
-//!    is consistent with them). The [`axioms`](crate::axioms) relate the
-//!    operators' quantities in every analysis, so Z3 carries each claim to
-//!    the rest.
+//!    is consistent with them). The [rules](crate::rules) and
+//!    [link](crate::link) relate the operators' quantities in every
+//!    analysis, so Z3 carries each claim to the rest.
 //!
 //! A fact's query ([`FactKind::count_sql_in`]) counts it on an engine, to
 //! check it or to give it.

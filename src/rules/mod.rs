@@ -28,8 +28,10 @@
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
 //!   this against data).
-//! - **Not done**: what holds between op outputs only their contexts
-//!   relate, or of one table's rows, is the [axioms](crate::axioms)'.
+//! - **Not done**: rules assert what each operator adds, and apply
+//!   [properties](crate::properties) where the plan makes the relationship
+//!   plain: an input, one op output, one table's origins. Relationships
+//!   only contexts reveal are [link](crate::link)'s.
 //!
 //! # Notation
 //!
@@ -56,13 +58,11 @@
 //! | `Union` | [`Analyzer::union`] |
 //! | `Values` | [`Analyzer::values`] |
 //! | `EmptyRelation` | [`Analyzer::empty_relation`] |
+//! | every op output, and its input | [`op_output`] |
 //!
-//! Unnest, recursive CTEs and the rest get no rule: only those on every op
-//! output ([`op_output`]). Their inputs are still visited, so their scans count.
-//!
-//! A rule also states what follows from its output's rows being an
-//! input's: the same rows, a subset of them, or each holding one
-//! ([`op_output`]).
+//! Unnest, recursive CTEs and the rest get no rule of their own: only those
+//! on every op output. Their inputs are still visited, so their scans
+//! count.
 //!
 //! A trace names each constraint's rule by the function that asserted it:
 //! the rule's own, or a part of it it calls ([`Analyzer::join_sides`],
@@ -71,7 +71,7 @@
 
 mod aggregate;
 pub(crate) mod join;
-pub(crate) mod op_output;
+pub mod op_output;
 
 use std::collections::BTreeSet;
 

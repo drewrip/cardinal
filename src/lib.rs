@@ -26,7 +26,7 @@
 //!    the query could share rows with ([`joint`]), one rule per operator,
 //!    asserting what the operator adds and recording each relation it makes
 //!    and how its rows are its inputs'.
-//! 2. [`axioms`]: what holds of any rows whatever made them, asserted over
+//! 2. [`link`]: what holds of any rows whatever made them, asserted over
 //!    those records and between [contexts](rows), in every analysis.
 //! 3. [`joint`]: each operator of a reference plan pinned to the rows it
 //!    was counted with; the plans' own variables then substituted away.
@@ -71,7 +71,7 @@
 //! ```
 
 pub mod analysis;
-pub mod axioms;
+pub mod link;
 mod bounds;
 mod builder;
 mod domain;
@@ -81,7 +81,7 @@ pub mod joint;
 pub mod observed;
 mod origin;
 pub mod postprocess;
-mod properties;
+pub mod properties;
 pub mod rows;
 pub mod rules;
 pub mod trace;

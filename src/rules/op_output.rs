@@ -12,7 +12,7 @@
 //! | a count is made (`Analyzer::new_var`) | [`non_negative`](Analyzer::non_negative) |
 //! | a stored table is scanned ([`Analyzer::scan`]) | [`composite_key`](Analyzer::composite_key), [`referenced_size`](Analyzer::referenced_size), with reference plans ([`crate::joint`]) only |
 //! | an output is made (`Analyzer::fresh`) | [`ndv_within_rows`](Analyzer::ndv_within_rows), [`nonempty_ndv`](Analyzer::nonempty_ndv), [`boolean_ndv`](Analyzer::boolean_ndv) |
-//! | its rule is done ([`Analyzer::finish`]), by its domains | [`empty_domain`](Analyzer::empty_domain), [`ndv_within_domain`](Analyzer::ndv_within_domain), [`range_within_domain`](Analyzer::range_within_domain) |
+//! | its rule is done (`Analyzer::finish`), by its domains | [`empty_domain`](Analyzer::empty_domain), [`ndv_within_domain`](Analyzer::ndv_within_domain), [`range_within_domain`](Analyzer::range_within_domain) |
 //! | 〃, by its subset bounds | [`bounded_sum`](Analyzer::bounded_sum), [`nulls_and_values`](Analyzer::nulls_and_values) |
 //! | 〃, by its keys | [`key_ndv`](Analyzer::key_ndv), `unique_columns` |
 //! | every plan is visited, of one table's outputs | [`disjoint_origins`](Analyzer::disjoint_origins) |
@@ -51,7 +51,7 @@ use crate::properties::{self, Claim, Pair};
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Min` and `Max`, if
 /// both have them in one unit. A cast of an integer to a decimal keeps the
 /// value, not the count.
-pub(crate) fn ranges<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
+pub fn ranges<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out = vec![];
     for &(j, i) in columns {
         if o.unit[j] != l.unit[i] {
@@ -69,14 +69,14 @@ pub(crate) fn ranges<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, us
 
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Ndv`, then their
 /// [`ranges`].
-pub(crate) fn columns<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
+pub fn columns<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out: Vec<Pair> = columns.iter().map(|&(j, i)| Pair::Ndv(&o.ndv[j], &l.ndv[i])).collect();
     out.extend(ranges(o, l, columns));
     out
 }
 
 /// `Card(o.card, l.card)`, then their [`columns`].
-pub(crate) fn with_card<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
+pub fn with_card<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize, usize)]) -> Vec<Pair<'a>> {
     let mut out = vec![Pair::Card(&o.card, &l.card)];
     out.extend(self::columns(o, l, columns));
     out
@@ -84,7 +84,7 @@ pub(crate) fn with_card<'a>(o: &'a OpOutput, l: &'a OpOutput, columns: &[(usize,
 
 /// `o`'s rows are `l`'s: their counts are [`same`](properties::same), and
 /// their ranges [`within`](properties::within).
-pub(crate) fn same_rows(o: &OpOutput, l: &OpOutput, columns: &[(usize, usize)]) -> Vec<Claim> {
+pub fn same_rows(o: &OpOutput, l: &OpOutput, columns: &[(usize, usize)]) -> Vec<Claim> {
     let (counts, ranges): (Vec<Pair>, Vec<Pair>) =
         with_card(o, l, columns).into_iter().partition(|p| matches!(p, Pair::Card(..) | Pair::Ndv(..)));
     let mut out = properties::same(&counts);

@@ -26,7 +26,7 @@ use crate::postprocess::Role;
 
 /// A quantity of rows `a` and the same kind of quantity of rows `b`.
 #[derive(Clone, Copy)]
-pub(crate) enum Pair<'a> {
+pub enum Pair<'a> {
     /// Their cardinalities: `|a|`, `|b|`.
     Card(&'a Int, &'a Int),
     /// Distinct values of some keys of `a`, and of the same keys (or more)
@@ -47,7 +47,7 @@ impl<'a> Pair<'a> {
 }
 
 /// A claim, and its role in liveness.
-pub(crate) struct Claim {
+pub struct Claim {
     pub role: Role,
     pub claim: Bool,
 }
@@ -67,7 +67,7 @@ fn count(claim: Bool) -> Vec<Claim> {
 }
 
 /// `a` and `b` are the same rows: each pair is equal.
-pub(crate) fn same(pairs: &[Pair]) -> Vec<Claim> {
+pub fn same(pairs: &[Pair]) -> Vec<Claim> {
     pairs
         .iter()
         .map(|p| {
@@ -79,7 +79,7 @@ pub(crate) fn same(pairs: &[Pair]) -> Vec<Claim> {
 
 /// Each of `a`'s rows or values is one of `b`'s: `Card`, `Ndv` and `Max`
 /// are `≤`, `Min` `≥`.
-pub(crate) fn within(pairs: &[Pair]) -> Vec<Claim> {
+pub fn within(pairs: &[Pair]) -> Vec<Claim> {
     pairs
         .iter()
         .map(|p| {
@@ -94,7 +94,7 @@ pub(crate) fn within(pairs: &[Pair]) -> Vec<Claim> {
 
 /// `a ⊆ b` with as many rows are the same rows: `|a| = |b| ⇒` each pair is
 /// equal.
-pub(crate) fn same_if_as_many(a: &Int, b: &Int, pairs: &[Pair]) -> Vec<Claim> {
+pub fn same_if_as_many(a: &Int, b: &Int, pairs: &[Pair]) -> Vec<Claim> {
     if pairs.is_empty() {
         return vec![];
     }
@@ -104,38 +104,38 @@ pub(crate) fn same_if_as_many(a: &Int, b: &Int, pairs: &[Pair]) -> Vec<Claim> {
 
 /// `|a| ≤ |b|`, nothing said of values: an outer join over narrower inputs
 /// emits each preserved row once per partner or once padded.
-pub(crate) fn fewer(a: &Int, b: &Int) -> Vec<Claim> {
+pub fn fewer(a: &Int, b: &Int) -> Vec<Claim> {
     count(a.le(b))
 }
 
 /// Rows apart within `whole`: `Σ |part| ≤ |whole|`.
-pub(crate) fn disjoint(parts: &[&Int], whole: &Int) -> Vec<Claim> {
+pub fn disjoint(parts: &[&Int], whole: &Int) -> Vec<Claim> {
     count(Int::add(parts).le(whole))
 }
 
 /// `d ⊆ c`: `d`'s rows failing `P` are among `c`'s, `|d| − |d ∧ P| ≤ |c| −
 /// |c ∧ P|`.
-pub(crate) fn failing(d: &Int, dp: &Int, c: &Int, cp: &Int) -> Vec<Claim> {
+pub fn failing(d: &Int, dp: &Int, c: &Int, cp: &Int) -> Vec<Claim> {
     count(Int::sub(&[d, dp]).le(Int::sub(&[c, cp])))
 }
 
 /// Each row of `d` holds a row of `c`: if every row of `c` satisfies `P`,
 /// so does every row of `d`, `|c ∧ P| = |c| ⇒ |d ∧ P| = |d|`.
-pub(crate) fn implied(c: &Int, cp: &Int, d: &Int, dp: &Int) -> Vec<Claim> {
+pub fn implied(c: &Int, cp: &Int, d: &Int, dp: &Int) -> Vec<Claim> {
     count(cp.eq(c).implies(dp.eq(d)))
 }
 
 /// Each row has a partner or none: `|K ⋉ O| + |K ▷ O| = |K|`.
-pub(crate) fn split(semi: &Int, anti: &Int, kept: &Int) -> Vec<Claim> {
+pub fn split(semi: &Int, anti: &Int, kept: &Int) -> Vec<Claim> {
     count(Int::add(&[semi, anti]).eq(kept))
 }
 
 /// Fewer keys have no more combinations: `ndv(K) ≤ ndv(K')` for `K ⊆ K'`.
-pub(crate) fn fewer_keys(k: &Int, wider: &Int) -> Vec<Claim> {
+pub fn fewer_keys(k: &Int, wider: &Int) -> Vec<Claim> {
     vec![Claim { role: Role::Local, claim: k.le(wider) }]
 }
 
 /// Values of rows each holding a row of `c` are `c`'s: `ndv(K | d) ≤ |c|`.
-pub(crate) fn values_of_rows(ndv: &Int, c: &Int) -> Vec<Claim> {
+pub fn values_of_rows(ndv: &Int, c: &Int) -> Vec<Claim> {
     vec![Claim { role: Role::Flow, claim: ndv.le(c) }]
 }

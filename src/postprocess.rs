@@ -1,6 +1,6 @@
 //! Postprocess: simplifications of the constraints before solving.
 //!
-//! Runs last, after the [rules](crate::rules), [axioms](crate::axioms) and
+//! Runs last, after the [rules](crate::rules), [link](crate::link) and
 //! [facts](crate::facts), when the bounds are searched for: facts arrive
 //! after an analysis is built and change what its constraints need.
 //!
@@ -17,7 +17,7 @@
 //!   column variable or only live ones, and every [`Role::Gen`].
 //! - **Liveness**: a [`Role::Gen`]'s columns are live, and so are those of
 //!   a [`Role::Flow`] that equates a row count with a column's (`X =
-//!   ndv`), as some axioms between contexts do. Otherwise a
+//!   ndv`), as [link](crate::link) may. Otherwise a
 //!   [`Role::Flow`] makes the columns it mentions live if one of them is
 //!   live, but never a column of a node above that one's: liveness flows
 //!   from a node down to the inputs it reads. Per column: its `ndv`, `min`

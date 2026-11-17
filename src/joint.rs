@@ -4,13 +4,13 @@
 //!
 //! No rules read facts off the plans, combine them, or match them to the
 //! query's operators: the plans' operators get the constraints any
-//! operator does, the axioms between contexts ([`crate::axioms`]) relate
-//! them to the query's, and Z3 finds what follows.
+//! operator does, [link](crate::link) relates them to the query's by their
+//! contexts, and Z3 finds what follows.
 //!
 //! ```text
 //!  query ──────────┐
-//!                  ├─ rules ─ axioms ─ pins ─ solve-eqs ─ dedup ─▶ Analysis
-//!  plans ─ select ─┘                 X = rows
+//!                  ├─ rules ─ link ─ pins ─ solve-eqs ─ dedup ─▶ Analysis
+//!  plans ─ select ─┘               X = rows
 //! ```
 //!
 //! # Spec

@@ -5,9 +5,9 @@
 //! cardinality and, per output column, one bounding its number of distinct
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
-//! inputs' and records the op output in the [`Analyzer`]'s ledger; once the
-//! walk is done, the [axioms](crate::axioms) pass asserts what holds of
-//! them.
+//! inputs', and records the op output in the [`Analyzer`]'s ledger; once
+//! every plan is walked, [link](crate::link) relates op outputs that only
+//! their contexts relate.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -137,9 +137,9 @@ impl SubsetBounds {
 /// The state of one analysis: the Z3 solver and every variable and
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
-/// and how its rows are its inputs', and records its op outputs; the
-/// [axioms](crate::axioms) pass then asserts what holds of them. Each rule and axiom is one of its
-/// methods. Made by [`Analysis`](crate::Analysis).
+/// and how its rows are its inputs', and records its op outputs;
+/// [link](crate::link) then relates those only their contexts relate. Each
+/// rule is one of its methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
     pub(crate) solver: Solver,
     pub(crate) resolve: &'a dyn Fn(&TableScan) -> ScanKind,

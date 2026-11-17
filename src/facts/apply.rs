@@ -16,7 +16,7 @@ use datafusion::logical_expr::Expr;
 use z3::ast::{Bool, Int};
 
 use crate::analysis::{Node, RawScan, Unit, unit};
-use crate::axioms::bases;
+use crate::rows::bases;
 use crate::postprocess::Role;
 use crate::facts::{Context, Fact, FactKind, FactSet, Term};
 use crate::rows::canonical::Canonicals;
