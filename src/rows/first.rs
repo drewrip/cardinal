@@ -14,7 +14,7 @@ use datafusion::logical_expr::logical_plan::{Filter, LogicalPlan};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use crate::rules::{row_number, strip_alias};
+use crate::rules::{child_column, passed_rows, row_number, strip_alias};
 
 /// A filter keeping the first row of each partition of a `row_number()`.
 #[derive(Debug, Clone)]
@@ -120,20 +120,14 @@ fn down<'a>(plan: &'a LogicalPlan, cols: &[Column]) -> Option<(&'a LogicalPlan, 
 /// every row of it, in order, and passes the column through.
 fn step<'a>(plan: &'a LogicalPlan, col: &Column) -> Option<(&'a LogicalPlan, Column)> {
     let i = plan.schema().index_of_column(col).ok()?;
-    let input = match plan {
-        LogicalPlan::Projection(p) => {
-            return match strip_alias(&p.expr[i]) {
-                Expr::Column(c) => Some((p.input.as_ref(), c.clone())),
-                _ => None,
-            };
-        }
-        LogicalPlan::Sort(s) if s.fetch.is_none() => s.input.as_ref(),
-        LogicalPlan::SubqueryAlias(a) => a.input.as_ref(),
-        LogicalPlan::Repartition(r) => r.input.as_ref(),
-        LogicalPlan::Window(w) if i < w.input.schema().fields().len() => w.input.as_ref(),
-        _ => return None,
-    };
-    Some((input, Column::from(input.schema().qualified_field(i))))
+    if let LogicalPlan::Projection(p) = plan {
+        return match strip_alias(&p.expr[i]) {
+            Expr::Column(c) => Some((p.input.as_ref(), c.clone())),
+            _ => None,
+        };
+    }
+    let (input, true) = passed_rows(plan)? else { return None };
+    Some((input, child_column(input, i)?))
 }
 
 /// True if `v` is the number 1.

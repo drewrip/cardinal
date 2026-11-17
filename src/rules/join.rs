@@ -2,10 +2,10 @@
 
 use datafusion::common::{Column, JoinType, NullEquality};
 use datafusion::logical_expr::Expr;
-use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
+use datafusion::logical_expr::logical_plan::{Join, LogicalPlan};
 use z3::ast::Int;
 
-use super::{aligned, child_column, col, exact_index, key_column, strip_alias};
+use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
 use crate::analysis::{Analyzer, LinkKind, Rel, Rows, ScanKind, int, min};
 use crate::domain::Facts;
 use crate::postprocess::Role;
@@ -375,14 +375,7 @@ impl<'a> Analyzer<'a> {
                 let key = a.group_expr.get(i)?;
                 self.stored_column(&a.input, &key_column(&a.input, key)?, path)
             }
-            LogicalPlan::Filter(_)
-            | LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::Window(_)
-            | LogicalPlan::Distinct(Distinct::All(_)) => through(plan.inputs()[0], path),
+            p if let Some((input, _)) = passed_rows(p) => through(input, path),
             // A padded side's columns may be NULL.
             LogicalPlan::Join(join) => {
                 let nl = join.left.schema().fields().len();
@@ -414,11 +407,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             LogicalPlan::Projection(p) => self.every_row(&p.input, &key_column(&p.input, &p.expr[i])?),
-            LogicalPlan::Sort(s) if s.fetch.is_none() => through(&s.input),
-            LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::Window(_) => through(plan.inputs()[0]),
+            p if let Some((input, true)) = passed_rows(p) => through(input),
             // A side whose rows each match exactly once (a foreign key to all
             // of the other's table), or on an outer join at most once, keeps
             // each of them once.

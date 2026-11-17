@@ -10,7 +10,7 @@ use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 use crate::analysis::{Analyzer, Dependency, Determines, ScanKind, address};
 use crate::rules::join::exact_pair;
 use crate::rules::{
-    child_column, column_index, determined, equalities, exact_index, grouping_sets, key_column, output_indices, pinned, row_number,
+    child_column, column_index, determined, equalities, exact_index, grouping_sets, key_column, output_indices, passed_rows, pinned, row_number,
     same_positions, scan_pinned, strip_alias, with_equalities,
 };
 
@@ -134,15 +134,6 @@ impl<'a> Analyzer<'a> {
                     .map(|&i| Column::from(w.input.schema().qualified_field(i)))
                     .collect();
                 numbered || (!kept.is_empty() && self.covers_key(&w.input, &kept, nulls))
-            }
-            // Operators whose output rows are a subset of their input's, with the
-            // input's columns first and unchanged.
-            LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_) => {
-                let child = plan.inputs()[0];
-                same_positions(plan, child, cols).is_some_and(|cs| self.covers_key(child, &cs, nulls))
             }
             // DISTINCT's output is unique on all its columns, and is a subset of its
             // input's rows, so its input's keys stay unique too.
@@ -289,6 +280,10 @@ impl<'a> Analyzer<'a> {
                     JoinType::Full => false,
                 }
             }
+            // Rows among the input's, its columns first and unchanged.
+            p if let Some((child, _)) = passed_rows(p) => {
+                same_positions(plan, child, cols).is_some_and(|cs| self.covers_key(child, &cs, nulls))
+            }
             // Unions, scans of non-tables and everything else: no key to rely on.
             _ => false,
         }
@@ -337,12 +332,6 @@ impl<'a> Analyzer<'a> {
                 }
                 out.extend(with_equalities(keys, &equalities(&f.predicate, &f.input), |k| self.fd_closure(&f.input, k)));
             }
-            LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Distinct(Distinct::All(_)) => out.extend(same(plan.inputs()[0])),
             // The window's own columns are not determined, but `row_number()`
             // and its partition columns pick out one row.
             LogicalPlan::Window(w) => {
@@ -444,7 +433,12 @@ impl<'a> Analyzer<'a> {
                     out.extend(0..width);
                 }
             }
-            _ => {}
+            // Rows among the input's, its columns first and unchanged.
+            p => {
+                if let Some((input, _)) = passed_rows(p) {
+                    out.extend(same(input));
+                }
+            }
         }
         out
     }
@@ -472,12 +466,7 @@ impl<'a> Analyzer<'a> {
                 let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&p.input, &p.expr[k])).collect();
                 self.determines_key(&p.input, &input)
             }
-            LogicalPlan::Filter(_)
-            | LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_) => {
-                let input = plan.inputs()[0];
+            p if let Some((input, _)) = passed_rows(p) => {
                 let n = input.schema().fields().len();
                 self.determines_key(input, &keys.iter().copied().filter(|&k| k < n).collect::<Vec<_>>())
             }

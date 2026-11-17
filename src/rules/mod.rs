@@ -854,6 +854,31 @@ pub(crate) fn scan_pinned(scan: &TableScan, schema: &DFSchema) -> Vec<Column> {
     out
 }
 
+/// For an operator whose rows are some of its one input's, none repeated,
+/// with the input's columns first and unchanged: the input, and whether it
+/// keeps every row, in order. The walks that follow columns down a plan
+/// ([`Analyzer::covers_key`], [`Analyzer::fd_closure`],
+/// [`Analyzer::stored_column`], ...) pass through these alike; a
+/// projection, which computes its columns, each handles itself.
+///
+/// | Operator | Keeps every row |
+/// |---|---|
+/// | `Sort` without fetch, `Repartition`, `Subquery`, `SubqueryAlias`, `Window` | yes |
+/// | `Filter`, `Sort` with fetch, `Limit`, `Distinct` | no |
+pub(crate) fn passed_rows(plan: &LogicalPlan) -> Option<(&LogicalPlan, bool)> {
+    Some(match plan {
+        LogicalPlan::Sort(s) => (&s.input, s.fetch.is_none()),
+        LogicalPlan::Repartition(r) => (&r.input, true),
+        LogicalPlan::Subquery(s) => (&s.subquery, true),
+        LogicalPlan::SubqueryAlias(a) => (&a.input, true),
+        LogicalPlan::Window(w) => (&w.input, true),
+        LogicalPlan::Filter(f) => (&f.input, false),
+        LogicalPlan::Limit(l) => (&l.input, false),
+        LogicalPlan::Distinct(Distinct::All(input)) => (input, false),
+        _ => return None,
+    })
+}
+
 /// Positions of `cols` in `plan`'s output.
 pub(crate) fn output_indices(plan: &LogicalPlan, cols: &[Column]) -> Option<Vec<usize>> {
     cols.iter()
