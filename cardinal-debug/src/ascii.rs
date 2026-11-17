@@ -1,12 +1,11 @@
 //! A dump as text: the plan tree with each node's constraints under it (and
 //! the reference plans' beside it), then each proof and the constraints it
-//! needs, with reference plans or facts which pins and facts were used, and
-//! what relating the contexts on egglog took.
+//! needs, and with reference plans or facts which pins and facts were used.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use cardinal::{Constraint, EgglogStats, Proof, ProofStatus, Trace};
+use cardinal::{Constraint, Proof, ProofStatus, Trace};
 
 use crate::{Dump, InformedDump, PlanDump, readable, roots};
 
@@ -145,11 +144,6 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     if let Some(f) = facts {
         facts_sections(w, t, f);
     }
-    let egglog = match facts {
-        Some(f) => f.egglog.as_ref(),
-        None => dump.egglog.as_ref(),
-    };
-    egglog_section(w, egglog);
     Ok(out)
 }
 
@@ -158,28 +152,6 @@ fn needs(p: &Proof) -> String {
     match p.status {
         ProofStatus::Proven => format!("proven, {} needed", p.core.len()),
         _ => status(&p.status),
-    }
-}
-
-/// What relating the contexts on egglog took and found.
-fn egglog_section(w: &mut String, e: Option<&EgglogStats>) {
-    let Some(e) = e else {
-        let _ = writeln!(w, "\negglog: not used (contexts related in Rust)");
-        return;
-    };
-    let _ = writeln!(w, "\negglog ({}, {} graph):", e.reach, if e.fresh_graph { "a fresh" } else { "the thread's" });
-    let _ = writeln!(w, "  contexts   {} ({} seeds, {} reached), {} renamings", e.contexts, e.seeds, e.reached, e.renamings);
-    let _ = writeln!(w, "  asked      {} pairs; {} predicate sets compared, {} cover", e.asked, e.cover_checks, e.covers);
-    let _ = writeln!(w, "  related    {} subset, {} fewer, {} groups among", e.subset, e.fewer, e.groups_among);
-    let _ = writeln!(w, "  e-graph    {} tuples with the contexts, {} saturated, {} iterations", e.nodes, e.tuples, e.iterations);
-    let _ = writeln!(w, "  time       encode {:.4}s, saturate {:.4}s, extract {:.4}s", e.encode_secs, e.saturate_secs, e.extract_secs);
-    for r in e.rules.iter().take(10) {
-        let rule = r.rule.split_whitespace().collect::<Vec<_>>().join(" ");
-        let rule = if rule.chars().count() > 90 { format!("{}…", rule.chars().take(90).collect::<String>()) } else { rule };
-        let _ = writeln!(w, "  {:>8} matches {:>8.4}s  {rule}", r.matches, r.secs);
-    }
-    if e.rules.len() > 10 {
-        let _ = writeln!(w, "  ({} more rules matched)", e.rules.len() - 10);
     }
 }
 

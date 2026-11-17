@@ -208,11 +208,6 @@ pub struct Analyzer<'a> {
     pub(crate) referenced_sizes: bool,
     /// The last base scan's raw min and max variables, for its node to take.
     pub(crate) raw_ranges: (Vec<Option<String>>, Vec<Option<String>>),
-    /// [`crate::Options::egglog`].
-    #[cfg(feature = "egglog")]
-    pub(crate) egglog: Option<crate::egg::Reach>,
-    /// What relating the contexts on egglog took and found, once done.
-    pub(crate) egglog_stats: Option<crate::stats::EgglogStats>,
 }
 
 /// One assertion: the frame of the node it was made for (none for
@@ -378,9 +373,6 @@ impl<'a> Analyzer<'a> {
             ranged: BTreeSet::new(),
             referenced_sizes: false,
             raw_ranges: Default::default(),
-            #[cfg(feature = "egglog")]
-            egglog: None,
-            egglog_stats: None,
         }
     }
 

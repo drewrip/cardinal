@@ -104,7 +104,6 @@ fn reference_plans_from_profiles() {
     assert_eq!(t.nodes.iter().filter(|n| n.plan.is_none()).count(), dump.trace.nodes.len());
     assert!(t.nodes.iter().any(|n| n.plan.as_deref() == Some("q04")));
     assert!(t.constraints.iter().any(|c| c.fact.as_ref().is_some_and(|f| f.source == "observed rows")));
-    assert!(dump.egglog.is_some() && informed.egglog.is_some());
     // Some bound holds only with the plan, and its proof names a pin.
     let tighter = informed.proofs.iter().zip(&informed.base_proofs).find(|(w, wo)| {
         w.status == cardinal::ProofStatus::Proven && wo.status != cardinal::ProofStatus::Proven
@@ -114,7 +113,7 @@ fn reference_plans_from_profiles() {
 
     let path = json.to_str().unwrap();
     let text = run(&["view", path]);
-    for want in ["Informed: ", "Plans:   1 reference plans", "Reference plan q04:", "◆ [", "fact: observed rows", "Proofs (plain / informed)", "Pins and facts used", "egglog (two steps"] {
+    for want in ["Informed: ", "Plans:   1 reference plans", "Reference plan q04:", "◆ [", "fact: observed rows", "Proofs (plain / informed)", "Pins and facts used"] {
         assert!(text.contains(want), "no {want:?} in {text}");
     }
     let proof = run(&["view", path, "--proof", &with.name]);
@@ -125,7 +124,7 @@ fn reference_plans_from_profiles() {
     let html = temp("q04.html");
     run(&["view", path, "--html", html.to_str().unwrap()]);
     let page = std::fs::read_to_string(&html).unwrap();
-    assert!(page.contains("Plain") && page.contains("\"source\":\"observed rows\"") && page.contains("egglog-rules"));
+    assert!(page.contains("Plain") && page.contains("\"source\":\"observed rows\""));
 }
 
 #[test]
@@ -156,11 +155,10 @@ fn reference_plans_without_explaining() {
 fn dumps_without_facts_still_load() {
     let json = temp("old.json");
     run(&["dump", "--schema", SCHEMA, "--query", QUERY, "-o", json.to_str().unwrap()]);
-    // A dump from before facts and egglog: no `informed` or `egglog`, and no
-    // `fact` on its constraints or `plan` on its nodes.
+    // A dump from before facts: no `informed`, and no `fact` on its
+    // constraints or `plan` on its nodes.
     let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
     v.as_object_mut().unwrap().remove("informed");
-    v.as_object_mut().unwrap().remove("egglog");
     for c in v["trace"]["constraints"].as_array_mut().unwrap() {
         c.as_object_mut().unwrap().remove("fact");
     }
@@ -171,5 +169,5 @@ fn dumps_without_facts_still_load() {
     let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
     assert!(dump.informed.is_none() && dump.trace.constraints.iter().all(|c| c.fact.is_none()));
     let text = run(&["view", json.to_str().unwrap()]);
-    assert!(!text.contains("Informed") && text.contains("egglog: not used"), "{text}");
+    assert!(!text.contains("Informed"), "{text}");
 }

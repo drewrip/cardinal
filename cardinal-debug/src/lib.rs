@@ -3,8 +3,7 @@
 //! A [`Dump`] holds an analysis's bounds (of the root, and of every
 //! operator: [`PlanDump`]), its [`Trace`] (every
 //! constraint with the plan node and analyzer line it comes from), a
-//! [`Proof`] of each bound naming the constraints it needs, and what
-//! relating its contexts on egglog took ([`EgglogStats`]); and, with
+//! [`Proof`] of each bound naming the constraints it needs; and, with
 //! reference plans or facts, the same again with them
 //! ([`InformedDump`]). [`ascii`] and [`html`] render one.
 
@@ -14,7 +13,7 @@ pub mod html;
 use std::collections::BTreeMap;
 
 use cardinal::observed::{Catalog, ObservedPlan};
-use cardinal::{Analysis, Builder, EgglogStats, Facts, ForeignKey, Options, Proof, Trace};
+use cardinal::{Analysis, Builder, Facts, ForeignKey, Options, Proof, Trace};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
@@ -35,9 +34,6 @@ pub struct Dump {
     /// Every operator's proven bounds, if computed.
     #[serde(default)]
     pub plan_bounds: Option<PlanDump>,
-    /// What relating the contexts on egglog took and found, if they were.
-    #[serde(default)]
-    pub egglog: Option<EgglogStats>,
 }
 
 /// Every operator's proven bounds, and their sum's
@@ -81,9 +77,6 @@ pub struct InformedDump {
     /// Every operator's bounds proven with them, if computed.
     #[serde(default)]
     pub plan_bounds: Option<PlanDump>,
-    /// What relating the contexts on egglog took and found, if they were.
-    #[serde(default)]
-    pub egglog: Option<EgglogStats>,
 }
 
 /// Reference plans and facts to put in an analysis.
@@ -210,7 +203,6 @@ pub async fn dump(
         proofs,
         informed,
         plan_bounds,
-        egglog: analysis.egglog.clone(),
     })
 }
 
@@ -249,7 +241,6 @@ fn inform(analysis: &Analysis, builder: Builder, input: &Informed, prove: Prove)
         explained: input.explain,
         conflicts,
         plan_bounds,
-        egglog: informed.egglog.clone(),
     })
 }
 

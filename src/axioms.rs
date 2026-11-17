@@ -107,9 +107,7 @@
 //! ## Relations between contexts
 //!
 //! Each test holds up to renaming the instances of one table among
-//! themselves (`t@1`, `t@2`). With [`Options::egglog`](crate::Options),
-//! the relations and the relevant contexts come from egglog rules instead
-//! ([`crate::egg`]), which give the same pairs and may also chain them.
+//! themselves (`t@1`, `t@2`), by `rows::contain`.
 //!
 //! - `A ⊆ B`: `A`'s rows are among `B`'s. `A = B`; or `B` is an outer join
 //!   and `A ⊆` its inner join; or both have the same tables and atoms, `A`
@@ -130,7 +128,6 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{Column, Constraint, ScalarValue};
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
-use std::time::{Duration, Instant};
 
 use z3::ast::{Bool, Int};
 
@@ -138,7 +135,6 @@ use crate::analysis::{Analyzer, Dependency, LinkKind, Node, Rel, Relation, ScanK
 use crate::facts::FactKind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
-use crate::parity;
 use crate::rows::canonical::Canonicals;
 use crate::rows::contain::{self, renamed_kind};
 use crate::rows::logical::Logical;
@@ -532,26 +528,10 @@ impl<'a> Analyzer<'a> {
     pub fn between_contexts(&mut self) {
         let scans: Vec<(String, String)> = self.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
         let logical = Logical::new(&self.nodes, &scans);
-        let start = Instant::now();
         let mut space = Space::default();
         let seeds = add_nodes(&mut space, &self.nodes, &logical);
-        let built = start.elapsed();
-        let start = Instant::now();
-        #[cfg(feature = "egglog")]
-        if let Some(reach) = self.egglog {
-            space.relate(&seeds, reach);
-        }
         let relevant = space.relevant(&seeds);
-        let axioms = space.axioms(&relevant);
-        let between = start.elapsed();
-        if parity::recording() {
-            parity::push(space.snapshot(&relevant, &axioms, built, between));
-        }
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &space.egg {
-            self.egglog_stats = Some(r.stats.clone());
-        }
-        for a in axioms {
+        for a in space.axioms(&relevant) {
             self.assert_axiom(a.rule, a.claim);
         }
     }
@@ -701,60 +681,18 @@ pub struct Space {
     /// The canonical forms of the parts of contexts renamed to relate
     /// them ([`contain::candidates`]).
     canonicals: RefCell<Canonicals>,
-    /// The relations between the contexts, on egglog, if the analysis
-    /// relates them so; else `rows::contain` tests each pair.
-    #[cfg(feature = "egglog")]
-    egg: Option<crate::egg::contain::Relations>,
 }
 
 impl Space {
-    /// Relates the contexts on egglog, those `seeds` reach as far as
-    /// `reach` relevant.
-    #[cfg(feature = "egglog")]
-    fn relate(&mut self, seeds: &BTreeSet<Context>, reach: crate::egg::Reach) {
-        let contexts: BTreeSet<&Context> = self.terms.keys().map(over).collect();
-        self.egg = Some(crate::egg::contain::Relations::new(contexts, seeds, reach));
-    }
-
     /// `a ⊆ b`, up to renaming `a`'s instances
     /// ([relations](self#relations-between-contexts)).
     fn subset(&self, a: &Context, b: &Context) -> bool {
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &self.egg {
-            return r.subset(a, b);
-        }
         self.renamed(a, b, contain::subset)
-    }
-
-    /// `a ⊆ b`, as named.
-    fn subset_as_named(&self, a: &Context, b: &Context) -> bool {
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &self.egg
-            && r.knows(a)
-            && r.knows(b)
-        {
-            return r.subset_as_named(a, b);
-        }
-        contain::subset(a, b)
     }
 
     /// `fewer(a, b)`, up to renaming.
     fn fewer(&self, a: &Context, b: &Context) -> bool {
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &self.egg {
-            return r.fewer(a, b);
-        }
         self.renamed(a, b, contain::fewer)
-    }
-
-    /// `contain::groups_among`, up to renaming.
-    fn groups_among(&self, a: &Context, b: &Context) -> bool {
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &self.egg {
-            return r.groups_among(a, b);
-        }
-        let group = |c: &Context| matches!(c, Context::Derived { op, .. } if op == "group");
-        group(a) && group(b) && self.renamed(a, b, contain::groups_among)
     }
 
     /// True if `a` and `b` name rows one bounds the other's: either has
@@ -763,7 +701,7 @@ impl Space {
         self.fewer(a, b) || self.fewer(b, a) || self.renamed(a, b, same_inputs)
     }
 
-    /// `test(a, b)` up to renaming `a`'s instances ([`contain::renamed`]).
+    /// `test(a, b)` up to renaming `a`'s instances ([`contain::renamed_in`]).
     fn renamed(&self, a: &Context, b: &Context, test: impl Fn(&Context, &Context) -> bool) -> bool {
         contain::renamed_in(a, b, test, &mut self.canonicals.borrow_mut())
     }
@@ -781,27 +719,10 @@ impl Space {
         self.terms.get(q).and_then(|t| t.first())
     }
 
-    /// The contexts of `seeds`, those related to one ([`related`]), those
-    /// related to one of them, and those any of these is a join of
-    /// ([`joins`]).
+    /// The [relevant contexts](self#relevant-contexts): `seeds`, those
+    /// related to one ([`Self::related`]), those related to one of them,
+    /// and those any of these is a join of ([`joins`]).
     fn relevant(&self, seeds: &BTreeSet<Context>) -> BTreeSet<Context> {
-        #[allow(unused_mut)]
-        let mut reached = None;
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &self.egg {
-            reached = Some(r.reached().iter().cloned().collect());
-        }
-        let mut out = reached.unwrap_or_else(|| self.two_steps(seeds));
-        let contexts: BTreeSet<&Context> = self.terms.keys().map(over).collect();
-        let narrower: Vec<&Context> =
-            contexts.into_iter().filter(|c| !out.contains(*c) && out.iter().any(|d| joins(d, c))).collect();
-        out.extend(narrower.into_iter().cloned());
-        out
-    }
-
-    /// The contexts of `seeds`, those related to one, and those related
-    /// to one of them.
-    fn two_steps(&self, seeds: &BTreeSet<Context>) -> BTreeSet<Context> {
         let buckets = self.buckets();
         let mut out: BTreeSet<Context> = seeds.clone();
         let mut frontier: Vec<Context> = seeds.iter().cloned().collect();
@@ -817,6 +738,10 @@ impl Space {
             out.extend(next.iter().cloned());
             frontier = next;
         }
+        let contexts: BTreeSet<&Context> = self.terms.keys().map(over).collect();
+        let narrower: Vec<&Context> =
+            contexts.into_iter().filter(|c| !out.contains(*c) && out.iter().any(|d| joins(d, c))).collect();
+        out.extend(narrower.into_iter().cloned());
         out
     }
 
@@ -851,61 +776,6 @@ impl Space {
         out.extend(wider(self, &keys, relevant));
         out.extend(disjoint(self, relevant));
         out
-    }
-
-    /// What was decided, for [`parity`]: every pair of contexts over the
-    /// same tables that a relation holds of.
-    fn snapshot(&self, relevant: &BTreeSet<Context>, axioms: &[Axiom], built: Duration, between: Duration) -> parity::Snapshot {
-        let mut s = parity::Snapshot::default();
-        let key = parity::key;
-        for bucket in self.buckets().values() {
-            for a in bucket {
-                s.contexts.insert(key(a));
-                for b in bucket.iter().filter(|b| *b != a) {
-                    let pair = || (key(a), key(b));
-                    // The first implies the second.
-                    let sub = self.subset(a, b);
-                    if sub {
-                        s.subset.insert(pair());
-                    }
-                    if sub || self.fewer(a, b) {
-                        s.fewer.insert(pair());
-                    }
-                    if self.groups_among(a, b) {
-                        s.groups_among.insert(pair());
-                    }
-                }
-            }
-        }
-        s.relevant = relevant.iter().map(key).collect();
-        s.raw = self.terms.keys().map(over).collect::<BTreeSet<_>>().into_iter().cloned().collect();
-        for a in axioms {
-            s.axioms.entry(a.claim.to_string()).or_default().insert(a.rule.to_string());
-        }
-        s.timings = parity::Timings { build: parity::Timings::secs(built), between: parity::Timings::secs(between), ..Default::default() };
-        #[cfg(feature = "egglog")]
-        if let Some(r) = &self.egg {
-            let t = &r.timings;
-            s.timings.encode = parity::Timings::secs(t.encode);
-            s.timings.saturate = parity::Timings::secs(t.saturate);
-            s.timings.extract = parity::Timings::secs(t.extract);
-            s.nodes = t.nodes;
-            s.tuples = t.tuples;
-        } else {
-            // Every context, through an e-graph and back.
-            let contexts: Vec<&Context> = self.terms.keys().map(over).collect::<BTreeSet<_>>().into_iter().collect();
-            let start = Instant::now();
-            let mut g = crate::egg::Graph::new();
-            let classes = g.encode_all(contexts.iter().copied());
-            s.timings.encode = parity::Timings::secs(start.elapsed());
-            let start = Instant::now();
-            let read = g.extractor();
-            for (c, v) in contexts.iter().zip(classes) {
-                assert_eq!(read.rel(v), **c, "a context reads back as it was");
-            }
-            s.timings.extract = parity::Timings::secs(start.elapsed());
-        }
-        s
     }
 
     /// The contexts of every quantity, by the tables they draw on: only
@@ -969,7 +839,7 @@ pub fn subset(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Cont
     let mut same = vec![];
     for qa in keys.get(a).into_iter().flatten() {
         for qb in keys.get(b).into_iter().flatten() {
-            if !renamed_kind(qa, qb, |x, y| key_within(space, x, y)) {
+            if !renamed_kind(qa, qb, key_within) {
                 continue;
             }
             let (ta, tb) = (space.term(qa).unwrap(), space.term(qb).unwrap());
@@ -1016,13 +886,13 @@ fn same_inputs(a: &Context, b: &Context) -> bool {
 
 /// True if `a` is `b`'s quantity of the same key, or for a distinct count of
 /// some of its keys, over rows among `b`'s.
-fn key_within(space: &Space, a: &FactKind, b: &FactKind) -> bool {
+fn key_within(a: &FactKind, b: &FactKind) -> bool {
     match (a, b) {
         (FactKind::Distinct { keys: ka, over: oa }, FactKind::Distinct { keys: kb, over: ob }) => {
-            ka.is_subset(kb) && space.subset_as_named(oa, ob)
+            ka.is_subset(kb) && contain::subset(oa, ob)
         }
         (FactKind::Min { key: ka, over: oa }, FactKind::Min { key: kb, over: ob })
-        | (FactKind::Max { key: ka, over: oa }, FactKind::Max { key: kb, over: ob }) => ka == kb && space.subset_as_named(oa, ob),
+        | (FactKind::Max { key: ka, over: oa }, FactKind::Max { key: kb, over: ob }) => ka == kb && contain::subset(oa, ob),
         _ => false,
     }
 }
@@ -1040,7 +910,7 @@ fn key_within(space: &Space, a: &FactKind, b: &FactKind) -> bool {
 /// ```
 pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
     let card = |x: &Context| space.term(&FactKind::Cardinality(x.clone()));
-    let (Some(cd), Some(cc), true) = (card(d), card(c), space.subset_as_named(d, c)) else { return vec![] };
+    let (Some(cd), Some(cc), true) = (card(d), card(c), contain::subset(d, c)) else { return vec![] };
     let Context::Spj { preds: pc, .. } = c else { return vec![] };
     let mut out = vec![];
     for cp in relevant {

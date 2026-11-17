@@ -225,10 +225,6 @@ fn analyze(
     options: &Options,
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
-    #[cfg(feature = "egglog")]
-    {
-        a.egglog = options.egglog;
-    }
     let joint = !plans.is_empty();
     if joint {
         a.referenced_sizes = true;
@@ -259,7 +255,6 @@ fn analyze(
         let parts = postprocess::Assertions::new(&a, &full);
         (full, n, Some(parts))
     };
-    let egglog = a.egglog_stats.take();
     let mut nodes = a.nodes;
     nodes.truncate(own);
     Analysis {
@@ -267,7 +262,6 @@ fn analyze(
         scans,
         plan: plan.display_indent().to_string(),
         trace,
-        egglog,
         constraints,
         assertions,
         nodes,

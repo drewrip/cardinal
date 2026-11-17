@@ -1,9 +1,8 @@
 //! A dump as one self-contained HTML page: the result's bounds, the plan tree
 //! (and the reference plans' parts) with every operator's bounds beside its
 //! constraints, linked both ways, a selector that picks out the constraints
-//! each proof needs, and what relating the contexts on egglog took. With
-//! reference plans or facts, the page can switch to the analysis without
-//! them.
+//! each proof needs. With reference plans or facts, the page can switch to
+//! the analysis without them.
 
 use serde_json::json;
 
@@ -218,13 +217,6 @@ dl.notation dd { margin: 0; }
   </details>
   <details id="conflicts-box" hidden open><summary class="warn">Facts left out for contradicting the constraints: <span id="conflicts-n"></span></summary>
     <table class="facts"><tbody id="conflicts"></tbody></table>
-  </details>
-</section>
-
-<section id="egglog">
-  <details><summary>egglog: <span id="egglog-sum"></span></summary>
-    <table class="facts"><tbody id="egglog-stats"></tbody></table>
-    <table class="facts"><thead><tr><th>Matches</th><th>Seconds</th><th>Rule</th></tr></thead><tbody id="egglog-rules"></tbody></table>
   </details>
 </section>
 
@@ -529,35 +521,6 @@ dl.notation dd { margin: 0; }
         $('conflicts-box').hidden = false;
         $('conflicts-n').textContent = String(I.conflicts.length);
         for (const c of I.conflicts) row('conflicts', [[c, 'm']]);
-      }
-    }
-
-    // egglog: what relating the contexts took and found.
-    const E = informed ? I.egglog : dump.egglog;
-    if (!E) {
-      $('egglog-sum').textContent = 'not used (contexts related in Rust)';
-    } else {
-      const secs = x => x.toFixed(4) + ' s';
-      $('egglog-sum').textContent = `${E.contexts} contexts, ${E.reached} reached, ${E.subset + E.fewer + E.groups_among} pairs related, ` +
-        `${secs(E.encode_secs + E.saturate_secs + E.extract_secs)}`;
-      const stats = [
-        ['Reach', `${E.reach}, ${E.fresh_graph ? 'a fresh e-graph' : "the thread's e-graph"}`],
-        ['Contexts', `${E.contexts}: ${E.seeds} seeds (the operators'), ${E.reached} within reach`],
-        ['Renamings', `${E.renamings} contexts with their instances renamed`],
-        ['Asked', `${E.asked} pairs over the same tables; ${E.cover_checks} predicate sets compared in Rust, ${E.covers} cover`],
-        ['Related', `${E.subset} ⊆, ${E.fewer} fewer rows, ${E.groups_among} groups among`],
-        ['E-graph', `${E.nodes} tuples with the contexts, ${E.tuples} saturated, ${E.iterations} iterations`],
-        ['Time', `encode ${secs(E.encode_secs)}, saturate ${secs(E.saturate_secs)}, extract ${secs(E.extract_secs)}`],
-      ];
-      for (const [k, v] of stats) {
-        const r = el('tr');
-        r.append(el('th', null, k), el('td', 'm', v));
-        $('egglog-stats').append(r);
-      }
-      for (const r of E.rules) {
-        const tr = el('tr');
-        tr.append(el('td', 'm', String(r.matches)), el('td', 'm note', r.secs.toFixed(4)), el('td', 'm', r.rule));
-        $('egglog-rules').append(tr);
       }
     }
 

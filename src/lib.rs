@@ -27,9 +27,7 @@
 //!    asserting what the operator adds and recording each relation it makes
 //!    and how its rows are its inputs'.
 //! 2. [`axioms`]: what holds of any rows whatever made them, asserted over
-//!    those records and between [contexts](rows), in every analysis. The
-//!    contexts are related on egglog ([`egg`]) unless [`Options::egglog`]
-//!    says otherwise.
+//!    those records and between [contexts](rows), in every analysis.
 //! 3. [`joint`]: each operator of a reference plan pinned to the rows it
 //!    was counted with; the plans' own variables then substituted away.
 //! 4. [`facts`]: facts given by hand, added as claims on the query's
@@ -56,7 +54,7 @@
 //! │ each relation   ndv ≤ X, keys, domains, row facts        │  │
 //! │ each link       X ≤ l, ndv ≤ ndv_l, ranges within        │  ├─▶ Z3
 //! │ one table       disjoint filters split it                │  │
-//! │ contexts        ⊆, fewer, joins, semi + anti, … (egglog) │  │
+//! │ contexts        ⊆, fewer, joins, semi + anti, …          │  │
 //! └─────────────────────────────────────────────┬────────────┘  │
 //! ┌─ 3. pins: joint ────────────────────────────▼────────────┐  │
 //! │ a counted operator X = rows (≥ where a runtime filter    │  │
@@ -77,25 +75,19 @@ pub mod axioms;
 mod bounds;
 mod builder;
 mod domain;
-#[cfg(feature = "egglog")]
-pub mod egg;
 mod keys;
 pub mod facts;
 pub mod joint;
 pub mod observed;
 mod origin;
-#[doc(hidden)]
-pub mod parity;
 pub mod postprocess;
 pub mod rows;
 pub mod rules;
-mod stats;
 pub mod trace;
 mod validate;
 
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
 pub use builder::Builder;
-pub use stats::{EgglogStats, RuleStats};
 pub use facts::Facts;
 pub use postprocess::Postprocess;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
@@ -141,9 +133,6 @@ pub struct Analysis {
     /// Every constraint with the plan node and analyzer line it comes from,
     /// if [`Options::trace`] is set.
     pub trace: Option<Trace>,
-    /// What relating the contexts on egglog took and found, if they were
-    /// ([`Options::egglog`]).
-    pub egglog: Option<EgglogStats>,
     /// The constraint set `S`, and how many assertions it holds (to check
     /// that it parses back completely).
     constraints: String,
@@ -367,13 +356,6 @@ pub struct Options {
     /// Simplifications of the constraints before the bounds search. Defaults
     /// to none.
     pub postprocess: Postprocess,
-    /// Relate contexts on egglog ([`egg`]), reaching relevant contexts as
-    /// far as given; `None` relates them by the Rust tests of
-    /// `rows::contain`. Defaults to two steps, unless `EGGLOG` in the
-    /// environment says otherwise ([`egg::Reach::from_env`]), so that the
-    /// tests run either way.
-    #[cfg(feature = "egglog")]
-    pub egglog: Option<egg::Reach>,
 }
 
 impl Default for Options {
@@ -384,8 +366,6 @@ impl Default for Options {
             trace: false,
             check_facts: false,
             postprocess: Postprocess::default(),
-            #[cfg(feature = "egglog")]
-            egglog: egg::Reach::from_env(),
         }
     }
 }
