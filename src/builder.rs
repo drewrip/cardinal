@@ -238,19 +238,36 @@ fn analyze(
     let pinned = joint::assert_pins(&a, &pins);
 
     let root_name = a.name_of(&root);
-    let full = a.solver.to_string();
-    let n = a.solver.get_assertions().len();
+    let asserted = a.solver.get_assertions();
+    let n = asserted.len();
     let mut tables: Vec<(String, String)> = a.tables.values().map(|t| (t.display.clone(), t.symbol.clone())).collect();
     tables.sort();
     let scans: Vec<(String, String)> = a.scans[..own_scans].iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
-    let trace = options.trace.then(|| {
-        let t = Trace::build(&a, &full, &root_name, &scans, &tables, &owners).with_facts(&pinned);
+    // The solver is printed only where the text is read: as the
+    // constraints without plans, and by the trace. It can be large.
+    let print = || a.solver.to_string();
+    let trace_of = |full: &str| {
+        let t = Trace::build(&a, full, &root_name, &scans, &tables, &owners).with_facts(&pinned);
         assert_eq!(t.constraints.len(), n, "every assertion is traced");
         t
-    });
-    let (constraints, assertions) = match joint {
-        true => joint::reduce(&full, &joint::kept(&a, own_vars)),
-        false => (full, n),
+    };
+    let reduce = || joint::reduce(&asserted, &joint::kept(&a, own_vars));
+    let (constraints, assertions, trace) = match (joint, options.trace) {
+        (false, false) => (print(), n, None),
+        (false, true) => {
+            let full = print();
+            let trace = trace_of(&full);
+            (full, n, Some(trace))
+        }
+        (true, false) => {
+            let (constraints, assertions) = reduce();
+            (constraints, assertions, None)
+        }
+        (true, true) => {
+            let trace = trace_of(&print());
+            let (constraints, assertions) = reduce();
+            (constraints, assertions, Some(trace))
+        }
     };
     let mut nodes = a.nodes;
     nodes.truncate(own);

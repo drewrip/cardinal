@@ -39,6 +39,23 @@ async fn caps_through_a_foreign_key() {
     assert_eq!(b.upper, Some(2000), "{b}");
 }
 
+/// The trace, which prints every constraint before the reduction, leaves
+/// the reduced constraints as they are without it.
+#[tokio::test]
+async fn trace_leaves_the_constraints() {
+    let catalog = catalog().await;
+    let all = profiles().await;
+    let q = all.iter().find(|p| p.name == "q11").unwrap();
+    let others: Vec<&ObservedPlan> = all.iter().filter(|p| p.name != q.name).collect();
+    let build = |trace| {
+        let options = Options { trace, ..options() };
+        Analysis::plan(&catalog, q).options(options).with_plans(others.iter().copied()).build().unwrap()
+    };
+    let (plain, traced) = (build(false), build(true));
+    assert!(traced.trace.is_some());
+    assert_eq!(plain.constraints(), traced.constraints());
+}
+
 /// Reference plans given to a query with no catalog to read them against
 /// are refused.
 #[tokio::test]

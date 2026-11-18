@@ -21,7 +21,7 @@ use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Expr, TableProviderFilterPushDown};
-use z3::ast::{Bool, Int};
+use z3::ast::{Ast, Bool, Int};
 use z3::{Params, Solver};
 
 use crate::ForeignKey;
@@ -428,13 +428,12 @@ impl<'a> Analyzer<'a> {
         self.on_op_output(out, plan);
     }
 
-    /// The unquoted name of a variable created by `new_var`.
+    /// The name of a variable created by `new_var`.
     pub(crate) fn name_of(&self, v: &Int) -> String {
-        self.vars
-            .iter()
-            .find(|(_, x)| x == v)
-            .map(|(n, _)| n.clone())
-            .expect("variable was created by new_var")
+        let name = v.decl().name();
+        // Most often a recent variable: searched from the newest.
+        debug_assert!(self.vars.iter().rev().any(|(n, _)| *n == name), "variable was created by new_var");
+        name
     }
 
     pub(crate) fn names_of(&self, out: &OpOutput) -> Vec<String> {

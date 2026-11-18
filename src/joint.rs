@@ -164,19 +164,17 @@ pub(crate) fn kept(a: &Analyzer, own_vars: usize) -> Vec<String> {
         .collect()
 }
 
-/// The SMT-LIB `script` reduced (see the [spec](self#spec)): `solve-eqs`
-/// keeping the variables `kept` names, then each assertion kept once.
-/// Returns the reduced script and how many assertions it holds.
-pub(crate) fn reduce(script: &str, kept: &[String]) -> (String, usize) {
-    let parsed = Solver::new();
-    parsed.from_string(script);
+/// `assertions` reduced (see the [spec](self#spec)): `solve-eqs` keeping
+/// the variables `kept` names, then each assertion kept once. Returns the
+/// reduced SMT-LIB script and how many assertions it holds.
+pub(crate) fn reduce(assertions: &[Bool], kept: &[String]) -> (String, usize) {
     let kept: Vec<Int> = kept.iter().map(|v| Int::new_const(v.as_str())).collect();
     // Substituted, a plan's copy of an operator the query has (a table's
     // scan, most often) asserts what the query's does: each assertion
     // once, the first kept in place.
     let solver = Solver::new();
     let mut seen = HashSet::new();
-    for f in solve_eqs(&parsed.get_assertions(), &kept) {
+    for f in solve_eqs(assertions, &kept) {
         if seen.insert(f.clone()) {
             solver.assert(&f);
         }
@@ -312,5 +310,32 @@ fn maximal<'p>(plan: &'p LogicalPlan, within: &BTreeSet<String>, out: &mut Vec<&
     }
     for c in plan.inputs() {
         maximal(c, within, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reducing the assertions themselves gives what reducing their
+    /// printed and parsed text does, and `solve-eqs` does reduce them.
+    #[test]
+    fn reduce_needs_no_round_trip() {
+        let int = |n: &str| Int::new_const(n);
+        let (x, y, z) = (int("x"), int("y"), int("z"));
+        let solver = Solver::new();
+        // `y` and `z` defined by `x`; the last two repeat once substituted.
+        solver.assert(y.eq(&x + Int::from_i64(1)));
+        solver.assert(z.eq(&y));
+        solver.assert(x.le(Int::from_i64(10)));
+        solver.assert(y.le(Int::from_i64(5)));
+        solver.assert(z.le(Int::from_i64(5)));
+        let kept = ["x".to_string()];
+        let direct = reduce(&solver.get_assertions(), &kept);
+        let parsed = Solver::new();
+        parsed.from_string(solver.to_string());
+        assert_eq!(direct, reduce(&parsed.get_assertions(), &kept));
+        assert_eq!(direct.1, 2, "{}", direct.0);
+        assert!(!direct.0.contains("declare-fun y"), "{}", direct.0);
     }
 }
