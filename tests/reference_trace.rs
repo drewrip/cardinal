@@ -119,8 +119,10 @@ async fn contradicting_facts_are_left_out() {
     assert_eq!(count(&a), 0);
     let kept: Vec<String> = i.trace.as_ref().unwrap().constraints.iter().filter_map(|c| c.fact.as_ref()).filter(|f| f.source == "pinned rows").map(|f| f.facts[0].text.clone()).collect();
     assert!(!kept.is_empty() && kept.iter().all(|f| f == "|nation|"), "{kept:?}");
-    // What is kept is consistent.
-    let solver = z3::Solver::new();
+    // What is kept is consistent. Z3 decides it once the defined variables
+    // are substituted away, as for reference plans.
+    let tactic = ["simplify", "solve-eqs", "smt"].map(z3::Tactic::new);
+    let solver = tactic[0].and_then(&tactic[1]).and_then(&tactic[2]).solver();
     solver.from_string(i.trace.as_ref().unwrap().to_smt2());
     assert_eq!(solver.check(), z3::SatResult::Sat);
 }
