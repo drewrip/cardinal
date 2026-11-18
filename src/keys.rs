@@ -1,4 +1,4 @@
-//! Which columns determine a relation's rows: declared keys, followed through
+//! Which columns determine an op output's rows: declared keys, followed through
 //! the plan, and the functional dependencies they imply.
 
 use std::collections::BTreeSet;

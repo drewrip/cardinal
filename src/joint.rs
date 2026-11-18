@@ -20,14 +20,14 @@
 //! - **Selection**: of each plan, the maximal subtrees that scan only
 //!   tables the query scans or those reference by foreign keys,
 //!   transitively (`maximal`). Subtrees over a referenced table bound its
-//!   size, which the `referenced size` axiom
+//!   size, which the `referenced size` rule
 //!   ([`Analyzer::referenced_size`]) bounds the referencing columns'
 //!   distinct counts by. Other subtrees share no context with the query's.
 //! - **Pins**: each operator the engine counted, and that did not stop
 //!   early, holds its node's rows: `X = rows`, or `X ≥ rows` where a
 //!   runtime filter pruned them (`counts`). Plans that were not run, or
 //!   do not translate, are left out.
-//! - **Reduction**: each variable of the plans' or the axioms' that an
+//! - **Reduction**: each variable but the query's and the tables' that an
 //!   assertion defines by others is substituted away (Z3's `solve-eqs`),
 //!   and the assertions that then repeat are kept once. The query's
 //!   variables and the tables' sizes all stay, with exactly the values they
@@ -158,8 +158,8 @@ pub(crate) fn assert_pins(a: &Analyzer, pins: &[Pin]) -> Vec<FactClaim> {
 
 /// The variables the reduction keeps: those that may be read once the
 /// analysis is made, the query's (the first `own_vars`), and the tables'
-/// sizes, which the referenced-size axiom may have made after the query's
-/// visit.
+/// sizes, which the `referenced size` rule may have made after the
+/// query's visit.
 pub(crate) fn kept(a: &Analyzer, own_vars: usize) -> Vec<String> {
     a.vars[..own_vars]
         .iter()

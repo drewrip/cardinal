@@ -9,7 +9,7 @@
 //!
 //! # Notation
 //!
-//! Every rule and axiom is stated in these terms.
+//! Every rule and property is stated in these terms.
 //!
 //! - `C`, `D`: [`Context`]s, canonical relational expressions: sets of rows by
 //!   how they derive from the base tables. An *SPJ* ([`Context::Spj`]) is the cross product of its

@@ -69,7 +69,8 @@ pub struct Constraint {
     /// The constraint in infix notation, see [`infix`].
     pub infix: String,
     /// The node the constraint describes, or `None` for one over several
-    /// relations of a table (partitions of its rows).
+    /// nodes: of one table's rows (partitions of them), or of
+    /// [link](crate::link).
     pub node: Option<usize>,
     /// The analyzer's source line that made the constraint, as `file:line`.
     pub source: String,

@@ -187,8 +187,8 @@ pub struct Analyzer<'a> {
     pub(crate) referenced_sizes: bool,
 }
 
-/// One assertion: the frame of the node it was made for (none for
-/// partitions), and the line of the analyzer that made it.
+/// One assertion: the frame of the node it was made for (none for one
+/// over several nodes), and the line of the analyzer that made it.
 pub(crate) struct Logged {
     pub(crate) expr: Bool,
     pub(crate) frame: Option<usize>,
@@ -381,8 +381,7 @@ impl<'a> Analyzer<'a> {
 
     /// Creates a fresh op output for `plan`: a cardinality variable
     /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, recorded in
-    /// [`Self::op_outputs`] for the axioms. Asserts what holds of any
-    /// columns of any rows.
+    /// [`Self::op_outputs`]. Asserts what holds of any columns of any rows.
     pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> OpOutput {
         let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;

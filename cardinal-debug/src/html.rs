@@ -194,7 +194,7 @@ dl.notation dd { margin: 0; }
         <dt>|t|, T{n}_{t}</dt><dd>Rows in base table t.</dd>
         <dt>op{n}_{Kind}</dt><dd>Rows output by plan node n.</dd>
         <dt>op{n}_{Kind}[col]</dt><dd>Distinct values of column col in node n's output (NULL counts as one).</dd>
-        <dt>part{n}</dt><dd>Rows of a table shared by relations whose rows are disjoint.</dd>
+        <dt>part{n}</dt><dd>Rows of a table shared by op outputs whose rows are disjoint.</dd>
         <dt>◆</dt><dd>A constraint a fact or a reference plan's count (a pin) gave, or a node with one.</dd>
         <dt>≥ n</dt><dd>No upper bound was proven.</dd>
       </dl>
@@ -412,7 +412,7 @@ dl.notation dd { margin: 0; }
       const line = el('div', 'row');
       if (key === 'p') {
         line.append(el('span', 'lab', null));
-        line.firstChild.append(el('b', null, 'Table partitions'), el('span', 'd', ' — relations of one table with disjoint rows share its rows'));
+        line.firstChild.append(el('b', null, 'Table partitions'), el('span', 'd',  ' — op outputs of one table with disjoint rows share its rows'));
       } else {
         const n = t.nodes[key];
         const lab = el('span', 'lab');

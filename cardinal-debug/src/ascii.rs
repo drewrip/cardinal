@@ -101,7 +101,7 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     }
     let partitions: Vec<&Constraint> = t.constraints.iter().filter(|c| c.node.is_none() && shown(c)).collect();
     if !partitions.is_empty() {
-        let _ = writeln!(w, "\nPartitions (over several relations of a table):");
+        let _ = writeln!(w, "\nPartitions (over several op outputs of a table):");
         for c in partitions {
             line(w, t, c, "  ");
         }

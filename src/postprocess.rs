@@ -81,7 +81,7 @@ struct Index {
 }
 
 impl Assertions {
-    /// The assertions of `a`, once its axioms are asserted, and its
+    /// The assertions of `a`, once [link](crate::link) is done, and its
     /// constraints as SMT-LIB.
     pub(crate) fn new(a: &Analyzer, constraints: &str) -> Assertions {
         let declarations: String = constraints

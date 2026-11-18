@@ -1,4 +1,4 @@
-//! Value domains: which values an expression can take on the rows of a relation.
+//! Value domains: which values an expression can take on an op output's rows.
 //!
 //! Filters and join conditions only pass rows on which they evaluate to TRUE, so
 //! every row above them satisfies facts such as `x BETWEEN 1 AND 10` or
@@ -6,7 +6,7 @@
 //! finite set of values, plus whether NULL can occur. Domains flow up the plan
 //! with the columns they describe, and bound NDVs: a column whose values lie in
 //! a domain of `k` values has at most `k` distinct values. An empty domain means
-//! the relation has no rows at all.
+//! the op output has no rows at all.
 //!
 //! Only data-independent reasoning is used: a fact holds on every database.
 
@@ -299,7 +299,7 @@ impl Dom {
     }
 }
 
-/// Domains of expressions over one relation's output columns. An expression
+/// Domains of expressions over one op output's columns. An expression
 /// without a fact can still get a domain from its type or its structure; see
 /// [`Facts::dom`].
 #[derive(Debug, Clone, Default)]
@@ -388,7 +388,7 @@ impl Facts {
         }
     }
 
-    /// The facts whose columns all map to another relation's columns through
+    /// The facts whose columns all map to another op output's columns through
     /// `map`, rewritten over those columns.
     pub(crate) fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> Facts {
         Facts {

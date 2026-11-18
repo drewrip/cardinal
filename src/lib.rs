@@ -24,10 +24,11 @@
 //!
 //! 1. [`rules`]: a walk over the plan, and over the reference plans' parts
 //!    the query could share rows with ([`joint`]), one rule per operator,
-//!    asserting what the operator adds and recording each relation it makes
-//!    and how its rows are its inputs'.
-//! 2. [`link`]: what holds of any rows whatever made them, asserted over
-//!    those records and between [contexts](rows), in every analysis.
+//!    asserting what the operator adds. Where the plan's shape relates rows
+//!    (an operator and its input, one op output, one table's origins), the
+//!    rules apply [`properties`] of rows.
+//! 2. [`link`]: the same properties between rows only their
+//!    [contexts](rows) relate: operators off one path of a plan.
 //! 3. [`joint`]: each operator of a reference plan pinned to the rows it
 //!    was counted with; the plans' own variables then substituted away.
 //! 4. [`facts`]: facts given by hand, added as claims on the query's
@@ -42,19 +43,16 @@
 //! ┌─ 1. rules: Analyzer::visit ─────────────────▼──────────▼─┐
 //! │ bottom-up, one rule per operator, the query's, then the  │
 //! │ plans' parts over its tables                             │
-//! │   asserts what the operator adds   X ≤ l·r, X = Σ, …     │──┐
-//! │   records each relation            Relation: variables,  │  │
-//! │                                    domains, keys, origin │  │
-//! │   records how relations relate     Link: same rows,      │  │
-//! │                                    subset, wider rows    │  │
+//! │   each count          ≥ 0                                │
+//! │   each operator       what it adds: X ≤ l·r, X = Σ, …    │──┐
+//! │   with its input      same rows, subset, wider           │  │
+//! │   each op output      ndv ≤ X, domains, keys             │  │
+//! │ then one table's      disjoint origins split it          │  │
 //! └─────────────────────────────────────────────┬────────────┘  │
-//!                       relations, links, nodes │               │
-//! ┌─ 2. axioms: axioms::assert_all ─────────────▼────────────┐  │
-//! │ every count     ≥ 0                                      │  │
-//! │ each relation   ndv ≤ X, keys, domains, row facts        │  │
-//! │ each link       X ≤ l, ndv ≤ ndv_l, ranges within        │  ├─▶ Z3
-//! │ one table       disjoint filters split it                │  │
-//! │ contexts        ⊆, fewer, joins, semi + anti, …          │  │
+//!                            op outputs, nodes  │               │
+//! ┌─ 2. link: link::link_all ───────────────────▼────────────┐  │
+//! │ contexts of operators off one path: =, ⊆, fewer, joins,  │  ├─▶ Z3
+//! │ semi + anti, disjoint, …                                 │  │
 //! └─────────────────────────────────────────────┬────────────┘  │
 //! ┌─ 3. pins: joint ────────────────────────────▼────────────┐  │
 //! │ a counted operator X = rows (≥ where a runtime filter    │  │

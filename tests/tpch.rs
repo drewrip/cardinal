@@ -72,7 +72,7 @@ const CASES: &[Case] = &[
     },
     Case {
         // Grouped by part's columns: at most |part| groups, keys or not
-        // (the `wider rows` axiom).
+        // (link's `wider rows`).
         name: "tpch_q16",
         sql: include_str!("tpch/q16.sql"),
     },

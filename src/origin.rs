@@ -2,12 +2,12 @@
 //!
 //! A filter's selectivity is unknown, but two filters whose predicates cannot
 //! both hold pass disjoint sets of rows: their selectivities sum to at most 1.
-//! A relation built from one scan by operators that never duplicate a row
+//! An op output built from one scan by operators that never duplicate a row
 //! (filter, projection, sort, limit, distinct, semi / anti join, ...) has an
 //! *origin*: the table, and the domains of the table's columns over its rows.
 //! Those domains outlive the columns: a filter on `age` still says something
-//! about the rows after `age` is projected away. Relations over the same table
-//! whose domains are disjoint on some column share no row of it.
+//! about the rows after `age` is projected away. Op outputs over the same
+//! table whose domains are disjoint on some column share no row of it.
 
 use datafusion::common::DFSchema;
 
@@ -20,7 +20,7 @@ pub(crate) struct Origin {
     pub(crate) table: String,
     /// The table column each output column holds unchanged, if any.
     cols: Vec<Option<String>>,
-    /// Domains of table columns over this relation's rows, by column name.
+    /// Domains of table columns over these rows, by column name.
     doms: Vec<(String, Dom)>,
 }
 
@@ -74,7 +74,7 @@ impl Origin {
         self.doms.iter().any(|(_, d)| *d != Dom::top())
     }
 
-    /// True if no row of the table can be in both relations.
+    /// True if no row of the table can be in both op outputs.
     fn disjoint(&self, o: &Origin) -> bool {
         self.table == o.table
             && self.doms.iter().any(|(n, a)| {

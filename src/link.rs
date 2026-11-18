@@ -120,8 +120,8 @@ pub fn link_all(a: &Analyzer) {
     let mut space = Space { ancestors: a.ancestors(), ..Space::default() };
     let seeds = add_nodes(&mut space, &a.nodes, &logical);
     let relevant = space.relevant(&seeds);
-    for axiom in space.axioms(&relevant) {
-        a.assert_property(axiom.rule, axiom.claims);
+    for p in space.applied(&relevant) {
+        a.assert_property(p.rule, p.claims);
     }
 }
 
@@ -181,14 +181,14 @@ fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<C
 
 /// The claims of a property where a finder found it applies, and the
 /// finder's rule name.
-pub struct Axiom {
+pub struct Applied {
     pub rule: &'static str,
     pub claims: Vec<Claim>,
 }
 
-impl Axiom {
-    fn new(rule: &'static str, claims: Vec<Claim>) -> Axiom {
-        Axiom { rule, claims }
+impl Applied {
+    fn new(rule: &'static str, claims: Vec<Claim>) -> Applied {
+        Applied { rule, claims }
     }
 }
 
@@ -297,8 +297,9 @@ impl Space {
         out
     }
 
-    /// Every axiom over the quantities of `relevant` contexts.
-    fn axioms(&self, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+    /// Every property the finders apply over the quantities of `relevant`
+    /// contexts.
+    fn applied(&self, relevant: &BTreeSet<Context>) -> Vec<Applied> {
         // Each relevant context's key quantities.
         let mut keys: BTreeMap<&Context, Vec<&FactKind>> = BTreeMap::new();
         for q in self.terms.keys() {
@@ -358,7 +359,7 @@ fn card(c: &Context) -> FactKind {
 ///   relate; each chain but the first gets one claim, joining it to the
 ///   first. Every term of a quantity of several keys is its own chain.
 /// - **Why**: they count the same rows, of one context.
-pub fn eq_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn eq_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Applied> {
     let mut out = vec![];
     for (q, terms) in space.terms.iter().filter(|(q, _)| relevant.contains(over(q))) {
         let on_path = |a: usize, b: usize| width(q) == 1 && space.ancestors.on_one_path(a, b);
@@ -373,7 +374,7 @@ pub fn eq_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
             // Off one path from some term of the first chain, as it could
             // not join it.
             let (t, u) = (c[0], chains[0].iter().find(|u| !on_path(c[0].1, u.1)).unwrap());
-            out.push(Axiom::new("eq context", properties::same(&[pair(q, &t.0, &u.0)])));
+            out.push(Applied::new("eq context", properties::same(&[pair(q, &t.0, &u.0)])));
         }
     }
     out
@@ -398,7 +399,7 @@ fn pair<'a>(q: &FactKind, a: &'a Int, b: &'a Int) -> Pair<'a> {
 ///   same keys.
 /// - **Why**: fewer rows have fewer values, within the same range; as many
 ///   are the same rows.
-pub fn subset_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Context, b: &Context) -> Vec<Axiom> {
+pub fn subset_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, a: &Context, b: &Context) -> Vec<Applied> {
     let (ca, cb) = (card(a), card(b));
     if !space.has_card(a) || !space.has_card(b) {
         return vec![];
@@ -418,11 +419,11 @@ pub fn subset_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, 
     }
     let within: Vec<Pair> =
         within.iter().filter_map(|(qa, qb)| space.off_path2(qa, qb).map(|(ta, tb)| pair(qa, ta, tb))).collect();
-    let mut out = vec![Axiom::new("subset", properties::within(&within))];
+    let mut out = vec![Applied::new("subset", properties::within(&within))];
     let qs: Vec<&FactKind> = [&ca, &cb].into_iter().chain(same.iter().flat_map(|(qa, qb)| [*qa, *qb])).collect();
     if let (false, Some(t)) = (same.is_empty(), space.off_path(&qs)) {
         let same: Vec<Pair> = same.iter().enumerate().map(|(k, (qa, _))| pair(qa, t[2 + 2 * k], t[3 + 2 * k])).collect();
-        out.push(Axiom::new("subset", properties::same_if_as_many(t[0], t[1], &same)));
+        out.push(Applied::new("subset", properties::same_if_as_many(t[0], t[1], &same)));
     }
     out
 }
@@ -434,9 +435,9 @@ pub fn subset_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, 
 ///   once padded, so narrowing an input never adds rows. Its rows need not
 ///   be among the other's (a row may lose its partner and be padded), so
 ///   nothing is said of their values.
-pub fn fewer(space: &Space, a: &Context, b: &Context) -> Vec<Axiom> {
+pub fn fewer(space: &Space, a: &Context, b: &Context) -> Vec<Applied> {
     match space.off_path2(&card(a), &card(b)) {
-        Some((ca, cb)) if space.fewer(a, b) => vec![Axiom::new("fewer", properties::fewer(ca, cb))],
+        Some((ca, cb)) if space.fewer(a, b) => vec![Applied::new("fewer", properties::fewer(ca, cb))],
         _ => vec![],
     }
 }
@@ -474,7 +475,7 @@ fn key_within(a: &FactKind, b: &FactKind) -> bool {
 /// D = orders ∧ o_status = 'F' ⊆ C = orders, P = {o_price > 100}
 /// ⇒ |D| − |D ∧ P| ≤ |orders| − |orders ∧ P|
 /// ```
-pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Axiom> {
+pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Context) -> Vec<Applied> {
     let (Context::Spj { preds: pc, .. }, true) = (c, space.has_card(d) && space.has_card(c) && contain::subset(d, c)) else {
         return vec![];
     };
@@ -490,7 +491,7 @@ pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Con
             continue;
         }
         if let Some(t) = space.off_path(&[&card(d), &card(&dp), &card(c), &card(cp)]) {
-            out.push(Axiom::new("failing rows", properties::failing(t[0], t[1], t[2], t[3])));
+            out.push(Applied::new("failing rows", properties::failing(t[0], t[1], t[2], t[3])));
         }
     }
     out
@@ -509,7 +510,7 @@ pub fn failing(space: &Space, relevant: &BTreeSet<Context>, d: &Context, c: &Con
 /// C = lineitem, P = {l_quantity >= 1}, D = lineitem ⋈ orders
 /// ⇒ |lineitem ∧ P| = |lineitem| ⇒ |D ∧ P| = |D|
 /// ```
-pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Applied> {
     let mut out = vec![];
     for c in relevant {
         let (Context::Spj { preds: pc, .. }, true) = (c, space.has_card(c)) else { continue };
@@ -529,7 +530,7 @@ pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
                 }
                 let dp = d.filter(&p).canonical();
                 if let Some(t) = space.off_path(&[&card(c), &card(cp), &card(d), &card(&dp)]) {
-                    out.push(Axiom::new("implied", properties::implied(t[0], t[1], t[2], t[3])));
+                    out.push(Applied::new("implied", properties::implied(t[0], t[1], t[2], t[3])));
                 }
             }
         }
@@ -543,7 +544,7 @@ pub fn implied(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
 ///   condition, `K` it without it, and `K ▷ O` it with the anti condition
 ///   on the same `on` and `O` instead.
 /// - **Why**: each row of `K` has a partner or has none.
-pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
+pub fn split(space: &Space, s: &Context) -> Vec<Applied> {
     let (Context::Spj { tables, atoms, preds, exists }, true) = (s, space.has_card(s)) else { return vec![] };
     let mut out = vec![];
     for e in exists.iter().filter(|e| e.kind == ExistsKind::Semi) {
@@ -555,7 +556,7 @@ pub fn split(space: &Space, s: &Context) -> Vec<Axiom> {
         with_anti.insert(Exists { kind: ExistsKind::Anti, on: e.on.clone(), other: e.other.clone() });
         let anti = spj(with_anti).canonical();
         if let Some(t) = space.off_path(&[&card(s), &card(&anti), &card(&kept)]) {
-            out.push(Axiom::new("semi and anti", properties::split(t[0], t[1], t[2])));
+            out.push(Applied::new("semi and anti", properties::split(t[0], t[1], t[2])));
         }
     }
     out
@@ -573,14 +574,14 @@ fn width(q: &FactKind) -> usize {
 ///
 /// - **Claim**: `ndv(K | C) ≤ ndv(K' | C)` for `K ⊊ K'`.
 /// - **Why**: fewer keys have no more combinations.
-pub fn fewer_keys(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, c: &Context) -> Vec<Axiom> {
+pub fn fewer_keys(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, c: &Context) -> Vec<Applied> {
     let mut out = vec![];
     for qa in keys.get(c).into_iter().flatten() {
         let FactKind::Distinct { keys: ka, .. } = qa else { continue };
         for qb in keys.get(c).into_iter().flatten() {
             let FactKind::Distinct { keys: kb, .. } = qb else { continue };
             if let (true, Some((ta, tb))) = (ka.len() < kb.len() && ka.is_subset(kb), space.off_path2(qa, qb)) {
-                out.push(Axiom::new("fewer keys", properties::fewer_keys(ta, tb)));
+                out.push(Applied::new("fewer keys", properties::fewer_keys(ta, tb)));
             }
         }
     }
@@ -624,7 +625,7 @@ fn of_tables(keys: &BTreeSet<Term>, tables: &BTreeSet<String>) -> bool {
 /// D = orders ⋈ lineitem on o_orderkey = l_orderkey
 /// ⇒ ndv(o_custkey | D) ≤ ndv(o_custkey | orders) and ≤ |orders|
 /// ```
-pub fn wider_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn wider_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, relevant: &BTreeSet<Context>) -> Vec<Applied> {
     let mut out = vec![];
     for d in relevant {
         let Some(qds) = keys.get(d) else { continue };
@@ -637,14 +638,14 @@ pub fn wider_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, r
                 match qd {
                     FactKind::Distinct { keys: kd, .. } if of_tables(kd, tc) => {
                         if let Some((td, n)) = space.off_path2(qd, &card(c)) {
-                            out.push(Axiom::new("wider rows", properties::values_of_rows(td, n)));
+                            out.push(Applied::new("wider rows", properties::values_of_rows(td, n)));
                         }
                         for qc in keys.get(c).into_iter().flatten() {
                             if let FactKind::Distinct { keys: kc, .. } = qc
                                 && kd.is_subset(kc)
                                 && let Some((td, tc)) = space.off_path2(qd, qc)
                             {
-                                out.push(Axiom::new("wider rows", properties::within(&[Pair::Ndv(td, tc)])));
+                                out.push(Applied::new("wider rows", properties::within(&[Pair::Ndv(td, tc)])));
                             }
                         }
                     }
@@ -654,7 +655,7 @@ pub fn wider_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, r
                             _ => FactKind::Max { key: key.clone(), over: c.clone() },
                         };
                         if let Some((td, tc)) = space.off_path2(qd, &at_c) {
-                            out.push(Axiom::new("wider rows", properties::within(&[pair(qd, td, tc)])));
+                            out.push(Applied::new("wider rows", properties::within(&[pair(qd, td, tc)])));
                         }
                     }
                     _ => {}
@@ -678,7 +679,7 @@ pub fn wider_context(space: &Space, keys: &BTreeMap<&Context, Vec<&FactKind>>, r
 /// ```text
 /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
 /// ```
-pub fn disjoint_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axiom> {
+pub fn disjoint_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Applied> {
     let mut groups: BTreeMap<_, Vec<(&BTreeSet<Term>, FactKind)>> = BTreeMap::new();
     for c in relevant {
         if let (Context::Spj { tables, atoms, preds, exists }, true) = (c, space.has_card(c)) {
@@ -699,7 +700,7 @@ pub fn disjoint_context(space: &Space, relevant: &BTreeSet<Context>) -> Vec<Axio
                         continue;
                     }
                     if let Some(t) = space.off_path(&[x, y, z]) {
-                        out.push(Axiom::new("disjoint", properties::disjoint(&[t[0], t[1]], t[2])));
+                        out.push(Applied::new("disjoint", properties::disjoint(&[t[0], t[1]], t[2])));
                     }
                 }
             }
@@ -764,9 +765,9 @@ mod tests {
             space.add(card(c), Int::new_const(v), node);
         }
         let relevant: BTreeSet<Context> = [orders, early, late].into();
-        let axioms = disjoint_context(&space, &relevant);
-        assert_eq!(axioms.len(), 1);
-        assert_eq!(axioms[0].claims[0].claim.to_string(), "(<= (+ x y) n)");
+        let applied = disjoint_context(&space, &relevant);
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].claims[0].claim.to_string(), "(<= (+ x y) n)");
     }
 
     #[test]
@@ -783,8 +784,8 @@ mod tests {
         let mut keys: BTreeMap<&Context, Vec<&FactKind>> = BTreeMap::new();
         let q = key(&joined);
         keys.entry(&joined).or_default().push(&q);
-        let axioms: Vec<String> = wider_context(&space, &keys, &relevant).iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect();
-        assert_eq!(axioms, ["(<= k n)"]);
+        let claims: Vec<String> = wider_context(&space, &keys, &relevant).iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect();
+        assert_eq!(claims, ["(<= k n)"]);
     }
 
     #[test]
@@ -797,8 +798,8 @@ mod tests {
             space.add(card(&orders), Int::new_const(v), node);
         }
         let relevant: BTreeSet<Context> = [orders.clone(), early.clone()].into();
-        let claims = |axioms: Vec<Axiom>| -> Vec<String> {
-            axioms.iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect()
+        let claims = |applied: Vec<Applied>| -> Vec<String> {
+            applied.iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect()
         };
         assert_eq!(claims(eq_context(&space, &relevant)), ["(= c a)"]);
         // The filter's rows are node 0's: only another plan's relates them.

@@ -1,6 +1,6 @@
-//! What holds of every op output, given only the plan's shape: of each
-//! count and output whatever its operator, and of an operator's output
-//! given its input's.
+//! What holds of op outputs by the plan's shape alone: of each count and
+//! output whatever its operator, of an operator's output given its
+//! input's, and of one table's outputs.
 //!
 //! # Every op output
 //!
@@ -10,8 +10,8 @@
 //! | When | Rules |
 //! |---|---|
 //! | a count is made (`Analyzer::new_var`) | [`non_negative`](Analyzer::non_negative) |
-//! | a stored table is scanned ([`Analyzer::scan`]) | [`composite_key`](Analyzer::composite_key), [`referenced_size`](Analyzer::referenced_size), with reference plans ([`crate::joint`]) only |
 //! | an output is made (`Analyzer::fresh`) | [`ndv_within_rows`](Analyzer::ndv_within_rows), [`nonempty_ndv`](Analyzer::nonempty_ndv), [`boolean_ndv`](Analyzer::boolean_ndv) |
+//! | a stored table is scanned ([`Analyzer::scan`]) | [`composite_key`](Analyzer::composite_key), [`referenced_size`](Analyzer::referenced_size), with reference plans ([`crate::joint`]) only |
 //! | its rule is done (`Analyzer::finish`), by its domains | [`empty_domain`](Analyzer::empty_domain), [`ndv_within_domain`](Analyzer::ndv_within_domain), [`range_within_domain`](Analyzer::range_within_domain) |
 //! | 〃, by its subset bounds | [`bounded_sum`](Analyzer::bounded_sum), [`nulls_and_values`](Analyzer::nulls_and_values) |
 //! | 〃, by its keys | [`key_ndv`](Analyzer::key_ndv), `unique_columns` |

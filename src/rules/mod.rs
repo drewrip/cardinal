@@ -28,10 +28,12 @@
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
 //!   this against data).
-//! - **Not done**: rules assert what each operator adds, and apply
-//!   [properties](crate::properties) where the plan makes the relationship
-//!   plain: an input, one op output, one table's origins. Relationships
-//!   only contexts reveal are [link](crate::link)'s.
+//! - **Scope**: what each operator adds, and
+//!   [properties](crate::properties) of rows where the plan makes the
+//!   relationship plain: an operator and its input, one op output, one
+//!   table's origins ([`op_output`]).
+//! - **Not done**: relationships only contexts reveal, between operators
+//!   off one path, are [link](crate::link)'s.
 //!
 //! # Notation
 //!
@@ -539,7 +541,8 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Bounds output column `v`, computed by `e` over the rows of `input`, if
-    /// `e` is not a column: those the axioms relate.
+    /// `e` is not a column: a column's are related as the same rows'
+    /// ([`op_output`]).
     pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &OpOutput) {
         if let Some(bound) = expr_bound(e, input, l, self.max_product) {
             self.assert_as(Role::Flow, v.le(bound));

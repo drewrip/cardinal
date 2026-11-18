@@ -152,8 +152,8 @@ impl<'c> Builder<'c> {
 
     /// Analyze the query together with `plans`, executed plans of other
     /// queries over the data the bounds are for ([`crate::joint`]): each
-    /// operator they counted is held to its rows, and the axioms relate
-    /// their operators to the query's. Plans that were not run, or do not
+    /// operator they counted is held to its rows, and [link](crate::link)
+    /// relates their operators to the query's. Plans that were not run, or do not
     /// translate, are left out. Adds to any plans given before.
     pub fn with_plans(mut self, plans: impl IntoIterator<Item = &'c ObservedPlan>) -> Self {
         self.plans.extend(plans);
@@ -213,7 +213,7 @@ impl<'c> Builder<'c> {
     }
 }
 
-/// `plan` analyzed with `plans`: rules, axioms, pins, and the reduction if
+/// `plan` analyzed with `plans`: rules, link, pins, and the reduction if
 /// there are plans ([`crate::joint`]); `referenced` resolves the plans'
 /// scans.
 fn analyze(
