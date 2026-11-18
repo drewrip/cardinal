@@ -31,7 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::analysis::Analyzer;
+use crate::analysis::{Analyzer, Ancestors};
 
 /// Simplifications of the constraints before solving. None by default.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -76,8 +76,8 @@ struct Index {
     column: HashMap<String, usize>,
     /// Each column's node, if known.
     node: Vec<Option<usize>>,
-    /// `above[a][b]`: node `b` is above node `a`, an ancestor of it.
-    above: Vec<Vec<bool>>,
+    /// Each node's ancestors.
+    above: Ancestors,
 }
 
 impl Assertions {
@@ -106,26 +106,7 @@ impl Assertions {
                 node.push(n);
             }
         }
-        // A node's ancestors are its parents and theirs. Children come
-        // before parents, so walking back finds the parents' first.
-        let n = a.nodes.len();
-        let mut parents = vec![vec![]; n];
-        for (p, node) in a.nodes.iter().enumerate() {
-            for &c in &node.inputs {
-                parents[c].push(p);
-            }
-        }
-        let mut above = vec![vec![false; n]; n];
-        for c in (0..n).rev() {
-            let mut row = vec![false; n];
-            for &p in &parents[c] {
-                row[p] = true;
-                for (x, y) in row.iter_mut().zip(&above[p]) {
-                    *x |= *y;
-                }
-            }
-            above[c] = row;
-        }
+        let above = a.ancestors();
         let index = Arc::new(Index {
             declarations,
             declared,
@@ -202,7 +183,7 @@ impl Assertions {
             live[c] = true;
             for &d in &links[c] {
                 // Never up: from a node to one of its ancestors.
-                let up = matches!((ix.node[c], ix.node[d]), (Some(a), Some(b)) if ix.above[a][b]);
+                let up = matches!((ix.node[c], ix.node[d]), (Some(a), Some(b)) if ix.above.above(a, b));
                 if !live[d] && !up {
                     live[d] = true;
                     work.push(d);

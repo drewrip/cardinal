@@ -516,6 +516,31 @@ impl<'a> Analyzer<'a> {
         var
     }
 
+    /// Which nodes are above which: their ancestors in the plans visited.
+    pub(crate) fn ancestors(&self) -> Ancestors {
+        // A node's ancestors are its parents and theirs. Children come
+        // before parents, so walking back finds the parents' first.
+        let n = self.nodes.len();
+        let mut parents = vec![vec![]; n];
+        for (p, node) in self.nodes.iter().enumerate() {
+            for &c in &node.inputs {
+                parents[c].push(p);
+            }
+        }
+        let mut above = vec![vec![false; n]; n];
+        for c in (0..n).rev() {
+            let mut row = vec![false; n];
+            for &p in &parents[c] {
+                row[p] = true;
+                for (x, y) in row.iter_mut().zip(&above[p]) {
+                    *x |= *y;
+                }
+            }
+            above[c] = row;
+        }
+        Ancestors(above)
+    }
+
     /// Returns the abstract state of `plan`'s output.
     pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> OpOutput {
         let frame = self.next_frame;
@@ -561,6 +586,23 @@ impl<'a> Analyzer<'a> {
         self.frame_node.insert(frame, self.nodes.len() - 1);
         self.frontier.push(self.nodes.len() - 1);
         out
+    }
+}
+
+/// Each node's ancestors: `.0[a][b]` if node `b` is above node `a`.
+#[derive(Debug, Default)]
+pub(crate) struct Ancestors(pub(crate) Vec<Vec<bool>>);
+
+impl Ancestors {
+    /// True if node `b` is above node `a`, an ancestor of it.
+    pub(crate) fn above(&self, a: usize, b: usize) -> bool {
+        self.0.get(a).and_then(|row| row.get(b)).is_some_and(|&x| x)
+    }
+
+    /// True if `a` and `b` are one node, or one is above the other: a
+    /// root-to-leaf path of one plan holds both.
+    pub(crate) fn on_one_path(&self, a: usize, b: usize) -> bool {
+        a == b || self.above(a, b) || self.above(b, a)
     }
 }
 
