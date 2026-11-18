@@ -40,7 +40,8 @@ async fn caps_through_a_foreign_key() {
 }
 
 /// The trace, which prints every constraint before the reduction, leaves
-/// the reduced constraints as they are without it.
+/// the reduced constraints as they are without it; and the reduction
+/// (`solve-eqs`) does shrink them.
 #[tokio::test]
 async fn trace_leaves_the_constraints() {
     let catalog = catalog().await;
@@ -54,6 +55,9 @@ async fn trace_leaves_the_constraints() {
     let (plain, traced) = (build(false), build(true));
     assert!(traced.trace.is_some());
     assert_eq!(plain.constraints(), traced.constraints());
+    let reduced = plain.constraints().lines().filter(|l| l.starts_with("(assert")).count();
+    let before = traced.trace.unwrap().constraints.len();
+    assert!(reduced < before, "{reduced} of {before}");
 }
 
 /// Reference plans given to a query with no catalog to read them against

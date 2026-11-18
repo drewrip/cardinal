@@ -359,4 +359,12 @@ mod tests {
             &["a", "b", "c", "d"],
         );
     }
+
+    /// Z3 is the pinned release, not an older system library: older ones
+    /// prove far slower.
+    #[test]
+    fn z3_is_recent() {
+        let v: Vec<u32> = z3::full_version().split('.').take(2).map(|n| n.parse().unwrap()).collect();
+        assert!(v >= vec![4, 13], "Z3 {}", z3::full_version());
+    }
 }

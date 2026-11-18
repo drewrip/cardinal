@@ -3,7 +3,7 @@
 Proves bounds on a SQL query's output cardinality, with no data, or with the
 executed plans of other queries and facts given by hand.
 
-Requires Z3 (`brew install z3`; paths in `.cargo/config.toml`).
+Downloads and links Z3 5.4.1 when built (needs network, and glibc ≥ 2.39 or macOS ≥ 13.3).
 
 ## Usage
 
