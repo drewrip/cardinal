@@ -1,9 +1,13 @@
 //! Bounds on a query's output cardinality.
 //!
 //! The largest `lo` and smallest `hi` with `lo <= X <= hi` that Z3 proves,
-//! each by binary search, of the root's cardinality or of any operator's
-//! ([`PlanBounds`]). A bound is reported only when Z3 proves it; an undecided
-//! check never yields one.
+//! of the root's cardinality or of any operator's ([`PlanBounds`]). A bound
+//! is reported only when Z3 proves it; an undecided check never yields one.
+//!
+//! `hi` is searched first, by binary search from `2^30` down, and caps the
+//! search for `lo`, which gallops up from 0 and then bisects. Each check
+//! that fails to prove a claim needs a model, which can take the whole
+//! timeout, so the searches avoid them: `lo` is most often small.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -249,10 +253,27 @@ impl Search {
 
     /// The largest `N` with `x >= N` of target `i`, searched only where the
     /// checks so far leave it: from what is proven up to the least value seen.
+    ///
+    /// It gallops up from what is proven (`+1`, `+2`, `+4`, …), then
+    /// bisects below the first claim that fails. A proof is cheap, while a
+    /// refutation needs a model, which can take the whole timeout: a small
+    /// lower bound, the most common, costs about one failed check.
     fn lower(&self, i: usize) -> u64 {
         let k = self.known(i);
-        let mut hi = [k.least, k.ceil, Some(CAP)].into_iter().flatten().min().unwrap_or(CAP);
-        let mut lo = k.floor.min(hi);
+        let top = [k.least, k.ceil, Some(CAP)].into_iter().flatten().min().unwrap_or(CAP);
+        let mut lo = k.floor.min(top);
+        let mut step = 1;
+        let mut hi = loop {
+            let n = (lo + step).min(top);
+            if n <= lo {
+                return lo;
+            }
+            if !self.proves_at_least(i, n) {
+                break self.known(i).least.map_or(n - 1, |l| l.min(n - 1)).max(lo);
+            }
+            lo = n;
+            step *= 2;
+        };
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if self.proves_at_least(i, mid + 1) {
@@ -266,7 +287,7 @@ impl Search {
 
     /// The smallest `N` with `x <= N` of target `i`, searched only where the
     /// checks so far leave it: from the greatest value seen up to what is
-    /// proven.
+    /// proven. Searched before [`Self::lower`], which it caps.
     fn upper(&self, i: usize) -> Option<u64> {
         if self.known(i).most.is_some_and(|m| m > CAP) {
             return None;
@@ -288,8 +309,11 @@ impl Search {
         Some(hi)
     }
 
+    /// The proven range of target `i`: the upper bound first, whose proof
+    /// caps the lower bound's search.
     fn range_of(&self, i: usize) -> Bounds {
-        Bounds { lower: self.lower(i), upper: self.upper(i) }
+        let upper = self.upper(i);
+        Bounds { lower: self.lower(i), upper }
     }
 
     /// The proven range of each of `cards`, and of their sum. Each card is
@@ -358,6 +382,36 @@ mod tests {
             &format!("{decls} (assert (<= 0 a 10)) (assert (= (+ a b) 10)) (assert (>= b 0)) (assert (= c (- 10 a))) (assert (<= 0 d 1))"),
             &["a", "b", "c", "d"],
         );
+    }
+
+    fn bounds_of(smt: &str) -> Bounds {
+        Search::new(&format!("(declare-const x Int) {smt}"), "x").0.bounds()
+    }
+
+    #[test]
+    fn lower_bounds_are_exact() {
+        for n in [0, 1, 7, 1_000] {
+            let b = bounds_of(&format!("(assert (<= {n} x 5000))"));
+            assert_eq!(b, Bounds { lower: n, upper: Some(5000) });
+        }
+        assert_eq!(bounds_of("(assert (= x 5))"), Bounds { lower: 5, upper: Some(5) });
+    }
+
+    #[test]
+    fn lower_bound_without_an_upper_one() {
+        assert_eq!(bounds_of("(assert (>= x 7))"), Bounds { lower: 7, upper: None });
+    }
+
+    /// Once the upper bound is searched, a lower bound of 0 costs at most
+    /// two checks.
+    #[test]
+    fn small_lower_bound_is_cheap() {
+        let (search, _) = Search::new("(declare-const x Int) (assert (<= 0 x 5000))", "x");
+        let i = search.target(&Int::new_const("x"));
+        assert_eq!(search.upper(i), Some(5000));
+        let before = search.stats().checks();
+        assert_eq!(search.lower(i), 0);
+        assert!(search.stats().checks() - before <= 2, "{:?}", search.stats());
     }
 
     /// Z3 is the pinned release, not an older system library: older ones
