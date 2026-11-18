@@ -14,7 +14,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use z3::ast::{Bool, Int};
-use z3::{SatResult, Solver};
+use z3::{Params, SatResult, Solver};
 
 use crate::analysis::solver_with_timeout;
 
@@ -71,6 +71,9 @@ pub struct NodeBounds {
 const CAP: u64 = 1 << 30;
 /// Per-check timeout: bounds are best-effort, so give up quickly.
 const TIMEOUT_MS: u32 = 1_000;
+/// The first check of a search, which also loads the constraints into the
+/// solver.
+const FIRST_TIMEOUT_MS: u32 = 10_000;
 
 /// How a bounds search's solver checks came out, and how long they took.
 #[doc(hidden)]
@@ -104,6 +107,8 @@ pub(crate) struct Search {
     solver: Solver,
     output: Int,
     stats: Cell<SearchStats>,
+    /// Whether a check has run, loading the constraints.
+    warm: Cell<bool>,
     /// The variables searched for bounds, and what the checks so far tell
     /// of each: every model a check finds narrows each one's search.
     targets: RefCell<Vec<(Int, Known)>>,
@@ -134,6 +139,7 @@ impl Search {
                 solver,
                 output: Int::new_const(root),
                 stats: Cell::default(),
+                warm: Cell::new(false),
                 targets: RefCell::default(),
             },
             parsed,
@@ -145,10 +151,29 @@ impl Search {
         self.stats.get()
     }
 
+    /// The timeout of the next check: longer for the first.
+    fn timeout_ms(&self) -> u32 {
+        if self.warm.get() { TIMEOUT_MS } else { FIRST_TIMEOUT_MS }
+    }
+
+    fn set_timeout(&self, ms: u32) {
+        let mut params = Params::new();
+        params.set_u32("timeout", ms);
+        self.solver.set_params(&params);
+    }
+
     /// Checks the solver, counting the outcome.
     fn check(&self) -> SatResult {
+        let ms = self.timeout_ms();
+        if ms != TIMEOUT_MS {
+            self.set_timeout(ms);
+        }
         let start = Instant::now();
         let result = self.solver.check();
+        self.warm.set(true);
+        if ms != TIMEOUT_MS {
+            self.set_timeout(TIMEOUT_MS);
+        }
         let mut stats = self.stats.get();
         stats.time += start.elapsed();
         match result {
@@ -412,6 +437,18 @@ mod tests {
         let before = search.stats().checks();
         assert_eq!(search.lower(i), 0);
         assert!(search.stats().checks() - before <= 2, "{:?}", search.stats());
+    }
+
+    /// The first check, which loads the constraints, gets the longer
+    /// timeout; the rest the usual one.
+    #[test]
+    fn first_check_gets_more_time() {
+        let (search, _) = Search::new("(declare-const x Int) (assert (<= 0 x 5))", "x");
+        assert_eq!(search.timeout_ms(), FIRST_TIMEOUT_MS);
+        search.check();
+        assert_eq!(search.timeout_ms(), TIMEOUT_MS);
+        search.check();
+        assert_eq!(search.timeout_ms(), TIMEOUT_MS);
     }
 
     /// Z3 is the pinned release, not an older system library: older ones

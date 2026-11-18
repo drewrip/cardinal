@@ -177,7 +177,8 @@ impl Analysis {
 
     /// Proves the tightest `lower <= X <= upper` on the output cardinality.
     ///
-    /// This runs many solver checks (each limited to one second), so it is
+    /// This runs many solver checks, each limited to one second but the
+    /// first, which loads the constraints and may take up to ten, so it is
     /// separate from the analysis itself. Without facts it depends only on
     /// the query, not on the data.
     pub fn bounds(&self) -> Result<Bounds> {
