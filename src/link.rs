@@ -99,7 +99,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Expr, Operator};
 
-use z3::ast::Int;
+use z3::ast::{Bool, Int};
 
 use crate::analysis::{Analyzer, Ancestors, Node};
 use crate::facts::FactKind;
@@ -108,7 +108,7 @@ use crate::rows::contain::{self, renamed_kind};
 use crate::rows::logical::Logical;
 use crate::rows::rewrite::Spj;
 use crate::rows::{Context, Exists, ExistsKind, Term, bases};
-use crate::properties::{self, Claim, Pair};
+use crate::properties::{self, Pair};
 
 /// Asserts every property link finds between the rows of `a`'s operators,
 /// once its rules have visited every plan: each operator's rows given the
@@ -183,11 +183,11 @@ fn add_nodes(space: &mut Space, nodes: &[Node], logical: &Logical) -> BTreeSet<C
 /// finder's rule name.
 pub struct Applied {
     pub rule: &'static str,
-    pub claims: Vec<Claim>,
+    pub claims: Vec<Bool>,
 }
 
 impl Applied {
-    fn new(rule: &'static str, claims: Vec<Claim>) -> Applied {
+    fn new(rule: &'static str, claims: Vec<Bool>) -> Applied {
         Applied { rule, claims }
     }
 }
@@ -767,7 +767,7 @@ mod tests {
         let relevant: BTreeSet<Context> = [orders, early, late].into();
         let applied = disjoint_context(&space, &relevant);
         assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].claims[0].claim.to_string(), "(<= (+ x y) n)");
+        assert_eq!(applied[0].claims[0].to_string(), "(<= (+ x y) n)");
     }
 
     #[test]
@@ -784,7 +784,7 @@ mod tests {
         let mut keys: BTreeMap<&Context, Vec<&FactKind>> = BTreeMap::new();
         let q = key(&joined);
         keys.entry(&joined).or_default().push(&q);
-        let claims: Vec<String> = wider_context(&space, &keys, &relevant).iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect();
+        let claims: Vec<String> = wider_context(&space, &keys, &relevant).iter().flat_map(|a| &a.claims).map(|c| c.to_string()).collect();
         assert_eq!(claims, ["(<= k n)"]);
     }
 
@@ -799,7 +799,7 @@ mod tests {
         }
         let relevant: BTreeSet<Context> = [orders.clone(), early.clone()].into();
         let claims = |applied: Vec<Applied>| -> Vec<String> {
-            applied.iter().flat_map(|a| &a.claims).map(|c| c.claim.to_string()).collect()
+            applied.iter().flat_map(|a| &a.claims).map(|c| c.to_string()).collect()
         };
         assert_eq!(claims(eq_context(&space, &relevant)), ["(= c a)"]);
         // The filter's rows are node 0's: only another plan's relates them.

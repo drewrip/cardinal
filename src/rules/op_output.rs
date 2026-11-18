@@ -45,7 +45,6 @@ use crate::analysis::{Analyzer, OpOutput, ScanKind, int, product};
 use crate::builder::bare_kind;
 use crate::keys::Nulls;
 use crate::origin::{self, Origin};
-use crate::postprocess::Role;
 use crate::properties::{self, Pair};
 
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Min` and `Max`, if
@@ -90,14 +89,14 @@ impl Analyzer<'_> {
     /// - **Claim**: `v ≥ 0` for every row count and `ndv`, and each table's
     ///   size.
     pub fn non_negative(&self, v: &Int) {
-        self.assert_as(Role::Local, v.ge(int(0)));
+        self.assert(v.ge(int(0)));
     }
 
     /// `ndv within rows`.
     ///
     /// - **Claim**: `ndv ≤ X` for each column.
     pub fn ndv_within_rows(&self, ndv: &Int, rows: &Int) {
-        self.assert_as(Role::Local, ndv.le(rows));
+        self.assert(ndv.le(rows));
     }
 
     /// `nonempty ndv`.
@@ -105,14 +104,14 @@ impl Analyzer<'_> {
     /// - **Claim**: `X ≥ 1 ⇒ ndv ≥ 1`: a row has a value, NULL counting as
     ///   one.
     pub fn nonempty_ndv(&self, ndv: &Int, rows: &Int) {
-        self.assert_as(Role::Local, rows.ge(int(1)).implies(ndv.ge(int(1))));
+        self.assert(rows.ge(int(1)).implies(ndv.ge(int(1))));
     }
 
     /// `boolean ndv`.
     ///
     /// - **Claim**: `ndv ≤ 3` for a boolean column: true, false and NULL.
     pub fn boolean_ndv(&self, ndv: &Int) {
-        self.assert_as(Role::Local, ndv.le(int(3)));
+        self.assert(ndv.le(int(3)));
     }
 
     /// Every rule on `out`, the output of `plan`, once its rule has found
@@ -156,7 +155,7 @@ impl Analyzer<'_> {
     /// WHERE d BETWEEN 1 AND 7  ⇒  ndv(d) ≤ 7
     /// ```
     pub fn ndv_within_domain(&self, ndv: &Int, n: u64) {
-        self.assert_as(Role::Local, ndv.le(int(n)));
+        self.assert(ndv.le(int(n)));
     }
 
     /// `range within domain`.
@@ -171,16 +170,16 @@ impl Analyzer<'_> {
             let d = out.facts.dom(&col(plan, j), schema);
             let (from, to) = d.int_range();
             if let Some(from) = from.and_then(|v| i64::try_from(v).ok()) {
-                self.assert_as(Role::Local, lo.ge(Int::from_i64(from)));
+                self.assert(lo.ge(Int::from_i64(from)));
             }
             if let Some(to) = to.and_then(|v| i64::try_from(v).ok()) {
-                self.assert_as(Role::Local, hi.le(Int::from_i64(to)));
+                self.assert(hi.le(Int::from_i64(to)));
             }
             if d.never_null() {
-                self.assert_as(Role::Local, out.card.ge(int(1)).implies(lo.le(hi)));
+                self.assert(out.card.ge(int(1)).implies(lo.le(hi)));
             }
             let width = hi.ge(lo).ite(&(hi - lo + int(1)), &int(0));
-            self.assert_as(Role::Local, out.ndv[j].le(width + int(!d.never_null() as u64)));
+            self.assert(out.ndv[j].le(width + int(!d.never_null() as u64)));
         }
     }
 

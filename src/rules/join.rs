@@ -9,7 +9,6 @@ use super::op_output::{columns, ranges, with_card};
 use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
 use crate::analysis::{Analyzer, OpOutput, SubsetBounds, ScanKind, int, min};
 use crate::domain::Facts;
-use crate::postprocess::Role;
 use crate::properties::{same, within};
 
 impl<'a> Analyzer<'a> {
@@ -285,7 +284,7 @@ impl<'a> Analyzer<'a> {
             self.kept(o, r, nl);
         }
         for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
-            self.assert_as(Role::Flow, o.ndv[ia].eq(&o.ndv[nl + ib]));
+            self.assert(o.ndv[ia].eq(&o.ndv[nl + ib]));
         }
     }
 
@@ -445,8 +444,8 @@ impl<'a> Analyzer<'a> {
             if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib])
                 && o.unit[ia] == o.unit[nl + ib]
             {
-                self.assert_as(Role::Flow, a_lo.eq(b_lo));
-                self.assert_as(Role::Flow, a_hi.eq(b_hi));
+                self.assert(a_lo.eq(b_lo));
+                self.assert(a_hi.eq(b_hi));
             }
         }
         if let Some(f) = &join.filter {
@@ -510,7 +509,7 @@ impl<'a> Analyzer<'a> {
     /// `side`'s: each of its rows is one of `o`'s.
     fn kept(&self, o: &OpOutput, side: &OpOutput, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
-            self.assert_as(Role::Flow, o.ndv[at + i].ge(v));
+            self.assert(o.ndv[at + i].ge(v));
         }
     }
 
@@ -518,7 +517,7 @@ impl<'a> Analyzer<'a> {
     /// or NULL.
     fn padded(&self, o: &OpOutput, side: &OpOutput, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
-            self.assert_as(Role::Flow, o.ndv[at + i].le(v + int(1)));
+            self.assert(o.ndv[at + i].le(v + int(1)));
         }
         self.assert_property("within", within(&ranges(o, side, &aligned(side.ndv.len(), at))));
     }

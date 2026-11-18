@@ -27,8 +27,6 @@ use z3::{Params, Solver};
 use crate::ForeignKey;
 use crate::domain::{self, Facts};
 use crate::origin::Origin;
-use crate::postprocess::Role;
-use crate::properties::Claim;
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,9 +70,6 @@ pub struct OpOutput {
     pub(crate) subset_bounds: SubsetBounds,
     /// The stored table these rows are distinct rows of, if any.
     pub(crate) origin: Option<Origin>,
-    /// The frame of the node being visited when it was made, for
-    /// [`crate::trace`].
-    pub(crate) frame: Option<usize>,
     /// The node it is the output of, once finished ([`Analyzer::finish`]):
     /// none for a scan's raw rows.
     pub(crate) node: Option<usize>,
@@ -167,8 +162,6 @@ pub struct Analyzer<'a> {
     pub(crate) trace: bool,
     /// Every assertion, in order, if `trace` is set.
     pub(crate) log: RefCell<Vec<Logged>>,
-    /// Every assertion's role, in order ([`crate::postprocess`]).
-    pub(crate) roles: RefCell<Vec<Role>>,
     /// Frames of the nodes being visited, innermost last.
     pub(crate) owners: Vec<usize>,
     pub(crate) next_frame: usize,
@@ -346,7 +339,6 @@ impl<'a> Analyzer<'a> {
             foreign_keys,
             trace,
             log: RefCell::new(Vec::new()),
-            roles: RefCell::new(Vec::new()),
             owners: Vec::new(),
             next_frame: 0,
             frame_node: HashMap::new(),
@@ -422,7 +414,6 @@ impl<'a> Analyzer<'a> {
             facts: Facts::default(),
             subset_bounds: SubsetBounds::default(),
             origin: None,
-            frame: self.owners.last().copied(),
             node: None,
         };
         self.op_outputs.push(out.clone());
@@ -450,16 +441,9 @@ impl<'a> Analyzer<'a> {
         out.ndv.iter().map(|v| self.name_of(v)).collect()
     }
 
-    /// Asserts `b`, a [`Role::Gen`].
+    /// Asserts `b`.
     #[track_caller]
     pub(crate) fn assert(&self, b: Bool) {
-        self.assert_as(Role::Gen, b);
-    }
-
-    /// Asserts `b`, with `role` in [liveness](crate::postprocess).
-    #[track_caller]
-    pub(crate) fn assert_as(&self, role: Role, b: Bool) {
-        self.roles.borrow_mut().push(role);
         if self.trace {
             self.log.borrow_mut().push(Logged {
                 expr: b.clone(),
@@ -471,20 +455,18 @@ impl<'a> Analyzer<'a> {
         self.solver.assert(b);
     }
 
-    /// Asserts `b`, with `role`, kept out of the trace's log: the caller
-    /// traces it itself.
-    pub(crate) fn assert_untraced(&self, role: Role, b: Bool) {
-        self.roles.borrow_mut().push(role);
+    /// Asserts `b`, kept out of the trace's log: the caller traces it
+    /// itself.
+    pub(crate) fn assert_untraced(&self, b: Bool) {
         self.solver.assert(b);
     }
 
     /// Asserts each of `claims`, the [property](crate::properties) `name`,
     /// for the node being visited, if any.
     #[track_caller]
-    pub(crate) fn assert_property(&self, name: &'static str, claims: Vec<Claim>) {
+    pub(crate) fn assert_property(&self, name: &'static str, claims: Vec<Bool>) {
         let at = Location::caller();
-        for Claim { role, claim } in claims {
-            self.roles.borrow_mut().push(role);
+        for claim in claims {
             if self.trace {
                 let frame = self.owners.last().copied();
                 self.log.borrow_mut().push(Logged { expr: claim.clone(), frame, at, rule: Some(name) });

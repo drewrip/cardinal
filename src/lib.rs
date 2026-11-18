@@ -34,8 +34,6 @@
 //! 4. [`facts`]: facts given by hand, added as claims on the query's
 //!    operators, assumed consistent with the rest unless
 //!    [`Options::check_facts`] asks to check.
-//! 5. [`postprocess`]: when bounds are searched for, constraints that
-//!    cannot move them are left out, if [`Options::postprocess`] asks.
 //!
 //! ```text
 //!       query: SQL ─parse, optimize─▶ LogicalPlan      reference plans
@@ -56,14 +54,12 @@
 //! └─────────────────────────────────────────────┬────────────┘  │
 //! ┌─ 3. pins: joint ────────────────────────────▼────────────┐  │
 //! │ a counted operator X = rows (≥ where a runtime filter    │  │
-//! │ pruned); dead columns, then the plans' variables, out    │──┘
+//! │ pruned); then the plans' variables substituted out       │──┘
 //! └─────────────────────────────────────────────┬────────────┘
 //!                  Analysis: constraints, nodes │
 //! ┌─ 4. facts: Builder::with_facts ─────────────▼────────────┐
 //! │ a claim on an operator; checked against 1–3 if asked     │──▶ Z3
 //! └─────────────────────────────────────────────┬────────────┘
-//!                                               ▼
-//!                  5. postprocess: dead columns left out, if asked
 //!                                               ▼
 //!                          bounds search: Analysis::bounds, plan_bounds
 //! ```
@@ -78,7 +74,6 @@ pub mod facts;
 pub mod joint;
 pub mod observed;
 mod origin;
-pub mod postprocess;
 pub mod properties;
 pub mod rows;
 pub mod rules;
@@ -88,7 +83,6 @@ mod validate;
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
 pub use builder::Builder;
 pub use facts::Facts;
-pub use postprocess::Postprocess;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
@@ -140,12 +134,6 @@ pub struct Analysis {
     nodes: Vec<Node>,
     /// [`Options::check_facts`].
     check_facts: bool,
-    /// Every assertion before any reduction, with its role, if
-    /// [`Options::postprocess`] leaves out dead columns.
-    parts: Option<postprocess::Assertions>,
-    /// With reference plans, the variables the constraints were reduced to
-    /// ([`joint`]): a postprocessed search is reduced to them too.
-    reduced_to: Option<Vec<String>>,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -249,23 +237,14 @@ impl Analysis {
         &self.constraints
     }
 
-    /// A search over the constraints, [postprocessed](postprocess) as
-    /// [`Options::postprocess`] asks.
+    /// A search over the constraints, checked to hold all of them.
     pub(crate) fn search(&self) -> Result<bounds::Search> {
-        let Some(parts) = &self.parts else { return self.search_all() };
-        let (script, n) = parts.pruned();
-        match &self.reduced_to {
-            Some(kept) => {
-                let (script, n) = joint::reduce(&script, kept);
-                search_of(&script, n, &self.root)
-            }
-            None => search_of(&script, n, &self.root),
+        let (search, parsed) = bounds::Search::new(&self.constraints, &self.root);
+        if parsed != self.assertions {
+            let n = self.assertions;
+            return Err(Error::Internal(format!("constraints parsed back to {parsed} assertions, expected {n}")));
         }
-    }
-
-    /// A search over every constraint.
-    pub(crate) fn search_all(&self) -> Result<bounds::Search> {
-        search_of(&self.constraints, self.assertions, &self.root)
+        Ok(search)
     }
 
     /// Proves each side of `bounds` again, with a minimal set of the
@@ -280,15 +259,6 @@ impl Analysis {
         };
         trace.explain(&trace::claims(&self.root, bounds))
     }
-}
-
-/// A search over `constraints`, checked to hold all `n` assertions.
-fn search_of(constraints: &str, n: usize, root: &str) -> Result<bounds::Search> {
-    let (search, parsed) = bounds::Search::new(constraints, root);
-    if parsed != n {
-        return Err(Error::Internal(format!("constraints parsed back to {parsed} assertions, expected {n}")));
-    }
-    Ok(search)
 }
 
 /// A foreign key: each row of `table` has `columns` never NULL and equal to
@@ -347,9 +317,6 @@ pub struct Options {
     /// constraints, one solver check per claim, and leave out those that
     /// contradict them. Off, facts are assumed consistent. Defaults to false.
     pub check_facts: bool,
-    /// Simplifications of the constraints before the bounds search. Defaults
-    /// to none.
-    pub postprocess: Postprocess,
 }
 
 impl Default for Options {
@@ -359,7 +326,6 @@ impl Default for Options {
             foreign_keys: Vec::new(),
             trace: false,
             check_facts: false,
-            postprocess: Postprocess::default(),
         }
     }
 }

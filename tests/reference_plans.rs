@@ -5,15 +5,13 @@
 //! ```sh
 //! cargo test --release --test reference_plans against_plain -- --ignored --nocapture   # ONLY=q03,q11 for some
 //! ```
-//!
-//! `DEAD_COLUMNS=1` leaves out dead columns ([`cardinal::postprocess`]).
 
 mod fixtures;
 
 use std::time::Instant;
 
 use cardinal::observed::ObservedPlan;
-use cardinal::{Analysis, Options, Postprocess};
+use cardinal::{Analysis, Options};
 use fixtures::{catalog, foreign_keys, plans};
 
 async fn profiles() -> Vec<ObservedPlan> {
@@ -25,8 +23,7 @@ async fn profiles() -> Vec<ObservedPlan> {
 }
 
 fn options() -> Options {
-    let dead_columns = std::env::var("DEAD_COLUMNS").is_ok_and(|v| v == "1");
-    Options { foreign_keys: foreign_keys(), postprocess: Postprocess { dead_columns }, ..Default::default() }
+    Options { foreign_keys: foreign_keys(), ..Default::default() }
 }
 
 /// q11 scans no `part`, but groups by `ps_partkey`: the other profiles'
@@ -38,20 +35,6 @@ async fn caps_through_a_foreign_key() {
     let q = all.iter().find(|p| p.name == "q11").unwrap();
     let others = all.iter().filter(|p| p.name != q.name);
     let b = Analysis::plan(&catalog, q).options(options()).with_plans(others).build().unwrap().bounds().unwrap();
-    assert!(b.holds(q.nodes[q.root].rows), "{b}");
-    assert_eq!(b.upper, Some(2000), "{b}");
-}
-
-/// The same cap with dead columns left out: the pins and the
-/// `referenced size` claims keep `part`'s size and the group keys live.
-#[tokio::test]
-async fn caps_with_dead_columns() {
-    let catalog = catalog().await;
-    let all = profiles().await;
-    let q = all.iter().find(|p| p.name == "q11").unwrap();
-    let others = all.iter().filter(|p| p.name != q.name);
-    let options = Options { postprocess: Postprocess { dead_columns: true }, ..options() };
-    let b = Analysis::plan(&catalog, q).options(options).with_plans(others).build().unwrap().bounds().unwrap();
     assert!(b.holds(q.nodes[q.root].rows), "{b}");
     assert_eq!(b.upper, Some(2000), "{b}");
 }

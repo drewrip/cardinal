@@ -10,7 +10,6 @@ use super::{col, column_index, determined, key_column, strip_alias, unproject};
 use crate::analysis::{Analyzer, OpOutput, int, product};
 use crate::domain::{Dom, Facts};
 use crate::keys::Nulls;
-use crate::postprocess::Role;
 use crate::properties::within;
 
 impl<'a> Analyzer<'a> {
@@ -65,7 +64,7 @@ impl<'a> Analyzer<'a> {
                 Some(i) => {
                     columns.push((j, i));
                     if !plan.schema().field(j).data_type().is_floating() {
-                        self.assert_as(Role::Flow, o.ndv[j].ge(&l.ndv[i]));
+                        self.assert(o.ndv[j].ge(&l.ndv[i]));
                     }
                 }
                 None => self.expr_ndv(&o.ndv[j], e, &agg.input, &l),

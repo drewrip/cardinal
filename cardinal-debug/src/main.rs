@@ -72,9 +72,6 @@ struct Input {
     /// Most distinct-count factors multiplied in one constraint.
     #[arg(long)]
     max_product: Option<usize>,
-    /// Leave out constraints over dead columns before proving bounds.
-    #[arg(long)]
-    dead_columns: bool,
     /// Skip proving bounds.
     #[arg(long)]
     no_bounds: bool,
@@ -192,7 +189,6 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
     if let Some(n) = input.max_product {
         options.max_product = n;
     }
-    options.postprocess.dead_columns = input.dead_columns;
     let profiles = profiles(&input.known)?;
     let facts = match &input.known.facts {
         Some(p) => Some(cardinal::Facts::new(serde_json::from_str(&read(p)?).map_err(|e| format!("{}: {e}", p.display()))?)),

@@ -92,7 +92,6 @@ use crate::analysis::{Analyzer, RawScan, OpOutput, ScanKind, inexact_filters, in
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
 use crate::origin::Origin;
-use crate::postprocess::Role;
 use crate::properties::{same, within};
 use op_output::with_card;
 
@@ -114,14 +113,14 @@ impl<'a> Analyzer<'a> {
             let below = |x: usize, y: usize, strict: bool| {
                 let ((x_lo, x_hi), (y_lo, y_hi)) = (lo_hi(x), lo_hi(y));
                 let gap = int(strict as u64);
-                self.assert_as(Role::Flow, y_lo.ge(x_lo + &gap));
-                self.assert_as(Role::Flow, x_hi.le(y_hi - &gap));
+                self.assert(y_lo.ge(x_lo + &gap));
+                self.assert(x_hi.le(y_hi - &gap));
             };
             match op {
                 Operator::Eq => {
                     let ((a_lo, a_hi), (b_lo, b_hi)) = (lo_hi(a), lo_hi(b));
-                    self.assert_as(Role::Flow, a_lo.eq(b_lo));
-                    self.assert_as(Role::Flow, a_hi.eq(b_hi));
+                    self.assert(a_lo.eq(b_lo));
+                    self.assert(a_hi.eq(b_hi));
                 }
                 Operator::Lt => below(a, b, true),
                 Operator::LtEq => below(a, b, false),
@@ -535,7 +534,7 @@ impl<'a> Analyzer<'a> {
     pub fn kept_values(&self, plan: &LogicalPlan, o: &OpOutput, l: &OpOutput) {
         for (j, (a, b)) in o.ndv.iter().zip(&l.ndv).enumerate() {
             if !plan.schema().field(j).data_type().is_floating() {
-                self.assert_as(Role::Flow, a.ge(b));
+                self.assert(a.ge(b));
             }
         }
     }
@@ -545,7 +544,7 @@ impl<'a> Analyzer<'a> {
     /// ([`op_output`]).
     pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &OpOutput) {
         if let Some(bound) = expr_bound(e, input, l, self.max_product) {
-            self.assert_as(Role::Flow, v.le(bound));
+            self.assert(v.le(bound));
         }
     }
 
@@ -554,7 +553,7 @@ impl<'a> Analyzer<'a> {
     pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &OpOutput) {
         // Every surviving row has a = b (neither NULL).
         for (a, b) in equalities(predicate, input) {
-            self.assert_as(Role::Flow, o.ndv[a].eq(&o.ndv[b]));
+            self.assert(o.ndv[a].eq(&o.ndv[b]));
         }
     }
 }

@@ -16,7 +16,7 @@ use datafusion::prelude::SessionContext;
 use crate::analysis::{Analyzer, ScanKind};
 use crate::observed::{self, Catalog, ObservedPlan};
 use crate::trace::Trace;
-use crate::{Analysis, Error, Facts, Options, Result, joint, link, postprocess};
+use crate::{Analysis, Error, Facts, Options, Result, joint, link};
 
 /// An [`Analysis`] being made: the query to bound, the [`Options`], the
 /// executed plans of other queries to analyze it with
@@ -248,11 +248,9 @@ fn analyze(
         assert_eq!(t.constraints.len(), n, "every assertion is traced");
         t
     });
-    let parts = options.postprocess.dead_columns.then(|| postprocess::Assertions::new(&a, &full));
-    let reduced_to = joint.then(|| joint::kept(&a, own_vars));
-    let (constraints, assertions) = match &reduced_to {
-        Some(kept) => joint::reduce(&full, kept),
-        None => (full, n),
+    let (constraints, assertions) = match joint {
+        true => joint::reduce(&full, &joint::kept(&a, own_vars)),
+        false => (full, n),
     };
     let mut nodes = a.nodes;
     nodes.truncate(own);
@@ -265,8 +263,6 @@ fn analyze(
         assertions,
         nodes,
         check_facts: options.check_facts,
-        parts,
-        reduced_to,
     }
 }
 

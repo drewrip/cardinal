@@ -31,10 +31,7 @@
 //!   assertion defines by others is substituted away (Z3's `solve-eqs`),
 //!   and the assertions that then repeat are kept once. The query's
 //!   variables and the tables' sizes all stay, with exactly the values they
-//!   had, so every bound and claim on them is as before. A search that
-//!   [leaves out dead columns](crate::postprocess) leaves them out of the
-//!   assertions before the reduction, the pins counting as [`Role::Gen`],
-//!   then reduces what is left the same way.
+//!   had, so every bound and claim on them is as before.
 //! - **Trace**: with [`Options::trace`], every constraint before the
 //!   reduction, the plans' nodes named by their plan
 //!   ([`TraceNode::plan`](crate::TraceNode::plan)) and each pin as a fact
@@ -56,7 +53,6 @@ use crate::analysis::{Analyzer, Node, ranged_columns};
 use crate::facts::State;
 use crate::facts::state::{states, stopped};
 use crate::observed::{Catalog, ObservedPlan, Op};
-use crate::postprocess::Role;
 use crate::trace::{FactClaim, FactInfo, FactRef};
 use crate::Options;
 
@@ -144,7 +140,7 @@ pub(crate) fn assert_pins(a: &Analyzer, pins: &[Pin]) -> Vec<FactClaim> {
     for p in pins {
         let (v, n) = (Int::new_const(p.var.as_str()), Int::from_u64(p.rows));
         let (claim, source, op) = if p.floor { (v.ge(&n), "observed floor", ">=") } else { (v.eq(&n), "observed rows", "=") };
-        a.assert_untraced(Role::Gen, claim.clone());
+        a.assert_untraced(claim.clone());
         let fact = FactRef { text: format!("|{}#{} {}|", p.plan, p.op, p.engine_op), origins: vec![format!("{}#{}", p.plan, p.op)] };
         out.push(FactClaim {
             claim,
