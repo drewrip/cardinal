@@ -433,10 +433,8 @@ impl<'a> Analyzer<'a> {
     /// `node` if it is that node's output, and asserts what follows of it
     /// ([`Self::on_op_output`]).
     pub(crate) fn finish(&mut self, out: &OpOutput, plan: &LogicalPlan, node: Option<usize>) {
-        let out = OpOutput { node, ..out.clone() };
-        self.on_op_output(&out, plan);
-        let id = out.id;
-        self.op_outputs[id] = out;
+        self.op_outputs[out.id] = OpOutput { node, ..out.clone() };
+        self.on_op_output(out, plan);
     }
 
     /// The unquoted name of a variable created by `new_var`.

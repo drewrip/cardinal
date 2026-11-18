@@ -18,7 +18,9 @@
 //! | wider | [`within`] | each column's, no `Card` |
 //!
 //! Each claim comes with its [`Role`] in liveness: claims on row counts only
-//! are [`Role::Gen`], claims on columns [`Role::Flow`].
+//! are [`Role::Gen`], claims on columns [`Role::Flow`], but
+//! [`fewer_keys`]', which bound columns by others of the same rows,
+//! [`Role::Local`].
 
 use z3::ast::{Bool, Int};
 
