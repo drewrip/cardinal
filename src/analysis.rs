@@ -6,7 +6,7 @@
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
 //! inputs', and records its node in the [`Analyzer`]; once every plan is
-//! walked, [link](crate::link) relates operators off one path.
+//! walked, [link](crate::link) relates its select-project-join subtrees.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -119,7 +119,7 @@ impl SubsetBounds {
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
 /// and how its rows are its inputs', and records its node;
-/// [link](crate::link) then relates those off one path. Each
+/// [link](crate::link) then relates their select-project-join subtrees. Each
 /// rule is one of its methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
     pub(crate) solver: Solver,

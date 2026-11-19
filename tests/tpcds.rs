@@ -17,7 +17,8 @@
 //! Needs the `duckdb` CLI with the `tpcds` extension, and for PostgreSQL a
 //! server `psql` connects to; each is skipped without.
 //! `CARDINAL_TPCDS_SF` sets the scale factor (default 1), and
-//! `CARDINAL_LIVE_TIMEOUT` each call's time limit in seconds.
+//! `CARDINAL_LIVE_TIMEOUT` each call's time limit in seconds, and
+//! `ONLY=q04,q06` bounds only those even queries.
 //!
 //! ```sh
 //! cargo test --release --test tpcds -- --nocapture
@@ -159,7 +160,10 @@ async fn bound(engine: Engine, db: &std::path::Path) {
     println!("{:<5} {:>9}  {:<24} {}", "query", "rows", "alone", "with plans");
     let (mut analyzed, mut tighter, mut exact) = (0, 0, 0);
     let mut skipped = vec![];
-    for (n, sql) in queries.iter().filter(|(n, _)| n % 2 == 0) {
+    // `ONLY=q04,q06` bounds only those.
+    let only = std::env::var("ONLY").ok();
+    let wanted = |n: u32| only.as_ref().is_none_or(|o| o.split(',').any(|q| q == format!("q{n:02}")));
+    for (n, sql) in queries.iter().filter(|(n, _)| n % 2 == 0 && wanted(*n)) {
         let truth = match engine.profile(sql, &variants[0]).and_then(|j| engine.read(&catalog, &format!("q{n:02}"), &j, sql)) {
             Ok(p) if !p.nodes[p.root].counted => {
                 skipped.push(format!("q{n:02}: its rows were not counted"));

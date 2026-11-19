@@ -16,6 +16,9 @@
 //! | same rows | [`same`] | `Card` and each column's |
 //! | subset | [`within`] | `Card` and each column's |
 //! | wider | [`within`] | each column's, no `Card` |
+//! | equal SPJ subtrees ([link](crate::link)) | [`same`] | `Card` and each base column's |
+//! | SPJ subset | [`within`] | `Card` and each base column's |
+//! | disjoint SPJ subtrees | [`disjoint`] | both `Card`s, within the tables' product |
 
 use z3::ast::{Bool, Int};
 

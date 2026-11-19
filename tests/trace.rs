@@ -131,3 +131,14 @@ async fn unbounded_has_nothing_to_prove() {
     assert_eq!(bounds.upper, None);
     assert!(a.explain(&bounds).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn link_assertions_are_traced() {
+    let a = traced("SELECT id FROM users WHERE age < 18 UNION ALL SELECT id FROM users WHERE age >= 18").await;
+    let t = a.trace.as_ref().unwrap();
+    let linked: Vec<&str> =
+        t.constraints.iter().filter(|c| c.source.contains("src/link.rs:")).map(|c| c.function.as_str()).collect();
+    for f in ["disjoint link", "eq link", "subset link"] {
+        assert!(linked.contains(&f), "no {f} in {linked:?}");
+    }
+}
