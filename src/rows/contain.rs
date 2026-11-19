@@ -11,7 +11,7 @@
 //! data.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use super::canonical::{Canonical, Canonicals, MAX_ORDERS, Names, each_order, term_numbered};
 use super::{Context, Exists, ExistsKind, Term};
-use crate::facts::FactKind;
 use super::rewrite::Spj;
 
 /// True if `a`'s rows are among `b`'s, as many times or fewer: `a` is `b`
@@ -103,12 +102,6 @@ pub(crate) fn comparison(e: &Expr) -> Option<(&Expr, Operator, ScalarValue)> {
     (!v.is_null() && !matches!(left.as_ref(), Expr::Literal(..))).then_some((left.as_ref(), *op, v))
 }
 
-/// True if no value satisfies both `_ x.0 x.1` and `_ y.0 y.1`. Values that
-/// do not compare are taken to meet.
-pub(crate) fn apart(x: &(Operator, ScalarValue), y: &(Operator, ScalarValue)) -> bool {
-    Interval::of(x.0, x.1.clone()).and(&Interval::of(y.0, y.1.clone())).is_some_and(|i| i.is_empty())
-}
-
 /// An interval's end: the value, and whether it is let through. `None` is
 /// open.
 type End = Option<(ScalarValue, bool)>;
@@ -145,17 +138,6 @@ impl Interval {
             })
         };
         Some(Interval { lo: pick(&self.lo, &o.lo, Ordering::Greater)?, hi: pick(&self.hi, &o.hi, Ordering::Less)? })
-    }
-
-    /// True if no value is let through: the ends cross, or meet at a value
-    /// one of them excludes.
-    fn is_empty(&self) -> bool {
-        let (Some((lo, lin)), Some((hi, hin))) = (&self.lo, &self.hi) else { return false };
-        match lo.partial_cmp(hi) {
-            Some(Ordering::Greater) => true,
-            Some(Ordering::Equal) => !(*lin && *hin),
-            _ => false,
-        }
     }
 
     /// True if every value `self` lets through, `o` does.
@@ -521,40 +503,6 @@ fn group_partials(a: &Context, b: &Context, canonicals: &mut Canonicals) -> Vec<
         }
         _ => vec![],
     }
-}
-
-/// [`renamed`] for whole facts: true if `test(a, b)` holds with `a`'s
-/// instances of each table renamed among themselves some way, its keys
-/// with its contexts.
-pub(crate) fn renamed_kind(a: &FactKind, b: &FactKind, test: impl Fn(&FactKind, &FactKind) -> bool) -> bool {
-    if test(a, b) {
-        return true;
-    }
-    let mut groups: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
-    let instances = a.instances();
-    for t in &instances {
-        if let Some((table, _)) = t.split_once('@') {
-            groups.entry(table).or_default().push(t);
-        }
-    }
-    let groups: Vec<(&str, Vec<&String>)> = groups.into_iter().collect();
-    let orders = groups.iter().try_fold(1usize, |n, (_, g)| (1..=g.len()).try_fold(n, |n, k| n.checked_mul(k)));
-    if groups.is_empty() || orders.is_none_or(|n| n > MAX_ORDERS) {
-        return false;
-    }
-    let mut found = false;
-    each_order(&groups, 0, &mut vec![], &mut |order| {
-        if found {
-            return;
-        }
-        let names: HashMap<String, String> = groups
-            .iter()
-            .zip(order)
-            .flat_map(|((_, from), to)| from.iter().zip(to).map(|(f, t)| (f.to_string(), t.to_string())))
-            .collect();
-        found = test(&a.rename(&names), b);
-    });
-    found
 }
 
 #[cfg(test)]

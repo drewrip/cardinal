@@ -25,10 +25,11 @@
 //! 1. [`rules`]: a walk over the plan, and over the reference plans' parts
 //!    the query could share rows with ([`joint`]), one rule per operator,
 //!    asserting what the operator adds. Where the plan's shape relates rows
-//!    (an operator and its input, one op output, one table's origins), the
+//!    (an operator and its input, one op output), the
 //!    rules apply [`properties`] of rows.
 //! 2. [`link`]: the same properties between rows only their
-//!    [contexts](rows) relate: operators off one path of a plan.
+//!    [contexts](rows) relate: operators off one path of a plan. None
+//!    yet.
 //! 3. [`joint`]: each operator of a reference plan pinned to the rows it
 //!    was counted with; the plans' own variables then substituted away.
 //! 4. [`facts`]: facts given by hand, added as claims on the query's
@@ -45,12 +46,10 @@
 //! │   each operator       what it adds: X ≤ l·r, X = Σ, …    │──┐
 //! │   with its input      same rows, subset, wider           │  │
 //! │   each op output      ndv ≤ X, domains, keys             │  │
-//! │ then one table's      disjoint origins split it          │  │
 //! └─────────────────────────────────────────────┬────────────┘  │
 //!                            op outputs, nodes  │               │
 //! ┌─ 2. link: link::link_all ───────────────────▼────────────┐  │
-//! │ contexts of operators off one path: =, ⊆, fewer, joins,  │  ├─▶ Z3
-//! │ semi + anti, disjoint, …                                 │  │
+//! │ contexts of operators off one path: none asserted yet    │  ├─▶ Z3
 //! └─────────────────────────────────────────────┬────────────┘  │
 //! ┌─ 3. pins: joint ────────────────────────────▼────────────┐  │
 //! │ a counted operator X = rows (≥ where a runtime filter    │  │
@@ -73,7 +72,6 @@ mod keys;
 pub mod facts;
 pub mod joint;
 pub mod observed;
-mod origin;
 pub mod properties;
 pub mod rows;
 pub mod rules;

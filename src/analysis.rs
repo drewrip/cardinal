@@ -5,8 +5,8 @@
 //! cardinality and, per output column, one bounding its number of distinct
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
-//! inputs', and records the op output in the [`Analyzer`]'s ledger; once
-//! every plan is walked, [link](crate::link) relates op outputs that only
+//! inputs', and records its node in the [`Analyzer`]; once every plan is
+//! walked, [link](crate::link) relates op outputs that only
 //! their contexts relate.
 
 use std::cell::RefCell;
@@ -26,7 +26,6 @@ use z3::{Params, Solver};
 
 use crate::ForeignKey;
 use crate::domain::{self, Facts};
-use crate::origin::Origin;
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +51,6 @@ pub(crate) struct TableVar {
 /// and what its rows satisfy whatever the data.
 #[derive(Clone)]
 pub struct OpOutput {
-    /// Its record in [`Analyzer::op_outputs`].
-    pub(crate) id: OpOutputId,
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
     /// Per output column, the ends of an interval holding each of its
@@ -68,11 +65,6 @@ pub struct OpOutput {
     pub(crate) facts: Facts,
     /// Bounds that also hold of any subset of the rows.
     pub(crate) subset_bounds: SubsetBounds,
-    /// The stored table these rows are distinct rows of, if any.
-    pub(crate) origin: Option<Origin>,
-    /// The node it is the output of, once finished ([`Analyzer::finish`]):
-    /// none for a scan's raw rows.
-    pub(crate) node: Option<usize>,
 }
 
 impl OpOutput {
@@ -81,12 +73,8 @@ impl OpOutput {
     pub(crate) fn inherit(&mut self, l: &OpOutput) {
         self.facts = l.facts.clone();
         self.subset_bounds = l.subset_bounds.clone();
-        self.origin = l.origin.clone();
     }
 }
-
-/// An op output's index in [`Analyzer::op_outputs`].
-pub(crate) type OpOutputId = usize;
 
 /// Bounds on an output's rows that hold of any subset of them too, so they
 /// carry up through operators that keep some rows as they are. Each waits on
@@ -132,7 +120,7 @@ impl SubsetBounds {
 /// The state of one analysis: the Z3 solver and every variable and
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
-/// and how its rows are its inputs', and records its op outputs;
+/// and how its rows are its inputs', and records its node;
 /// [link](crate::link) then relates those only their contexts relate. Each
 /// rule is one of its methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
@@ -148,9 +136,6 @@ pub struct Analyzer<'a> {
     /// Every plan node, children before parents, so a validator can evaluate
     /// them bottom-up.
     pub(crate) nodes: Vec<Node>,
-    /// Every op output the rules made, by [`OpOutputId`], as its rule left
-    /// it once finished.
-    pub(crate) op_outputs: Vec<OpOutput>,
     /// Ids of visited nodes not yet claimed by a parent.
     pub(crate) frontier: Vec<usize>,
     pub(crate) counter: usize,
@@ -334,7 +319,6 @@ impl<'a> Analyzer<'a> {
             nodes: Vec::new(),
             frontier: Vec::new(),
             counter: 0,
-            op_outputs: Vec::new(),
             max_product,
             foreign_keys,
             trace,
@@ -372,8 +356,8 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Creates a fresh op output for `plan`: a cardinality variable
-    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, recorded in
-    /// [`Self::op_outputs`]. Asserts what holds of any columns of any rows.
+    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`. Asserts what
+    /// holds of any columns of any rows.
     pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> OpOutput {
         let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;
@@ -405,7 +389,6 @@ impl<'a> Analyzer<'a> {
             }
         }
         let out = OpOutput {
-            id: self.op_outputs.len(),
             card,
             ndv,
             min,
@@ -413,18 +396,13 @@ impl<'a> Analyzer<'a> {
             unit: units,
             facts: Facts::default(),
             subset_bounds: SubsetBounds::default(),
-            origin: None,
-            node: None,
         };
-        self.op_outputs.push(out.clone());
         out
     }
 
-    /// Records `out`, the output of `plan`, as its rule leaves it, with
-    /// `node` if it is that node's output, and asserts what follows of it
-    /// ([`Self::on_op_output`]).
-    pub(crate) fn finish(&mut self, out: &OpOutput, plan: &LogicalPlan, node: Option<usize>) {
-        self.op_outputs[out.id] = OpOutput { node, ..out.clone() };
+    /// Asserts what follows of `out`, the output of `plan`, as its rule
+    /// leaves it ([`Self::on_op_output`]).
+    pub(crate) fn finish(&mut self, out: &OpOutput, plan: &LogicalPlan) {
         self.on_op_output(out, plan);
     }
 
@@ -494,31 +472,6 @@ impl<'a> Analyzer<'a> {
         var
     }
 
-    /// Which nodes are above which: their ancestors in the plans visited.
-    pub(crate) fn ancestors(&self) -> Ancestors {
-        // A node's ancestors are its parents and theirs. Children come
-        // before parents, so walking back finds the parents' first.
-        let n = self.nodes.len();
-        let mut parents = vec![vec![]; n];
-        for (p, node) in self.nodes.iter().enumerate() {
-            for &c in &node.inputs {
-                parents[c].push(p);
-            }
-        }
-        let mut above = vec![vec![false; n]; n];
-        for c in (0..n).rev() {
-            let mut row = vec![false; n];
-            for &p in &parents[c] {
-                row[p] = true;
-                for (x, y) in row.iter_mut().zip(&above[p]) {
-                    *x |= *y;
-                }
-            }
-            above[c] = row;
-        }
-        Ancestors(above)
-    }
-
     /// Returns the abstract state of `plan`'s output.
     pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> OpOutput {
         let frame = self.next_frame;
@@ -550,7 +503,7 @@ impl<'a> Analyzer<'a> {
             dependencies: vec![],
         });
         self.node_at.insert(address(plan), self.nodes.len() - 1);
-        self.finish(&out, plan, Some(self.nodes.len() - 1));
+        self.finish(&out, plan);
         // Those of plans not yet visited wait for them; those of plans never
         // visited (rewritten copies) are dropped at the end.
         for (at, d) in std::mem::take(&mut *self.relied.borrow_mut()) {
@@ -564,23 +517,6 @@ impl<'a> Analyzer<'a> {
         self.frame_node.insert(frame, self.nodes.len() - 1);
         self.frontier.push(self.nodes.len() - 1);
         out
-    }
-}
-
-/// Each node's ancestors: `.0[a][b]` if node `b` is above node `a`.
-#[derive(Debug, Default)]
-pub(crate) struct Ancestors(pub(crate) Vec<Vec<bool>>);
-
-impl Ancestors {
-    /// True if node `b` is above node `a`, an ancestor of it.
-    pub(crate) fn above(&self, a: usize, b: usize) -> bool {
-        self.0.get(a).and_then(|row| row.get(b)).is_some_and(|&x| x)
-    }
-
-    /// True if `a` and `b` are one node, or one is above the other: a
-    /// root-to-leaf path of one plan holds both.
-    pub(crate) fn on_one_path(&self, a: usize, b: usize) -> bool {
-        a == b || self.above(a, b) || self.above(b, a)
     }
 }
 

@@ -30,8 +30,8 @@
 //!   this against data).
 //! - **Scope**: what each operator adds, and
 //!   [properties](crate::properties) of rows where the plan makes the
-//!   relationship plain: an operator and its input, one op output, one
-//!   table's origins ([`op_output`]).
+//!   relationship plain: an operator and its input, one op output
+//!   ([`op_output`]).
 //! - **Not done**: relationships only contexts reveal, between operators
 //!   off one path, are [link](crate::link)'s.
 //!
@@ -91,7 +91,6 @@ use z3::ast::Int;
 use crate::analysis::{Analyzer, RawScan, OpOutput, ScanKind, inexact_filters, int, max, min, product, range_names};
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
-use crate::origin::Origin;
 use crate::properties::{same, within};
 use op_output::with_card;
 
@@ -183,12 +182,6 @@ impl<'a> Analyzer<'a> {
         self.assert_property("same rows", same(&with_card(&o, &l, &columns)));
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
         o.subset_bounds = l.subset_bounds.rename(&|c| passed_column(plan, &p.expr, c));
-        o.origin = l.origin.as_ref().map(|origin| {
-            origin.project(p.expr.iter().map(|e| match strip_alias(e) {
-                Expr::Column(c) => p.input.schema().index_of_column(c).ok(),
-                _ => None,
-            }))
-        });
         o
     }
 
@@ -219,7 +212,6 @@ impl<'a> Analyzer<'a> {
         self.range_pairs(&f.predicate, plan, &o);
         o.inherit(&l);
         o.facts.assume(&f.predicate, plan.schema());
-        o.origin = o.origin.take().map(|x| x.narrow(&o.facts, plan.schema()));
         o
     }
 
@@ -446,7 +438,6 @@ impl<'a> Analyzer<'a> {
                 }
                 let name = self.name_of(&s.card);
                 self.scans.push((name.clone(), display, s.card.clone()));
-                s.origin = Some(Origin::scan(&key, schema).narrow(&s.facts, schema));
                 if !scan.filters.is_empty() {
                     raw_scan = Some(RawScan {
                         var: name,
@@ -466,7 +457,7 @@ impl<'a> Analyzer<'a> {
         // and may return more (DataFusion keeps the Limit above), so it bounds
         // nothing.
         if !scan.filters.is_empty() {
-            self.finish(&out, &raw, None);
+            self.finish(&out, &raw);
             let mut f = self.fresh("ScanFilter", plan);
             self.assert_property("subset", within(&with_card(&f, &out, &aligned(out.ndv.len(), 0))));
             f.facts = out.facts.clone();
@@ -477,7 +468,6 @@ impl<'a> Analyzer<'a> {
                     self.range_pairs(filter, plan, &f);
                 }
             }
-            f.origin = out.origin.clone().map(|x| x.narrow(&f.facts, plan.schema()));
             out = f;
         }
         (out, raw_scan)
@@ -524,7 +514,6 @@ impl<'a> Analyzer<'a> {
             child_column(plan, i)
         };
         o.subset_bounds = l.subset_bounds.rename(&by_position);
-        o.origin = l.origin.as_ref().map(|x| x.with_width(plan.schema().fields().len()));
         o
     }
 

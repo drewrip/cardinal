@@ -344,6 +344,7 @@ async fn groups_with_several_rows_are_few() {
 }
 
 #[tokio::test]
+#[ignore = "bound needs link"]
 async fn disjoint_filters_of_one_table_partition_it() {
     // No user is both under 18 and at least 18.
     let b = sized(

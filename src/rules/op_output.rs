@@ -1,6 +1,6 @@
 //! What holds of op outputs by the plan's shape alone: of each count and
-//! output whatever its operator, of an operator's output given its
-//! input's, and of one table's outputs.
+//! output whatever its operator, and of an operator's output given its
+//! input's.
 //!
 //! # Every op output
 //!
@@ -15,7 +15,6 @@
 //! | its rule is done (`Analyzer::finish`), by its domains | [`empty_domain`](Analyzer::empty_domain), [`ndv_within_domain`](Analyzer::ndv_within_domain), [`range_within_domain`](Analyzer::range_within_domain) |
 //! | 〃, by its subset bounds | [`bounded_sum`](Analyzer::bounded_sum), [`nulls_and_values`](Analyzer::nulls_and_values) |
 //! | 〃, by its keys | [`key_ndv`](Analyzer::key_ndv), `unique_columns` |
-//! | every plan is visited, of one table's outputs | [`disjoint_origins`](Analyzer::disjoint_origins) |
 //!
 //! # Given an input
 //!
@@ -27,13 +26,10 @@
 //!
 //! | Relationship | Property | Pairs |
 //! |---|---|---|
-//! | same rows (projection, alias, sort, ...) | [`same`](properties::same) | [`with_card`] |
-//! | subset (filter, limit, semi join, ...) | [`within`](properties::within) | [`with_card`] |
-//! | wider (inner join side, GROUP BY key, ...) | [`within`](properties::within) | [`columns`] |
-//! | ranges only (padded side, MIN, MAX) | [`within`](properties::within) | [`ranges`] |
-
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+//! | same rows (projection, alias, sort, ...) | [`same`](crate::properties::same) | [`with_card`] |
+//! | subset (filter, limit, semi join, ...) | [`within`](crate::properties::within) | [`with_card`] |
+//! | wider (inner join side, GROUP BY key, ...) | [`within`](crate::properties::within) | [`columns`] |
+//! | ranges only (padded side, MIN, MAX) | [`within`](crate::properties::within) | [`ranges`] |
 
 use datafusion::common::{Column, Constraint};
 use datafusion::logical_expr::Expr;
@@ -44,8 +40,7 @@ use super::col;
 use crate::analysis::{Analyzer, OpOutput, ScanKind, int, product};
 use crate::builder::bare_kind;
 use crate::keys::Nulls;
-use crate::origin::{self, Origin};
-use crate::properties::{self, Pair};
+use crate::properties::Pair;
 
 /// For each `(j, i)` of `columns`: `o.j`'s and `l.i`'s `Min` and `Max`, if
 /// both have them in one unit. A cast of an integer to a decimal keeps the
@@ -340,57 +335,6 @@ impl Analyzer<'_> {
                     self.assert(out.card.le(p));
                 }
             }
-        }
-    }
-
-    /// `disjoint origins`, once every plan is visited.
-    ///
-    /// - **Claim**: op outputs whose rows no row of the table is in both of
-    ///   are [apart](properties::disjoint): `|X| + |Y| ≤ |T|`.
-    /// - **When**: op outputs made of distinct rows of one stored table `T`,
-    ///   reached through operators that never repeat a row (filter,
-    ///   projection, sort, limit, distinct, semi and anti joins), whose value
-    ///   domains on some column do not meet. Op outputs with the same domains
-    ///   form a class bounded by one variable, and each set of pairwise
-    ///   disjoint classes sums to at most `|T|`; at most 64 classes per
-    ///   table.
-    ///
-    /// ```text
-    /// |orders ∧ o_orderdate < 10| + |orders ∧ o_orderdate > 20| ≤ |orders|
-    /// ```
-    pub fn disjoint_origins(&mut self) {
-        // Nodes' outputs of distinct rows of one stored table, in node order.
-        let mut of: Vec<(usize, Int, Origin)> = self
-            .op_outputs
-            .iter()
-            .filter_map(|out| {
-                let o = out.origin.as_ref().filter(|o| o.informative())?;
-                Some((out.node?, out.card.clone(), o.clone()))
-            })
-            .collect();
-        of.sort_by_key(|(node, _, _)| *node);
-        let (cards, origins): (Vec<Int>, Vec<Origin>) = of.into_iter().map(|(_, c, o)| (c, o)).unzip();
-        let (classes, cliques) = origin::disjoint_classes(&origins, 64);
-        let mut part: HashMap<usize, Int> = HashMap::new();
-        for clique in cliques {
-            let table = self.tables[&origins[classes[clique[0]][0]].table].var.clone();
-            let mut sum = vec![];
-            for c in clique {
-                let v = match part.entry(c) {
-                    Entry::Occupied(e) => e.get().clone(),
-                    Entry::Vacant(e) => {
-                        let v = self.new_var(format!("part{c}"));
-                        for &m in &classes[c] {
-                            self.assert(cards[m].le(&v));
-                        }
-                        self.assert(v.le(&table));
-                        e.insert(v).clone()
-                    }
-                };
-                sum.push(v);
-            }
-            let sum: Vec<&Int> = sum.iter().collect();
-            self.assert_property("disjoint", properties::disjoint(&sum, &table));
         }
     }
 }

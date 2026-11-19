@@ -169,13 +169,6 @@ impl<'a> Analyzer<'a> {
                 o.subset_bounds.nulls.push((col(plan, c), r.card.clone(), values.clone()));
             }
         }
-        let width = plan.schema().fields().len();
-        o.origin = match join.join_type {
-            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.origin.as_ref(),
-            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.origin.as_ref(),
-            _ => None,
-        }
-        .map(|x| x.with_width(width).narrow(&o.facts, plan.schema()));
         o
     }
 
