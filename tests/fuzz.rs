@@ -337,7 +337,7 @@ struct Stats {
 }
 
 /// Checks one query on every context of one mode; returns its upper bound
-/// without facts, or `None` if DataFusion cannot plan it.
+/// without row counts, or `None` if DataFusion cannot plan it.
 async fn check_mode(
     sql: &str,
     ctxs: &[(String, SessionContext)],
@@ -360,7 +360,7 @@ async fn check_mode(
         let Ok(a) = query.clone().build() else {
             return None;
         };
-        // Bounds without facts depend only on the query; compute them once
+        // Bounds without row counts depend only on the query; compute them once
         // per mode.
         let b = *bounds.get_or_insert_with(|| a.bounds().unwrap());
         let v = a.validate(ctx).await.unwrap();
@@ -401,7 +401,7 @@ async fn check_mode(
                 stats.exact += 1;
             }
             if std::env::var("CARDINAL_FUZZ_PLAN").is_ok() {
-                let plan = query.with_facts(&common::table_sizes(&sizes)).build().unwrap().plan_bounds().unwrap();
+                let plan = query.with_cardinalities(sizes.iter().cloned()).build().unwrap().plan_bounds().unwrap();
                 for f in common::check_plan_bounds(&plan, &v) {
                     failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
                 }

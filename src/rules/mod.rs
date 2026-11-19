@@ -32,8 +32,8 @@
 //!   [properties](crate::properties) of rows where the plan makes the
 //!   relationship plain: an operator and its input, one op output
 //!   ([`op_output`]).
-//! - **Not done**: relationships only contexts reveal, between operators
-//!   off one path, are [link](crate::link)'s.
+//! - **Not done**: relationships between operators off one path are
+//!   [link](crate::link)'s.
 //!
 //! # Notation
 //!

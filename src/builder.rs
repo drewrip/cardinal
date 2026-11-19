@@ -2,6 +2,7 @@
 //! data it runs on.
 
 use std::collections::HashMap;
+use std::panic::Location;
 use std::sync::Arc;
 
 use datafusion::catalog::TableProvider;
@@ -12,23 +13,24 @@ use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::prelude::SessionContext;
+use z3::ast::Int;
 
 use crate::analysis::{Analyzer, ScanKind};
 use crate::observed::{self, Catalog, ObservedPlan};
-use crate::trace::Trace;
-use crate::{Analysis, Error, Facts, Options, Result, joint, link};
+use crate::trace::{FactClaim, FactInfo, FactRef, Trace};
+use crate::{Analysis, Error, Options, Result, joint, link};
 
 /// An [`Analysis`] being made: the query to bound, the [`Options`], the
 /// executed plans of other queries to analyze it with
-/// ([`Builder::with_plans`]) and facts given by hand
-/// ([`Builder::with_facts`]). Made by [`Analysis::sql`], [`Analysis::plan`],
+/// ([`Builder::with_plans`]) and tables' row counts
+/// ([`Builder::with_cardinalities`]). Made by [`Analysis::sql`], [`Analysis::plan`],
 /// [`Analysis::duckdb`], [`Analysis::postgres`] or [`Analysis::logical`].
 ///
 /// ```ignore
 /// let a = Analysis::plan(&catalog, &plan)
 ///     .options(options)
 ///     .with_plans(&profiles)
-///     .with_facts(&facts)
+///     .with_cardinalities([("lineitem", 6001215)])
 ///     .build()?;
 /// a.bounds()?;
 /// ```
@@ -38,7 +40,7 @@ pub struct Builder<'c> {
     catalog: Option<CatalogRef<'c>>,
     options: Options,
     plans: Vec<&'c ObservedPlan>,
-    facts: Vec<Facts>,
+    cardinalities: Vec<(String, u64)>,
 }
 
 #[derive(Clone)]
@@ -141,7 +143,7 @@ impl Analysis {
 
 impl<'c> Builder<'c> {
     fn new(query: Query<'c>, catalog: Option<CatalogRef<'c>>) -> Builder<'c> {
-        Builder { query, catalog, options: Options::default(), plans: vec![], facts: vec![] }
+        Builder { query, catalog, options: Options::default(), plans: vec![], cardinalities: vec![] }
     }
 
     /// Analyze with `options` (by default, [`Options::default`]).
@@ -160,22 +162,19 @@ impl<'c> Builder<'c> {
         self
     }
 
-    /// Add what `facts` know, as given by hand: every row count, distinct
-    /// count and least or greatest value they give of an operator's rows,
-    /// exact or a bound, as a claim on its variable.
-    ///
-    /// The facts must describe the data the bounds are for. Claims are
-    /// assumed consistent with the constraints; an inconsistent set proves
-    /// any bound. With [`Options::check_facts`], a claim that contradicts
-    /// them, or whose consistency Z3 cannot decide, is left out instead.
-    /// Adds to any facts given before.
-    pub fn with_facts(mut self, facts: &Facts) -> Self {
-        self.facts.push(facts.clone());
+    /// Hold each table to its row count: `(name, rows)` asserts `|name| =
+    /// rows`. A name resolves as the query's scans do (bare names in the
+    /// default catalog and schema); one that names no table the analysis
+    /// scans is ignored. The counts must be of the data the bounds are for:
+    /// wrong ones make the constraints unsatisfiable, which proves any
+    /// bound. Adds to any counts given before.
+    pub fn with_cardinalities<S: Into<String>>(mut self, tables: impl IntoIterator<Item = (S, u64)>) -> Self {
+        self.cardinalities.extend(tables.into_iter().map(|(t, n)| (t.into(), n)));
         self
     }
 
     /// The analysis: the query's constraints, the reference plans', and the
-    /// facts' claims.
+    /// tables' row counts.
     pub fn build(self) -> Result<Analysis> {
         let options = &self.options;
         let catalog = self.catalog.as_ref().map(CatalogRef::get);
@@ -205,22 +204,27 @@ impl<'c> Builder<'c> {
             (false, Some(c)) => joint::translate(c, &self.plans),
             (false, None) => return Err(Error::NoCatalog),
         };
-        let mut a = analyze(&plan, &resolve, &referenced, &plans, options);
-        for f in &self.facts {
-            a = crate::facts::apply::apply(&a, f)?;
-        }
-        Ok(a)
+        let sizes: Vec<(String, u64)> = self
+            .cardinalities
+            .iter()
+            .filter_map(|(name, n)| match base_kind(&TableReference::from(name.as_str()), &defaults.0, &defaults.1) {
+                ScanKind::Base { key, .. } => Some((key, *n)),
+                ScanKind::NonBase => None,
+            })
+            .collect();
+        Ok(analyze(&plan, &resolve, &referenced, &plans, &sizes, options))
     }
 }
 
-/// `plan` analyzed with `plans`: rules, link, pins, and the reduction if
-/// there are plans ([`crate::joint`]); `referenced` resolves the plans'
-/// scans.
+/// `plan` analyzed with `plans`: rules, link, pins, the tables' `sizes`
+/// (by [`ScanKind::Base`] key), and the reduction if there are plans
+/// ([`crate::joint`]); `referenced` resolves the plans' scans.
 fn analyze(
     plan: &LogicalPlan,
     resolve: &dyn Fn(&TableScan) -> ScanKind,
     referenced: &dyn Fn(&TableScan) -> ScanKind,
     plans: &[joint::Translated],
+    sizes: &[(String, u64)],
     options: &Options,
 ) -> Analysis {
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
@@ -234,7 +238,8 @@ fn analyze(
     a.resolve = referenced;
     let (pins, owners) = joint::visit(&mut a, plan, plans, options);
     link::link_all(&a);
-    let pinned = joint::assert_pins(&a, &pins);
+    let mut pinned = joint::assert_pins(&a, &pins);
+    pinned.extend(assert_sizes(&a, sizes));
 
     let root_name = a.name_of(&root);
     let asserted = a.solver.get_assertions();
@@ -278,8 +283,26 @@ fn analyze(
         constraints,
         assertions,
         nodes,
-        check_facts: options.check_facts,
     }
+}
+
+/// Asserts `|T| = rows` for each `(key, rows)` of `sizes` whose table the
+/// analysis has, and gives each as a fact for the trace (`given rows`).
+fn assert_sizes(a: &Analyzer, sizes: &[(String, u64)]) -> Vec<FactClaim> {
+    let mut out = vec![];
+    for (key, rows) in sizes {
+        let Some(t) = a.tables.get(key) else { continue };
+        let claim = t.var.eq(Int::from_u64(*rows));
+        a.assert_untraced(claim.clone());
+        let fact = FactRef { text: format!("|{}|", t.display), origins: vec!["given".to_string()] };
+        out.push(FactClaim {
+            claim,
+            node: None,
+            info: FactInfo { source: "given rows".to_string(), facts: vec![fact], value: format!("= {rows}") },
+            at: Location::caller(),
+        });
+    }
+    out
 }
 
 /// Identity of a provider object. An address, not a pointer, so futures holding

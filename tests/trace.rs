@@ -76,7 +76,7 @@ async fn trace_round_trips_through_json() {
 /// `sql`, traced, with `users` holding 100 rows and `orders` 300.
 async fn traced_sized(sql: &str) -> Analysis {
     let q = traced_query(sql).await;
-    q.with_facts(&common::table_sizes(&[("users", 100), ("orders", 300)])).build().unwrap()
+    q.with_cardinalities([("users", 100), ("orders", 300)].iter().cloned()).build().unwrap()
 }
 
 /// Whether `proof`'s core has a constraint that a fact gave.

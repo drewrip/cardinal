@@ -5,8 +5,7 @@
 
 use std::sync::Arc;
 
-use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio};
-use cardinal::{Analysis, Bounds, Builder, Facts, PlanBounds, Validation};
+use cardinal::{Analysis, Bounds, Builder, PlanBounds, Validation};
 use datafusion::arrow::array::{ArrayRef, Date32Array, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -720,7 +719,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
                 }
             };
             let a = query.clone().build().unwrap();
-            // Bounds without facts depend only on the query; compute them once.
+            // Bounds without row counts depend only on the query; compute them once.
             if bounds.is_none() {
                 bounds = Some(a.bounds().unwrap());
             }
@@ -752,7 +751,7 @@ pub async fn run_benchmark(cases: &[Case], datasets: Vec<Dataset>, declare_keys:
             for f in check_bounds(bounds.as_ref().unwrap(), &a, &v) {
                 failures.push(format!("{}: on {dname}, {f}", case.name));
             }
-            // The tables' real sizes, as facts.
+            // The tables' real sizes.
             let mut sizes: Vec<(&str, u64)> = vec![];
             for (scan, table) in &a.scans {
                 if let Some(&n) = v.rows.get(scan)
@@ -808,19 +807,9 @@ pub fn operator_vars(smt: &str) -> usize {
         .count()
 }
 
-/// Facts holding each of `sizes`' tables to its row count.
-pub fn table_sizes(sizes: &[(&str, u64)]) -> Facts {
-    let mut set = FactSet::default();
-    for (table, n) in sizes {
-        let kind = FactKind::Cardinality(Context::table(table));
-        set.insert(Fact { kind, value: Ratio::int(*n), origins: vec![Origin::Counted] });
-    }
-    Facts::new(set)
-}
-
 /// `query`'s bounds with each of `sizes`' tables held to its row count.
 pub fn sized(query: &Builder, sizes: &[(&str, u64)]) -> Bounds {
-    query.clone().with_facts(&table_sizes(sizes)).build().unwrap().bounds().unwrap()
+    query.clone().with_cardinalities(sizes.iter().copied()).build().unwrap().bounds().unwrap()
 }
 
 /// Checks `p` against one real execution: every operator's actual rows

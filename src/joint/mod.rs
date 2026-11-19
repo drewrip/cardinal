@@ -2,10 +2,10 @@
 //! other queries ([`Builder::with_plans`](crate::Builder::with_plans)),
 //! each counted operator pinned to its rows.
 //!
-//! No rules read facts off the plans, combine them, or match them to the
-//! query's operators: the plans' operators get the constraints any
-//! operator does, [link](crate::link) relates them to the query's by their
-//! contexts, and Z3 finds what follows.
+//! No rules read anything else off the plans or match them to the query's
+//! operators: the plans' operators get the constraints any operator does,
+//! [link](crate::link) is to relate them to the query's, and Z3 finds what
+//! follows.
 //!
 //! ```text
 //!  query ──────────┐
@@ -22,10 +22,10 @@
 //!   transitively (`maximal`). Subtrees over a referenced table bound its
 //!   size, which the `referenced size` rule
 //!   ([`Analyzer::referenced_size`]) bounds the referencing columns'
-//!   distinct counts by. Other subtrees share no context with the query's.
+//!   distinct counts by. Other subtrees share no rows with the query's.
 //! - **Pins**: each operator the engine counted, and that did not stop
 //!   early, holds its node's rows: `X = rows`, or `X ≥ rows` where a
-//!   runtime filter pruned them (`counts`). Plans that were not run, or
+//!   runtime filter pruned them (`pruned`). Plans that were not run, or
 //!   do not translate, are left out.
 //! - **Reduction**: each variable but the query's and the tables' that an
 //!   assertion defines by others is substituted away (Z3's `solve-eqs`),
@@ -50,11 +50,12 @@ use z3::ast::{Ast, Bool, Int};
 use z3::{FuncDecl, Goal, Solver, Sort, Tactic};
 
 use crate::analysis::{Analyzer, Node, ranged_columns};
-use crate::facts::State;
-use crate::facts::state::{states, stopped};
-use crate::observed::{Catalog, ObservedPlan, Op};
+use crate::observed::{Catalog, ObservedPlan};
 use crate::trace::{FactClaim, FactInfo, FactRef};
 use crate::Options;
+use pruned::Count;
+
+mod pruned;
 
 /// A reference plan, translated: its root, and each operator with the
 /// subplans it became.
@@ -184,23 +185,10 @@ pub(crate) fn reduce(assertions: &[Bool], kept: &[String]) -> (String, usize) {
 
 /// Each analyzer node of `nodes` an operator of `plan` became, by `built`
 /// (each operator and the subplans it became), with the operator and
-/// whether its count is only a floor for the node's rows.
-///
-/// An operator counts if the engine counted it and it did not stop early.
-/// Its count is the node's rows if no runtime or optional filter pruned at
-/// or below it (the translation leaves both out), or its state is clean; a
-/// floor if only runtime filters did ([`State::lower`]).
+/// whether its count is only a floor for the node's rows
+/// ([`pruned::counts`]).
 fn counts(plan: &ObservedPlan, nodes: &[Node], built: &[(usize, LogicalPlan)]) -> Vec<(usize, usize, bool)> {
-    let states = states(plan);
-    let stopped = stopped(plan);
-    let mut pruned = vec![false; plan.nodes.len()];
-    for (j, n) in plan.nodes.iter().enumerate() {
-        let own = match &n.op {
-            Op::Scan { runtime_filters, filters, .. } => !runtime_filters.is_empty() || filters.iter().any(|f| f.optional),
-            _ => false,
-        };
-        pruned[j] = own || n.children.iter().any(|&c| pruned[c]);
-    }
+    let counts = pruned::counts(plan);
     let mut by_plan: HashMap<&LogicalPlan, Vec<usize>> = HashMap::new();
     for (j, p) in built {
         by_plan.entry(p).or_default().push(*j);
@@ -209,16 +197,14 @@ fn counts(plan: &ObservedPlan, nodes: &[Node], built: &[(usize, LogicalPlan)]) -
     let mut done = BTreeSet::new();
     for (m, node) in nodes.iter().enumerate() {
         for &j in by_plan.get(&node.plan).into_iter().flatten() {
-            if !plan.nodes[j].counted || stopped[j] || !done.insert((m, j)) {
-                continue;
-            }
-            let floor = match &states[j] {
-                _ if !pruned[j] => false,
-                State::Clean(_) => false,
-                s if s.lower().is_some() => true,
-                _ => continue,
+            let floor = match counts[j] {
+                Count::Rows => false,
+                Count::Floor => true,
+                Count::Unknown => continue,
             };
-            out.push((m, j, floor));
+            if done.insert((m, j)) {
+                out.push((m, j, floor));
+            }
         }
     }
     out

@@ -1,7 +1,7 @@
 # cardinal
 
 Proves bounds on a SQL query's output cardinality, with no data, or with the
-executed plans of other queries and facts given by hand.
+executed plans of other queries and tables' row counts.
 
 Downloads and links Z3 5.4.1 when built (needs network, and glibc ≥ 2.39 or macOS ≥ 13.3).
 
@@ -15,10 +15,10 @@ a.bounds()?;              // e.g. "X <= 25" or "3 <= X <= 25"
 a.plan_bounds()?;         // every operator's bounds, and their total
 a.validate(&ctx).await?;  // check the constraints against real data
 
-// With executed plans of other queries (EXPLAIN ANALYZE), and facts by hand:
+// With executed plans of other queries (EXPLAIN ANALYZE), and row counts:
 let a = Analysis::sql(&ctx, sql).await?
     .with_plans(&profiles)
-    .with_facts(&cardinal::Facts::new(fact_set))
+    .with_cardinalities([("lineitem", 6001215), ("orders", 1500000)])
     .build()?;
 
 // As DuckDB or PostgreSQL planned it, from EXPLAIN (FORMAT JSON) output:

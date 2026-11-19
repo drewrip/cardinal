@@ -82,13 +82,14 @@ struct Input {
     known: Known,
 }
 
-/// Reference plans and facts to put in the analysis. Any of them adds a
-/// section with them.
+/// Reference plans and tables' row counts to put in the analysis. Any of
+/// them adds a section with them.
 #[derive(Args)]
 struct Known {
-    /// Facts given by hand: a fact set, as JSON.
+    /// Tables' row counts, as a JSON object of table names to counts, e.g.
+    /// `{"lineitem": 6001215}`.
     #[arg(long)]
-    facts: Option<PathBuf>,
+    cardinalities: Option<PathBuf>,
     /// DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` profile of another query, as
     /// a reference plan; repeatable.
     #[arg(long)]
@@ -107,7 +108,7 @@ struct Known {
     /// others' profiles only.
     #[arg(long, value_name = "NAME", requires = "profiles_dir")]
     except: Option<String>,
-    /// Skip proving the bounds with the plans and facts again (and without
+    /// Skip proving the bounds with the plans and row counts again (and without
     /// them).
     #[arg(long)]
     no_explain: bool,
@@ -133,7 +134,7 @@ struct Output {
     /// Hide constraints in the tree.
     #[arg(long, conflicts_with = "html")]
     brief: bool,
-    /// Show the analysis without its reference plans and facts, as if none
+    /// Show the analysis without its reference plans and row counts, as if none
     /// were given.
     #[arg(long)]
     plain: bool,
@@ -190,12 +191,15 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
         options.max_product = n;
     }
     let profiles = profiles(&input.known)?;
-    let facts = match &input.known.facts {
-        Some(p) => Some(cardinal::Facts::new(serde_json::from_str(&read(p)?).map_err(|e| format!("{}: {e}", p.display()))?)),
-        None => None,
+    let cardinalities: Vec<(String, u64)> = match &input.known.cardinalities {
+        Some(p) => serde_json::from_str::<std::collections::BTreeMap<String, u64>>(&read(p)?)
+            .map_err(|e| format!("{}: {e}", p.display()))?
+            .into_iter()
+            .collect(),
+        None => vec![],
     };
-    let informed = if facts.is_some() || !profiles.is_empty() {
-        Some(Informed { plans: read_plans(&ctx, &profiles).await?, facts, explain: !input.known.no_explain })
+    let informed = if !cardinalities.is_empty() || !profiles.is_empty() {
+        Some(Informed { plans: read_plans(&ctx, &profiles).await?, cardinalities, explain: !input.known.no_explain })
     } else {
         None
     };

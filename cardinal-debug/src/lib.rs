@@ -4,7 +4,7 @@
 //! operator: [`PlanDump`]), its [`Trace`] (every
 //! constraint with the plan node and analyzer line it comes from), a
 //! [`Proof`] of each bound naming the constraints it needs; and, with
-//! reference plans or facts, the same again with them
+//! reference plans or tables' row counts, the same again with them
 //! ([`InformedDump`]). [`ascii`] and [`html`] render one.
 
 pub mod ascii;
@@ -13,7 +13,7 @@ pub mod html;
 use std::collections::BTreeMap;
 
 use cardinal::observed::{Catalog, ObservedPlan};
-use cardinal::{Analysis, Builder, Facts, ForeignKey, Options, Proof, Trace};
+use cardinal::{Analysis, Builder, ForeignKey, Options, Proof, Trace};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ pub struct Dump {
     pub bounds: Option<String>,
     pub trace: Trace,
     pub proofs: Vec<Proof>,
-    /// The analysis with reference plans and facts, if any were given.
+    /// The analysis with reference plans and row counts, if any were given.
     #[serde(default, alias = "facts")]
     pub informed: Option<InformedDump>,
     /// Every operator's proven bounds, if computed.
@@ -54,7 +54,7 @@ impl PlanDump {
 }
 
 /// An analysis with reference plans ([`cardinal::Builder::with_plans`]) and
-/// facts ([`cardinal::Builder::with_facts`]).
+/// tables' row counts ([`cardinal::Builder::with_cardinalities`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InformedDump {
     /// The reference plans' names.
@@ -63,26 +63,24 @@ pub struct InformedDump {
     /// The bounds proven with them, if computed.
     pub bounds: Option<String>,
     /// Its constraints: the query's, the reference plans' nodes', each pin
-    /// and each fact's claim, saying what it is read from.
+    /// and each row count, saying what it is read from.
     pub trace: Trace,
     /// The claims of the bounds with them, proven with its constraints.
     pub proofs: Vec<Proof>,
-    /// The same claims, proven without reference plans or facts, in the same
+    /// The same claims, proven without reference plans or row counts, in the same
     /// order. Their cores index [`Dump::trace`].
     pub base_proofs: Vec<Proof>,
     /// Whether the proofs were attempted (not skipped by `--no-explain`).
     pub explained: bool,
-    /// Facts that disagree with others, which are left out.
-    pub conflicts: Vec<String>,
     /// Every operator's bounds proven with them, if computed.
     #[serde(default)]
     pub plan_bounds: Option<PlanDump>,
 }
 
-/// Reference plans and facts to put in an analysis.
+/// Reference plans and tables' row counts to put in an analysis.
 pub struct Informed {
     pub plans: Vec<ObservedPlan>,
-    pub facts: Option<Facts>,
+    pub cardinalities: Vec<(String, u64)>,
     /// Whether to prove the bounds with them again, with minimal cores.
     pub explain: bool,
 }
@@ -164,7 +162,7 @@ pub struct Prove {
 
 /// Analyzes `source` against `ctx` with `options` (traced), proves the
 /// bounds `prove` asks for, and explains the root's; with `informed`, does
-/// the same again with its reference plans and facts.
+/// the same again with its reference plans and row counts.
 pub async fn dump(
     ctx: &SessionContext,
     source: &Source,
@@ -206,14 +204,11 @@ pub async fn dump(
     })
 }
 
-/// `builder` with `input`'s plans and facts, against `analysis`, its
+/// `builder` with `input`'s plans and row counts, against `analysis`, its
 /// analysis without them.
 fn inform(analysis: &Analysis, builder: Builder, input: &Informed, prove: Prove) -> Result<InformedDump, String> {
     let err = |e: cardinal::Error| e.to_string();
-    let mut builder = builder.with_plans(&input.plans);
-    if let Some(f) = &input.facts {
-        builder = builder.with_facts(f);
-    }
+    let builder = builder.with_plans(&input.plans).with_cardinalities(input.cardinalities.iter().cloned());
     let informed = builder.build().map_err(err)?;
     let proven = if prove.bounds { Some(informed.bounds().map_err(err)?) } else { None };
     let plan_bounds = if prove.plan_bounds { Some(PlanDump::of(&informed)?) } else { None };
@@ -222,16 +217,6 @@ fn inform(analysis: &Analysis, builder: Builder, input: &Informed, prove: Prove)
     } else {
         (vec![], vec![])
     };
-    let origins = |os: &[cardinal::facts::Origin]| os.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", ");
-    let conflicts = input
-        .facts
-        .iter()
-        .flat_map(|f| &f.set().conflicts)
-        .map(|c| {
-            let (a, b) = &c.values;
-            format!("{} = {a} ({}) vs {b} ({})", c.kind, origins(&c.origins.0), origins(&c.origins.1))
-        })
-        .collect();
     Ok(InformedDump {
         plans: input.plans.iter().map(|p| p.name.clone()).collect(),
         bounds: proven.map(|b| b.to_string()),
@@ -239,7 +224,6 @@ fn inform(analysis: &Analysis, builder: Builder, input: &Informed, prove: Prove)
         proofs,
         base_proofs,
         explained: input.explain,
-        conflicts,
         plan_bounds,
     })
 }

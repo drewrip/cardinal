@@ -9,14 +9,14 @@
 //! An analysis is made by a [`Builder`]: the query to bound
 //! ([`Analysis::sql`], [`Analysis::plan`], ...), then what is known of the
 //! data it runs on: executed plans of other queries
-//! ([`Builder::with_plans`]) and facts given by hand
-//! ([`Builder::with_facts`]).
+//! ([`Builder::with_plans`]) and tables' row counts
+//! ([`Builder::with_cardinalities`]).
 //!
 //! ```ignore
 //! let a = Analysis::sql(&ctx, sql).await?
 //!     .options(options)
 //!     .with_plans(&profiles)
-//!     .with_facts(&facts)
+//!     .with_cardinalities([("lineitem", 6001215)])
 //!     .build()?;
 //! ```
 //!
@@ -27,14 +27,11 @@
 //!    asserting what the operator adds. Where the plan's shape relates rows
 //!    (an operator and its input, one op output), the
 //!    rules apply [`properties`] of rows.
-//! 2. [`link`]: the same properties between rows only their
-//!    [contexts](rows) relate: operators off one path of a plan. None
-//!    yet.
+//! 2. [`link`]: the same properties between operators off one path of a
+//!    plan. None yet.
 //! 3. [`joint`]: each operator of a reference plan pinned to the rows it
-//!    was counted with; the plans' own variables then substituted away.
-//! 4. [`facts`]: facts given by hand, added as claims on the query's
-//!    operators, assumed consistent with the rest unless
-//!    [`Options::check_facts`] asks to check.
+//!    was counted with, and each table given a row count held to it; the
+//!    plans' own variables then substituted away.
 //!
 //! ```text
 //!       query: SQL ─parse, optimize─▶ LogicalPlan      reference plans
@@ -49,16 +46,14 @@
 //! └─────────────────────────────────────────────┬────────────┘  │
 //!                            op outputs, nodes  │               │
 //! ┌─ 2. link: link::link_all ───────────────────▼────────────┐  │
-//! │ contexts of operators off one path: none asserted yet    │  ├─▶ Z3
+//! │ operators off one path: none asserted yet                │  ├─▶ Z3
 //! └─────────────────────────────────────────────┬────────────┘  │
-//! ┌─ 3. pins: joint ────────────────────────────▼────────────┐  │
+//! ┌─ 3. pins: joint, Builder::with_cardinalities▼────────────┐  │
 //! │ a counted operator X = rows (≥ where a runtime filter    │  │
-//! │ pruned); then the plans' variables substituted out       │──┘
+//! │ pruned), a given table |T| = rows; then the plans'       │  │
+//! │ variables substituted out                                │──┘
 //! └─────────────────────────────────────────────┬────────────┘
 //!                  Analysis: constraints, nodes │
-//! ┌─ 4. facts: Builder::with_facts ─────────────▼────────────┐
-//! │ a claim on an operator; checked against 1–3 if asked     │──▶ Z3
-//! └─────────────────────────────────────────────┬────────────┘
 //!                                               ▼
 //!                          bounds search: Analysis::bounds, plan_bounds
 //! ```
@@ -69,18 +64,15 @@ mod bounds;
 mod builder;
 mod domain;
 mod keys;
-pub mod facts;
 pub mod joint;
 pub mod observed;
 pub mod properties;
-pub mod rows;
 pub mod rules;
 pub mod trace;
 mod validate;
 
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
 pub use builder::Builder;
-pub use facts::Facts;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
@@ -130,8 +122,6 @@ pub struct Analysis {
     assertions: usize,
     /// Every plan node, children before parents.
     nodes: Vec<Node>,
-    /// [`Options::check_facts`].
-    check_facts: bool,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -247,7 +237,7 @@ impl Analysis {
     }
 
     /// Proves each side of `bounds` again, with a minimal set of the
-    /// constraints that proves it: which operators, rules and facts a bound
+    /// constraints that proves it: which operators, rules and pins a bound
     /// comes from. Needs [`Options::trace`].
     ///
     /// Proof names are `lower` and `upper`; a side with nothing to prove
@@ -312,10 +302,6 @@ pub struct Options {
     /// from ([`Analysis::trace`]), to inspect or explain the analysis.
     /// Defaults to false.
     pub trace: bool,
-    /// Check each claim [`Builder::with_facts`] adds against the
-    /// constraints, one solver check per claim, and leave out those that
-    /// contradict them. Off, facts are assumed consistent. Defaults to false.
-    pub check_facts: bool,
 }
 
 impl Default for Options {
@@ -324,7 +310,6 @@ impl Default for Options {
             max_product: analysis::DEFAULT_MAX_PRODUCT,
             foreign_keys: Vec::new(),
             trace: false,
-            check_facts: false,
         }
     }
 }

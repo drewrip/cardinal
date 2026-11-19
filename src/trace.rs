@@ -17,7 +17,6 @@ use z3::{Params, SatResult, Solver};
 
 use crate::analysis::{Analyzer, Node};
 use crate::bounds::Bounds;
-use crate::facts::Fact;
 use crate::{Error, Result};
 
 /// Every constraint of an analysis, with where each comes from.
@@ -69,8 +68,7 @@ pub struct Constraint {
     /// The constraint in infix notation, see [`infix`].
     pub infix: String,
     /// The node the constraint describes, or `None` for one over several
-    /// nodes: of one table's rows (partitions of them), or of
-    /// [link](crate::link).
+    /// nodes, or of a table's size.
     pub node: Option<usize>,
     /// The analyzer's source line that made the constraint, as `file:line`.
     pub source: String,
@@ -80,43 +78,38 @@ pub struct Constraint {
     pub code: String,
     /// The variables the constraint mentions.
     pub vars: Vec<String>,
-    /// For a constraint a fact gave ([`crate::Builder::with_facts`]), or a
-    /// reference plan's count ([`crate::Builder::with_plans`]): which, and
-    /// what it says. `None` for the analyzer's own.
+    /// For a table's given row count
+    /// ([`crate::Builder::with_cardinalities`]), or a reference plan's count
+    /// ([`crate::Builder::with_plans`]): which, and what it says. `None` for
+    /// the analyzer's own.
     #[serde(default)]
     pub fact: Option<FactInfo>,
 }
 
-/// What a fact constraint asserts, and the facts it is read from.
+/// What a given or observed count asserts, and what it is read from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactInfo {
-    /// What kind of claim it is: `pinned rows`, `pinned ndv`, `ndv cap`,
-    /// `range floor`, `range cap`, `row cap` or `floor` of a fact, or
+    /// What kind of claim it is: `given rows` of a table's row count, or
     /// `observed rows` or `observed floor` of a reference plan.
     pub source: String,
-    /// The facts it is read from.
+    /// What it is read from.
     pub facts: Vec<FactRef>,
     /// The value it holds its variable to, e.g. `= 6001215` or `<= 50`.
     pub value: String,
 }
 
-/// One fact, by its text, and where it was read: for a reference plan's
-/// count, `|plan#operator engine operator|`, and `plan#operator`.
+/// One count, by its text, and where it was read: for a reference plan's
+/// count, `|plan#operator engine operator|`, and `plan#operator`; for a
+/// table's given count, `|table|`, and `given`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactRef {
-    /// The fact without its value, e.g. `|lineitem|`.
+    /// The count without its value, e.g. `|lineitem|`.
     pub text: String,
-    /// Each of the fact's [`crate::facts::Origin`]s, as text.
+    /// Where it was read, as text.
     pub origins: Vec<String>,
 }
 
-impl FactRef {
-    pub(crate) fn of(f: &Fact) -> FactRef {
-        FactRef { text: f.kind.to_string(), origins: f.origins.iter().map(|o| o.to_string()).collect() }
-    }
-}
-
-/// A claim a fact or a reference plan gave, as asserted.
+/// A claim a given or observed count gave, as asserted.
 pub(crate) struct FactClaim {
     pub claim: Bool,
     /// The plan node whose variable it holds.
@@ -252,7 +245,7 @@ impl Trace {
         trace
     }
 
-    /// This trace with only the analyzer's constraints, none from facts or
+    /// This trace with only the analyzer's constraints, none from row counts or
     /// reference plans' counts.
     pub fn without_facts(&self) -> Trace {
         let mut trace = self.clone();

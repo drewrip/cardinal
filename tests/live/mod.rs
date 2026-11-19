@@ -1,5 +1,5 @@
 //! Running queries in a live DuckDB or PostgreSQL through its CLI, for the
-//! tests that check facts against the truth.
+//! tests that check bounds against the truth.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -7,7 +7,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use cardinal::facts::CountDialect;
 use cardinal::observed::{Catalog, ObservedPlan, from_duckdb, from_duckdb_explain, from_postgres, from_postgres_explain};
 
 /// How long one DuckDB call may take, in seconds (`CARDINAL_LIVE_TIMEOUT`,
@@ -436,14 +435,6 @@ impl Engine {
                 .filter_map(|l| l.split_once('|'))
                 .map(|(i, p)| (i.to_string(), p.to_string()))
                 .collect(),
-        }
-    }
-
-    /// The SQL its counts are written in.
-    pub fn dialect(&self) -> CountDialect {
-        match self {
-            Engine::DuckDb(_) => CountDialect::DuckDb,
-            Engine::Postgres(_) => CountDialect::Postgres,
         }
     }
 

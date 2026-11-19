@@ -6,8 +6,7 @@
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
 //! inputs', and records its node in the [`Analyzer`]; once every plan is
-//! walked, [link](crate::link) relates op outputs that only
-//! their contexts relate.
+//! walked, [link](crate::link) relates operators off one path.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -19,7 +18,6 @@ use datafusion::common::Column;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
-use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Expr, TableProviderFilterPushDown};
 use z3::ast::{Ast, Bool, Int};
 use z3::{Params, Solver};
@@ -121,7 +119,7 @@ impl SubsetBounds {
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
 /// and how its rows are its inputs', and records its node;
-/// [link](crate::link) then relates those only their contexts relate. Each
+/// [link](crate::link) then relates those off one path. Each
 /// rule is one of its methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
     pub(crate) solver: Solver,
@@ -234,23 +232,6 @@ pub(crate) fn inexact_filters(scan: &TableScan) -> bool {
         && provider
             .supports_filters_pushdown(&filters)
             .is_ok_and(|s| s.iter().all(|s| *s == TableProviderFilterPushDown::Inexact))
-}
-
-/// For filter node `i` over a scan whose pushed filters are all inexact and
-/// each among its own conjuncts, that scan's node. The scan's rows are a
-/// subset of the table's and hold every row satisfying its filters, so the
-/// filter's rows are exactly the table's rows satisfying its predicate.
-pub(crate) fn rechecked_scan(nodes: &[Node], i: usize) -> Option<usize> {
-    let LogicalPlan::Filter(f) = &nodes[i].plan else {
-        return None;
-    };
-    let k = *nodes[i].inputs.first()?;
-    let LogicalPlan::TableScan(scan) = &nodes[k].plan else {
-        return None;
-    };
-    let conjuncts = split_conjunction(&f.predicate);
-    let rechecked = scan.filters.iter().all(|p| conjuncts.contains(&p));
-    (nodes[k].raw_scan.is_some() && scan.fetch.is_none() && inexact_filters(scan) && rechecked).then_some(k)
 }
 
 /// How long Z3 may spend on one check before answering unknown.

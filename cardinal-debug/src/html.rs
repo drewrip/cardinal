@@ -1,7 +1,7 @@
 //! A dump as one self-contained HTML page: the result's bounds, the plan tree
 //! (and the reference plans' parts) with every operator's bounds beside its
 //! constraints, linked both ways, a selector that picks out the constraints
-//! each proof needs. With reference plans or facts, the page can switch to
+//! each proof needs. With reference plans or row counts, the page can switch to
 //! the analysis without them.
 
 use serde_json::json;
@@ -105,7 +105,6 @@ table.proofs .status { font-weight: 600; }
 table.facts { margin-top: 2px; }
 table.facts th, table.facts td { padding: 3px 12px 3px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; overflow-wrap: anywhere; }
 table.facts thead th { border-bottom: 1px solid var(--rule); font-size: 12px; font-weight: 500; }
-#conflicts-box { margin-top: 8px; color: var(--open); }
 
 /* Toolbar */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 16px;
@@ -212,11 +211,8 @@ dl.notation dd { margin: 0; }
 </section>
 
 <section id="facts" hidden>
-  <details><summary>Pins and facts used: <span id="facts-n"></span></summary>
+  <details><summary>Pins and row counts used: <span id="facts-n"></span></summary>
     <table class="facts"><thead><tr><th>Kind</th><th>Claim</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
-  </details>
-  <details id="conflicts-box" hidden open><summary class="warn">Facts left out for contradicting the constraints: <span id="conflicts-n"></span></summary>
-    <table class="facts"><tbody id="conflicts"></tbody></table>
   </details>
 </section>
 
@@ -500,7 +496,7 @@ dl.notation dd { margin: 0; }
       if (h && h.dataset.node !== undefined) treeNodes[+h.dataset.node].row.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
 
-    // Pins and facts used, and conflicts.
+    // Pins and row counts used.
     const factRows = [];
     const row = (body, cells) => {
       const r = el('tr');
@@ -511,16 +507,11 @@ dl.notation dd { margin: 0; }
     if (informed) {
       $('facts').hidden = false;
       const used = t.constraints.filter(isFact);
-      $('facts-n').textContent = `${pins} pins, ${facts} facts`;
+      $('facts-n').textContent = `${pins} pins, ${facts} row counts`;
       for (const c of used) {
         const f = c.fact, read = f.facts.flatMap(x => x.origins);
         const claim = `${c.vars.map(v => names[v] ?? v).join(', ')} ${f.value}`;
         row('facts-used', [[f.source, 'note'], [claim, 'm'], [f.facts.map(x => x.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
-      }
-      if (I.conflicts.length) {
-        $('conflicts-box').hidden = false;
-        $('conflicts-n').textContent = String(I.conflicts.length);
-        for (const c of I.conflicts) row('conflicts', [[c, 'm']]);
       }
     }
 

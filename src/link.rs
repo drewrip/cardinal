@@ -1,10 +1,9 @@
-//! Link: properties between rows that only their contexts relate.
+//! Link: properties between rows the plan's shape does not relate.
 //!
 //! The [rules](crate::rules) apply [properties](crate::properties) where
 //! the plan's shape makes the relationship plain: an operator and its
 //! input, one op output. Link is to relate the rest: operators off one
-//! root-to-leaf path whose rows' [`Context`](crate::rows::Context)s relate.
-//! It asserts nothing yet.
+//! root-to-leaf path. It asserts nothing yet.
 
 use crate::analysis::Analyzer;
 

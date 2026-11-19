@@ -40,7 +40,7 @@ pub fn from_duckdb(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>)
 
 /// Reads the plan DuckDB chose for a query, as printed by `EXPLAIN (FORMAT
 /// JSON)`, or by `EXPLAIN (ANALYZE, FORMAT JSON)` with its counts ignored.
-/// The plan is not counted: it gives no facts. `sql`, the query, names what
+/// The plan is not counted: it pins nothing. `sql`, the query, names what
 /// the plan prints only by alias and vouches for join conditions, as a
 /// profile's own query text does; without it, a profile's is used.
 pub fn from_duckdb_explain(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>) -> Result<ObservedPlan> {
@@ -371,7 +371,7 @@ impl Builder<'_> {
             ("STREAMING_LIMIT" | "LIMIT" | "LIMIT_PERCENT", [_]) => passthrough(Op::Limit { at_most: None }),
             // Its window functions' values follow its input's columns. Each
             // is a window expression over base columns, which only the
-            // analysis reads: facts take window values as unresolved.
+            // analysis reads.
             ("WINDOW" | "STREAMING_WINDOW", [c]) => {
                 let child = &self.nodes[*c];
                 let mut columns = child.columns.clone();

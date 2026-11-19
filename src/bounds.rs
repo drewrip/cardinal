@@ -238,21 +238,6 @@ impl Search {
         proven
     }
 
-    /// Adds `claim` to the constraints if it is consistent with them:
-    /// `Some(true)` if added, `Some(false)` if it contradicts them, and
-    /// `None` if that is undecided (it is then not added).
-    pub(crate) fn assume(&self, claim: &Bool) -> Option<bool> {
-        self.solver.push();
-        self.solver.assert(claim);
-        match self.check() {
-            SatResult::Sat => Some(true),
-            result => {
-                self.solver.pop(1);
-                (result == SatResult::Unsat).then_some(false)
-            }
-        }
-    }
-
     /// The proven range of `x`, a target of the search.
     fn range(&self, x: &Int) -> Bounds {
         let i = self.target(x);

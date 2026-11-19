@@ -1,6 +1,6 @@
 //! A dump as text: the plan tree with each node's constraints under it (and
 //! the reference plans' beside it), then each proof and the constraints it
-//! needs, and with reference plans or facts which pins and facts were used.
+//! needs, and with reference plans or row counts which of them were used.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -18,7 +18,7 @@ pub struct View {
     pub node: Option<usize>,
     /// Hide constraints in the tree; show how many each node has.
     pub brief: bool,
-    /// Show the analysis without its reference plans and facts, as if none
+    /// Show the analysis without its reference plans and row counts, as if none
     /// were given.
     pub plain: bool,
 }
@@ -49,7 +49,7 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
         if !f.plans.is_empty() {
             let _ = writeln!(w, "Plans:   {} reference plans, {pins} pins", f.plans.len());
         }
-        let _ = writeln!(w, "Facts:   {n} fact constraints");
+        let _ = writeln!(w, "Counts:  {n} given row counts");
     }
     // The operators' bounds the tree shows: informed if that is shown.
     let plan = facts.map_or(dump.plan_bounds.as_ref(), |f| f.plan_bounds.as_ref());
@@ -119,7 +119,7 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
             };
             let _ = writeln!(w, "  {:<16} {:<24} {:<26} {}", p.name, p.claim, without, with);
         }
-        let _ = writeln!(w, "  (--proof NAME shows one proof's constraints; --plain the analysis without plans or facts)");
+        let _ = writeln!(w, "  (--proof NAME shows one proof's constraints; --plain the analysis without plans or row counts)");
     } else if proof.is_none() {
         let _ = writeln!(w, "\nProofs:");
         if facts.is_some() {
@@ -141,8 +141,8 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
         }
         let _ = writeln!(w, "  (--proof NAME shows one proof's constraints)");
     }
-    if let Some(f) = facts {
-        facts_sections(w, t, f);
+    if facts.is_some() {
+        facts_sections(w, t);
     }
     Ok(out)
 }
@@ -155,9 +155,9 @@ fn needs(p: &Proof) -> String {
     }
 }
 
-/// Which pins and facts were used, and which facts conflict.
-fn facts_sections(w: &mut String, t: &Trace, f: &InformedDump) {
-    let _ = writeln!(w, "\nPins and facts used (marked ◆ in the tree):");
+/// Which pins and row counts were used.
+fn facts_sections(w: &mut String, t: &Trace) {
+    let _ = writeln!(w, "\nPins and row counts used (marked ◆ in the tree):");
     let used: Vec<&Constraint> = t.constraints.iter().filter(|c| c.fact.is_some()).collect();
     if used.is_empty() {
         let _ = writeln!(w, "  (none)");
@@ -173,12 +173,6 @@ fn facts_sections(w: &mut String, t: &Trace, f: &InformedDump) {
             })
             .collect();
         let _ = writeln!(w, "  {:<12} {:<28} {:<14} from {}", info.source, readable(t, &c.vars.join(", ")), info.value, from.join(", "));
-    }
-    if !f.conflicts.is_empty() {
-        let _ = writeln!(w, "\nConflicts (left out):");
-        for c in &f.conflicts {
-            let _ = writeln!(w, "  {c}");
-        }
     }
 }
 
@@ -230,7 +224,7 @@ fn tree(
     }
 }
 
-/// The row counts facts or pins hold node `n`'s variables to, e.g.
+/// The row counts pins hold node `n`'s variables to, e.g.
 /// `  op3_Scan_lineitem = 6001215`, if `facts` are shown.
 fn values(n: &cardinal::TraceNode, t: &Trace, facts: bool) -> String {
     if !facts {
@@ -240,7 +234,7 @@ fn values(n: &cardinal::TraceNode, t: &Trace, facts: bool) -> String {
     let mut out = String::new();
     for c in t.of_node(n.id) {
         if let Some(f) = &c.fact
-            && matches!(f.source.as_str(), "pinned rows" | "row cap" | "observed rows" | "observed floor")
+            && matches!(f.source.as_str(), "observed rows" | "observed floor")
             && let [v] = &c.vars[..]
             && vars.contains(&v.as_str())
         {

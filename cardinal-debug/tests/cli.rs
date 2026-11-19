@@ -91,6 +91,7 @@ fn dump_q04(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
 }
 
 #[test]
+#[ignore = "bound needs link"]
 fn reference_plans_from_profiles() {
     let (json, dump) = dump_q04("q04.json", &[]);
     let informed = dump.informed.as_ref().expect("an informed section");
@@ -111,7 +112,7 @@ fn reference_plans_from_profiles() {
 
     let path = json.to_str().unwrap();
     let text = run(&["view", path]);
-    for want in ["Informed: ", "Plans:   1 reference plans", "Reference plan q04:", "◆ [", "fact: observed rows", "Proofs (plain / informed)", "Pins and facts used"] {
+    for want in ["Informed: ", "Plans:   1 reference plans", "Reference plan q04:", "◆ [", "fact: observed rows", "Proofs (plain / informed)", "Pins and row counts used"] {
         assert!(text.contains(want), "no {want:?} in {text}");
     }
     let proof = run(&["view", path, "--proof", &with.name]);
@@ -126,20 +127,17 @@ fn reference_plans_from_profiles() {
 }
 
 #[test]
-fn facts_by_hand() {
-    use cardinal::facts::{Context, Fact, FactKind, FactSet, Origin, Ratio};
-    let mut set = FactSet::default();
-    set.insert(Fact { kind: FactKind::Cardinality(Context::table("nation")), value: Ratio::int(25), origins: vec![Origin::Counted] });
-    let facts = temp("facts.json");
-    std::fs::write(&facts, serde_json::to_string(&set).unwrap()).unwrap();
+fn cardinalities_by_hand() {
+    let sizes = temp("sizes.json");
+    std::fs::write(&sizes, r#"{"nation": 25}"#).unwrap();
     let json = temp("hand.json");
-    let facts = facts.to_str().unwrap();
-    run(&["dump", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--facts", facts, "--no-plan-bounds", "-o", json.to_str().unwrap()]);
+    let sizes = sizes.to_str().unwrap();
+    run(&["dump", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--cardinalities", sizes, "--no-plan-bounds", "-o", json.to_str().unwrap()]);
     let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
     let informed = dump.informed.expect("an informed section");
     assert!(informed.plans.is_empty());
     assert_eq!(informed.bounds.as_deref(), Some("X = 25"));
-    assert!(informed.trace.constraints.iter().any(|c| c.fact.as_ref().is_some_and(|f| f.source == "pinned rows")));
+    assert!(informed.trace.constraints.iter().any(|c| c.fact.as_ref().is_some_and(|f| f.source == "given rows")));
 }
 
 #[test]

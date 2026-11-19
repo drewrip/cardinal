@@ -30,7 +30,7 @@ async fn query(ctx: &SessionContext, sql: &str) -> Builder<'static> {
 
 /// `sql`'s plan bounds with the shop's tables held to [`SIZES`].
 async fn sized(sql: &str) -> PlanBounds {
-    let a = query(&shop(), sql).await.with_facts(&common::table_sizes(SIZES)).build().unwrap();
+    let a = query(&shop(), sql).await.with_cardinalities(SIZES.iter().cloned()).build().unwrap();
     let p = a.plan_bounds().unwrap();
     println!("{sql}");
     for (i, n) in p.nodes.iter().enumerate() {
@@ -94,7 +94,7 @@ async fn real_executions_stay_within_every_range() {
             let v = a.validate(&ctx).await.unwrap();
             assert!(v.violation.is_none(), "{sql}: {:?}", v.violation);
             let sizes: Vec<(&str, u64)> = a.scans.iter().map(|(s, t)| (t.as_str(), v.rows[s])).collect();
-            let p = query.with_facts(&common::table_sizes(&sizes)).build().unwrap().plan_bounds().unwrap();
+            let p = query.with_cardinalities(sizes.iter().cloned()).build().unwrap().plan_bounds().unwrap();
             let failures = common::check_plan_bounds(&p, &v);
             assert!(failures.is_empty(), "{sql}: {failures:?}");
         }

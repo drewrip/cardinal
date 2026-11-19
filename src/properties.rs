@@ -4,7 +4,7 @@
 //! (Z3 terms: row counts, distinct counts, ends of ranges), and returns its
 //! claims. It asserts nothing, reads no plan and finds nothing: its caller
 //! knows how the rows relate, the [rules](crate::rules) from the plan's
-//! shape, [`link`](crate::link) from their contexts. This is the one place
+//! shape, [`link`](crate::link) otherwise. This is the one place
 //! to check each claim's soundness, given that its premise holds.
 //!
 //! Properties of rows related to other rows take [`Pair`]s: one quantity of
