@@ -45,7 +45,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator, binary_expr};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
-use crate::analysis::{Analyzer, inexact_filters, product, solver_with_timeout};
+use crate::analysis::{Analyzer, inexact_filters, product, solver_with_limits};
 use crate::predicates::Encoder;
 use crate::properties::{self, Pair};
 use crate::rules::opaque;
@@ -416,7 +416,9 @@ struct Relation {
 }
 
 /// Decides [`Relation`]s with a solver of its own, once per pair of
-/// predicates.
+/// predicates. Each check is limited by Z3's resource count
+/// ([`DECIDE_RLIMIT`]), not by time, so the links found do not depend on
+/// the machine's load.
 struct Decide {
     solver: Solver,
     encoders: usize,
@@ -426,7 +428,11 @@ struct Decide {
 
 impl Decide {
     fn new() -> Decide {
-        Decide { solver: solver_with_timeout(DECIDE_TIMEOUT_MS), encoders: 0, known: HashMap::new() }
+        Decide::with_rlimit(DECIDE_RLIMIT)
+    }
+
+    fn with_rlimit(rlimit: u32) -> Decide {
+        Decide { solver: solver_with_limits(rlimit, DECIDE_TIMEOUT_MS), encoders: 0, known: HashMap::new() }
     }
 
     /// How `c1`'s predicates relate to `c2`'s, both over `c2`'s scans,
@@ -450,7 +456,7 @@ impl Decide {
     }
 
     /// True if `f` holds whatever its variables, as far as the solver
-    /// decides in time.
+    /// decides within the check's resource limit: undecided is not valid.
     fn valid(&self, f: &Bool) -> bool {
         self.solver.push();
         self.solver.assert(f.not());
@@ -460,9 +466,16 @@ impl Decide {
     }
 }
 
-/// How long deciding one relation between predicates may take; undecided
-/// is not valid.
-const DECIDE_TIMEOUT_MS: u32 = 1_000;
+/// Per-check resource limit of [`Decide`]. Over TPC-H, alone and with the
+/// other queries' plans, every check is decided: proofs spend at most
+/// about 50, refutations about 700. A hard nonlinear formula spends about
+/// 4 million a second on an unloaded core, so this is a fraction of a
+/// second's work, as Z3 counts work unevenly: about the 1 s timeout it
+/// replaces.
+const DECIDE_RLIMIT: u32 = 1_000_000;
+/// Wall-clock limit, only against a check that stalls without spending
+/// its resources: far beyond what its resource limit takes.
+const DECIDE_TIMEOUT_MS: u32 = 10_000;
 
 /// `c`, a member of `class` mapped onto its root by `tau`, is the class's
 /// rows: its card and each base column's quantities equal the class's
@@ -793,6 +806,48 @@ fn permutations(xs: &[usize]) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `x³ + y³ = z³` has no solution in `x, y, z > 1`, which Z3 cannot
+    /// decide: its negation is valid, but checking it spends any limit.
+    fn hard() -> Bool {
+        let (x, y, z) = (Int::new_const("x"), Int::new_const("y"), Int::new_const("z"));
+        let cube = |v: &Int| v * v * v;
+        Bool::and(&[x.gt(1), y.gt(1), z.gt(1), (cube(&x) + cube(&y)).eq(cube(&z))]).not()
+    }
+
+    /// `x < 5` and `x >= 5` are disjoint.
+    fn easy() -> Bool {
+        let x = Int::new_const("x");
+        Bool::and(&[x.lt(5), x.ge(5)]).not()
+    }
+
+    fn spent(d: &Decide) -> u64 {
+        match d.solver.get_statistics().value("rlimit count") {
+            Some(z3::StatisticsValue::UInt(n)) => n.into(),
+            v => panic!("rlimit count: {v:?}"),
+        }
+    }
+
+    /// The limit is per check: after checks that together spent more, a
+    /// simple one is still decided.
+    #[test]
+    fn decide_limit_is_per_check() {
+        let d = Decide::new();
+        while spent(&d) <= u64::from(DECIDE_RLIMIT) {
+            assert!(!d.valid(&hard()));
+        }
+        assert!(d.valid(&easy()));
+    }
+
+    /// The first check is limited too: a hard formula is not valid within
+    /// a small limit.
+    #[test]
+    fn decide_first_check_is_limited() {
+        let d = Decide::with_rlimit(1_000);
+        assert!(!d.valid(&hard()));
+        assert!(spent(&d) < 100_000, "{}", spent(&d));
+        assert!(d.valid(&easy()));
+    }
 
     #[test]
     fn union_find_composes_mappings() {

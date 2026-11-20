@@ -249,6 +249,24 @@ pub(crate) fn solver_with_timeout(ms: u32) -> Solver {
     solver
 }
 
+/// A solver whose every check is limited to `rlimit` of Z3's resource
+/// count and `ms` milliseconds ([`set_limits`]).
+pub(crate) fn solver_with_limits(rlimit: u32, ms: u32) -> Solver {
+    let solver = Solver::new();
+    set_limits(&solver, rlimit, ms);
+    solver
+}
+
+/// Limits each of `solver`'s next checks to `rlimit` of Z3's resource
+/// count, counted from the check's start (not cumulative over checks),
+/// and `ms` milliseconds.
+pub(crate) fn set_limits(solver: &Solver, rlimit: u32, ms: u32) {
+    let mut params = Params::new();
+    params.set_u32("rlimit", rlimit);
+    params.set_u32("timeout", ms);
+    solver.set_params(&params);
+}
+
 /// Restricts a Z3 symbol to `[A-Za-z0-9_]` so it round-trips through SMT-LIB
 /// text unquoted. Uniqueness comes from the numeric prefix, not the name.
 pub(crate) fn symbol(s: &str) -> String {

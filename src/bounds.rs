@@ -18,9 +18,9 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use z3::ast::{Bool, Int};
-use z3::{Params, SatResult, Solver};
+use z3::{SatResult, Solver};
 
-use crate::analysis::solver_with_timeout;
+use crate::analysis::{set_limits, solver_with_limits};
 
 /// The proven range of a query's output cardinality `X`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -143,7 +143,7 @@ struct Known {
 impl Search {
     /// A solver loaded with `constraints`, bounding variable `root`.
     pub(crate) fn new(constraints: &str, root: &str) -> (Self, usize) {
-        let solver = solver_with_timeout(TIMEOUT_MS);
+        let solver = solver_with_limits(FIRST_RLIMIT, FIRST_TIMEOUT_MS);
         solver.from_string(constraints);
         let parsed = solver.get_assertions().len();
         (
@@ -169,24 +169,15 @@ impl Search {
         if self.warm.get() { (RLIMIT, TIMEOUT_MS) } else { (FIRST_RLIMIT, FIRST_TIMEOUT_MS) }
     }
 
-    fn set_limits(&self, (rlimit, ms): (u32, u32)) {
-        let mut params = Params::new();
-        params.set_u32("rlimit", rlimit);
-        params.set_u32("timeout", ms);
-        self.solver.set_params(&params);
-    }
-
     /// Checks the solver, counting the outcome.
     fn check(&self) -> SatResult {
         let first = !self.warm.get();
-        if first {
-            self.set_limits(self.limits());
-        }
         let start = Instant::now();
         let result = self.solver.check();
         self.warm.set(true);
         if first {
-            self.set_limits(self.limits());
+            let (rlimit, ms) = self.limits();
+            set_limits(&self.solver, rlimit, ms);
         }
         let mut stats = self.stats.get();
         stats.time += start.elapsed();
