@@ -166,10 +166,12 @@ impl Analysis {
 
     /// Proves the tightest `lower <= X <= upper` on the output cardinality.
     ///
-    /// This runs many solver checks, each limited to one second but the
-    /// first, which loads the constraints and may take up to ten, so it is
-    /// separate from the analysis itself. Without facts it depends only on
-    /// the query, not on the data.
+    /// This runs many solver checks, each limited to a fixed amount of
+    /// solver work (most often under a second; more for the first, which
+    /// loads the constraints), so it is separate from the analysis itself.
+    /// The limit is not a time, so the bounds do not depend on the
+    /// machine's load. Without facts they depend only on the query, not on
+    /// the data.
     pub fn bounds(&self) -> Result<Bounds> {
         self.with_search(|s| s.bounds())
     }

@@ -6,8 +6,12 @@
 //!
 //! `hi` is searched first, by binary search from `2^30` down, and caps the
 //! search for `lo`, which gallops up from 0 and then bisects. Each check
-//! that fails to prove a claim needs a model, which can take the whole
-//! timeout, so the searches avoid them: `lo` is most often small.
+//! that fails to prove a claim needs a model, which can take its whole
+//! budget, so the searches avoid them: `lo` is most often small.
+//!
+//! Each check's budget is a resource limit (Z3's `rlimit`), not a time:
+//! the same constraints give the same bounds however loaded the machine
+//! is. A generous timeout only guards against a check that stalls.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -69,11 +73,19 @@ pub struct NodeBounds {
 
 /// Largest constant tried; a bound needing more is treated as unbounded.
 const CAP: u64 = 1 << 30;
-/// Per-check timeout: bounds are best-effort, so give up quickly.
-const TIMEOUT_MS: u32 = 1_000;
+/// Per-check resource limit: bounds are best-effort, so give up quickly.
+/// Z3 applies it to each check. Proofs take far less; what reaches it is
+/// most often the search for a model refuting a claim, at a few tenths of
+/// a second to a few seconds on an unloaded core, as Z3 counts work
+/// unevenly.
+const RLIMIT: u32 = 300_000;
 /// The first check of a search, which also loads the constraints into the
 /// solver.
-const FIRST_TIMEOUT_MS: u32 = 10_000;
+const FIRST_RLIMIT: u32 = 10_000_000;
+/// Wall-clock limits, only against a check that stalls without spending
+/// its resources: far beyond what its resource limit takes.
+const TIMEOUT_MS: u32 = 10_000;
+const FIRST_TIMEOUT_MS: u32 = 60_000;
 
 /// How a bounds search's solver checks came out, and how long they took.
 #[doc(hidden)]
@@ -83,7 +95,7 @@ pub struct SearchStats {
     pub sat: u32,
     /// Checks that found none: a claim proven, or contradicted.
     pub unsat: u32,
-    /// Checks that gave up, mostly at the timeout.
+    /// Checks that gave up, mostly at the resource limit.
     pub unknown: u32,
     pub time: Duration,
 }
@@ -151,28 +163,30 @@ impl Search {
         self.stats.get()
     }
 
-    /// The timeout of the next check: longer for the first.
-    fn timeout_ms(&self) -> u32 {
-        if self.warm.get() { TIMEOUT_MS } else { FIRST_TIMEOUT_MS }
+    /// The resource and time limits of the next check: larger for the
+    /// first.
+    fn limits(&self) -> (u32, u32) {
+        if self.warm.get() { (RLIMIT, TIMEOUT_MS) } else { (FIRST_RLIMIT, FIRST_TIMEOUT_MS) }
     }
 
-    fn set_timeout(&self, ms: u32) {
+    fn set_limits(&self, (rlimit, ms): (u32, u32)) {
         let mut params = Params::new();
+        params.set_u32("rlimit", rlimit);
         params.set_u32("timeout", ms);
         self.solver.set_params(&params);
     }
 
     /// Checks the solver, counting the outcome.
     fn check(&self) -> SatResult {
-        let ms = self.timeout_ms();
-        if ms != TIMEOUT_MS {
-            self.set_timeout(ms);
+        let first = !self.warm.get();
+        if first {
+            self.set_limits(self.limits());
         }
         let start = Instant::now();
         let result = self.solver.check();
         self.warm.set(true);
-        if ms != TIMEOUT_MS {
-            self.set_timeout(TIMEOUT_MS);
+        if first {
+            self.set_limits(self.limits());
         }
         let mut stats = self.stats.get();
         stats.time += start.elapsed();
@@ -424,16 +438,16 @@ mod tests {
         assert!(search.stats().checks() - before <= 2, "{:?}", search.stats());
     }
 
-    /// The first check, which loads the constraints, gets the longer
-    /// timeout; the rest the usual one.
+    /// The first check, which loads the constraints, gets the larger
+    /// limits; the rest the usual ones.
     #[test]
     fn first_check_gets_more_time() {
         let (search, _) = Search::new("(declare-const x Int) (assert (<= 0 x 5))", "x");
-        assert_eq!(search.timeout_ms(), FIRST_TIMEOUT_MS);
+        assert_eq!(search.limits(), (FIRST_RLIMIT, FIRST_TIMEOUT_MS));
         search.check();
-        assert_eq!(search.timeout_ms(), TIMEOUT_MS);
+        assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
         search.check();
-        assert_eq!(search.timeout_ms(), TIMEOUT_MS);
+        assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
     }
 
     /// Z3 is the pinned release, not an older system library: older ones
