@@ -1,5 +1,6 @@
-//! A [`Batch`] analyzes each query as [`cardinal::Builder::build`] does
-//! alone, with the batch's options, reference plans and row counts.
+//! A [`cardinal::Batch`] analyzes each query as [`cardinal::Builder::build`] does
+//! alone, with the batch's options, reference plans and row counts,
+//! though in parallel.
 
 mod fixtures;
 
@@ -97,4 +98,35 @@ async fn bounds_all_match_bounds() {
         assert_eq!(b.unwrap(), a.bounds().unwrap());
         assert_eq!(p.unwrap(), a.plan_bounds().unwrap());
     }
+}
+
+/// More queries than the pool has threads, so threads are reused across
+/// queries: every copy is analyzed alike, and as it is alone.
+#[tokio::test]
+async fn reused_threads_analyze_alike() {
+    let ctx = context();
+    let n = 2 * std::thread::available_parallelism().unwrap().get() + 1;
+    let queries: Vec<String> = (0..n).map(|i| query("tpch", ["q06", "q12"][i % 2])).collect();
+    let analyses = Analysis::sqls(&ctx, &queries).await.unwrap().options(options()).build();
+    for (sql, a) in queries.iter().zip(&analyses).take(2) {
+        let alone = Analysis::sql(&ctx, sql).await.unwrap().options(options()).build().unwrap();
+        assert_same(a.as_ref().unwrap(), &alone);
+    }
+    for (i, a) in analyses.iter().enumerate().skip(2) {
+        assert_same(a.as_ref().unwrap(), analyses[i % 2].as_ref().unwrap());
+    }
+}
+
+#[tokio::test]
+async fn empty_and_single_batches() {
+    let ctx = context();
+    let empty = Analysis::sqls(&ctx, Vec::<String>::new()).await.unwrap();
+    assert!(empty.is_empty());
+    assert!(empty.build().is_empty());
+    assert!(Analysis::bounds_all([]).is_empty());
+
+    let sql = query("tpch", "q06");
+    let one = Analysis::sqls(&ctx, [&sql]).await.unwrap().build();
+    assert_eq!(one.len(), 1);
+    assert_same(one[0].as_ref().unwrap(), &Analysis::sql(&ctx, &sql).await.unwrap().build().unwrap());
 }

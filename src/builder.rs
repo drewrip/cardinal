@@ -18,7 +18,7 @@ use z3::ast::Int;
 use crate::analysis::{Analyzer, ScanKind};
 use crate::observed::{self, Catalog, ObservedPlan};
 use crate::trace::{FactClaim, FactInfo, FactRef, Trace};
-use crate::{Analysis, Error, Options, Result, joint, link};
+use crate::{Analysis, Error, Options, Result, in_own_context, joint, link};
 
 /// An [`Analysis`] being made: the query to bound, the [`Options`], the
 /// executed plans of other queries to analyze it with
@@ -186,8 +186,14 @@ impl<'c> Builder<'c> {
     }
 
     /// The analysis: the query's constraints, the reference plans', and the
-    /// tables' row counts.
+    /// tables' row counts. It runs in a Z3 context of its own
+    /// ([`in_own_context`]), so a query gives the same constraints built
+    /// alone or in a [`Batch`](crate::Batch).
     pub fn build(self) -> Result<Analysis> {
+        in_own_context(|| self.analyze())
+    }
+
+    fn analyze(&self) -> Result<Analysis> {
         let options = &self.options;
         let catalog = self.catalog.as_ref().map(CatalogRef::get);
         let (plan, defaults, base) = match &self.query {

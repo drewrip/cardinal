@@ -271,7 +271,10 @@ impl Analysis {
 /// checks, most of all) leave the constraints parsed back with other ids,
 /// which can make every check of a search far slower. A new context gives
 /// the same text the same ids each time.
-fn in_own_context<R: Send + Sync>(f: impl FnOnce() -> R + Send + Sync) -> R {
+///
+/// Nothing run in one calls into rayon ([`Batch`]): a task stolen while
+/// waiting would run in this context, not its own.
+pub(crate) fn in_own_context<R: Send + Sync>(f: impl FnOnce() -> R + Send + Sync) -> R {
     z3::with_z3_config(&z3::Config::new(), f)
 }
 
