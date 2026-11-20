@@ -82,9 +82,11 @@ pub use builder::Builder;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use datafusion::prelude::SessionContext;
-use z3::ast::Int;
+use z3::ast::{Bool, Int};
+use z3::{Solver, Synchronized};
 
 use analysis::Node;
 
@@ -122,9 +124,13 @@ pub struct Analysis {
     /// Every constraint with the plan node and analyzer line it comes from,
     /// if [`Options::trace`] is set.
     pub trace: Option<Trace>,
-    /// The constraint set `S`, and how many assertions it holds (to check
-    /// that it parses back completely).
-    constraints: String,
+    /// The constraint set `S`, as terms in a Z3 context of their own: the
+    /// bounds search starts from them.
+    constraints: Synchronized<Vec<Bool>>,
+    /// `S` in SMT-LIB, printed on first use ([`Analysis::constraints`]),
+    /// and how many assertions it holds (to check that it parses back
+    /// completely).
+    text: OnceLock<String>,
     assertions: usize,
     /// Every plan node, children before parents.
     nodes: Vec<Node>,
@@ -161,7 +167,7 @@ impl Analysis {
     /// break a constraint derived from it.
     pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
         let (counts, ends, broken) = validate::evaluate(&self.nodes, ctx).await;
-        let mut v = validate::check(&self.constraints, self.assertions, &counts, &ends)?;
+        let mut v = validate::check(self.constraints(), self.assertions, &counts, &ends)?;
         // A broken dependency explains the counts that contradict `S`.
         if broken.is_some() {
             v.violation = broken;
@@ -178,13 +184,13 @@ impl Analysis {
     /// machine's load. Without facts they depend only on the query, not on
     /// the data.
     pub fn bounds(&self) -> Result<Bounds> {
-        self.with_search(|s| s.bounds())
+        Ok(self.with_search(|s| s.bounds()))
     }
 
     /// [`Analysis::bounds`], and how its solver checks went.
     #[doc(hidden)]
     pub fn bounds_with_stats(&self) -> Result<(Bounds, SearchStats)> {
-        self.with_search(|s| (s.bounds(), s.stats()))
+        Ok(self.with_search(|s| (s.bounds(), s.stats())))
     }
 
     /// Proves the tightest range on every operator's output cardinality,
@@ -216,7 +222,7 @@ impl Analysis {
             let cards: Vec<Int> = vars.iter().map(|v| Int::new_const(*v)).collect();
             let (ranges, total) = search.plan(&cards, &same);
             (ranges, total, search.stats())
-        })?;
+        });
         let nodes = self
             .nodes
             .iter()
@@ -231,22 +237,22 @@ impl Analysis {
         Ok((PlanBounds { nodes, total }, stats))
     }
 
-    /// The constraints `S`, in SMT-LIB.
+    /// The constraints `S`, in SMT-LIB. Printed on the first call, which
+    /// can take a while for a large analysis.
     pub fn constraints(&self) -> &str {
-        &self.constraints
+        self.text.get_or_init(|| {
+            in_own_context(|| {
+                let solver = Solver::new();
+                self.constraints.recover().iter().for_each(|f| solver.assert(f));
+                solver.to_string()
+            })
+        })
     }
 
-    /// Runs `f` on a search over the constraints, checked to hold all of
-    /// them, in a Z3 context of its own ([`in_own_context`]).
-    fn with_search<R: Send + Sync>(&self, f: impl FnOnce(&bounds::Search) -> R + Send + Sync) -> Result<R> {
-        let (constraints, root, expected) = (self.constraints.as_str(), self.root.as_str(), self.assertions);
-        in_own_context(|| {
-            let (search, parsed) = bounds::Search::new(constraints, root);
-            if parsed != expected {
-                return Err(Error::Internal(format!("constraints parsed back to {parsed} assertions, expected {expected}")));
-            }
-            Ok(f(&search))
-        })
+    /// Runs `f` on a search over the constraints, in a Z3 context of its
+    /// own ([`in_own_context`]).
+    fn with_search<R: Send + Sync>(&self, f: impl FnOnce(&bounds::Search) -> R + Send + Sync) -> R {
+        in_own_context(|| f(&bounds::Search::new(&self.constraints.recover(), &self.root)))
     }
 
     /// Proves each side of `bounds` again, with a minimal set of the
@@ -268,9 +274,9 @@ impl Analysis {
 ///
 /// Z3 reuses the ids of freed terms, and its search heuristics order by
 /// id. In the thread's context, the terms an analysis made and freed (link's
-/// checks, most of all) leave the constraints parsed back with other ids,
+/// checks, most of all) leave the constraints copied in with other ids,
 /// which can make every check of a search far slower. A new context gives
-/// the same text the same ids each time.
+/// the same constraints the same ids each time.
 ///
 /// Nothing run in one calls into rayon ([`Batch`]): a task stolen while
 /// waiting would run in this context, not its own.

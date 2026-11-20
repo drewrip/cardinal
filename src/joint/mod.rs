@@ -47,7 +47,7 @@ use std::panic::Location;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::logical_expr::LogicalPlan;
 use z3::ast::{Ast, Bool, Int};
-use z3::{FuncDecl, Goal, Solver, Sort, Tactic};
+use z3::{FuncDecl, Goal, Sort, Tactic};
 
 use crate::analysis::{Analyzer, Node, ranged_columns};
 use crate::observed::{Catalog, ObservedPlan};
@@ -166,21 +166,14 @@ pub(crate) fn kept(a: &Analyzer, own_vars: usize) -> Vec<String> {
 }
 
 /// `assertions` reduced (see the [spec](self#spec)): `solve-eqs` keeping
-/// the variables `kept` names, then each assertion kept once. Returns the
-/// reduced SMT-LIB script and how many assertions it holds.
-pub(crate) fn reduce(assertions: &[Bool], kept: &[String]) -> (String, usize) {
+/// the variables `kept` names, then each assertion kept once.
+pub(crate) fn reduce(assertions: &[Bool], kept: &[String]) -> Vec<Bool> {
     let kept: Vec<Int> = kept.iter().map(|v| Int::new_const(v.as_str())).collect();
     // Substituted, a plan's copy of an operator the query has (a table's
     // scan, most often) asserts what the query's does: each assertion
     // once, the first kept in place.
-    let solver = Solver::new();
     let mut seen = HashSet::new();
-    for f in solve_eqs(assertions, &kept) {
-        if seen.insert(f.clone()) {
-            solver.assert(&f);
-        }
-    }
-    (solver.to_string(), solver.get_assertions().len())
+    solve_eqs(assertions, &kept).into_iter().filter(|f| seen.insert(f.clone())).collect()
 }
 
 /// Each analyzer node of `nodes` an operator of `plan` became, by `built`
@@ -302,6 +295,7 @@ fn maximal<'p>(plan: &'p LogicalPlan, within: &BTreeSet<String>, out: &mut Vec<&
 #[cfg(test)]
 mod tests {
     use super::*;
+    use z3::Solver;
 
     /// Reducing the assertions themselves gives what reducing their
     /// printed and parsed text does, and `solve-eqs` does reduce them.
@@ -321,7 +315,7 @@ mod tests {
         let parsed = Solver::new();
         parsed.from_string(solver.to_string());
         assert_eq!(direct, reduce(&parsed.get_assertions(), &kept));
-        assert_eq!(direct.1, 2, "{}", direct.0);
-        assert!(!direct.0.contains("declare-fun y"), "{}", direct.0);
+        assert_eq!(direct.len(), 2, "{direct:?}");
+        assert!(direct.iter().all(|f| !f.to_string().contains('y')), "{direct:?}");
     }
 }

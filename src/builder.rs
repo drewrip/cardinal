@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::panic::Location;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use datafusion::catalog::TableProvider;
 use datafusion::common::TableReference;
@@ -13,6 +13,7 @@ use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::prelude::SessionContext;
+use z3::PrepareSynchronized;
 use z3::ast::Int;
 
 use crate::analysis::{Analyzer, ScanKind};
@@ -265,31 +266,18 @@ fn analyze(
     let mut tables: Vec<(String, String)> = a.tables.values().map(|t| (t.display.clone(), t.symbol.clone())).collect();
     tables.sort();
     let scans: Vec<(String, String)> = a.scans[..own_scans].iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
-    // The solver is printed only where the text is read: as the
-    // constraints without plans, and by the trace. It can be large.
-    let print = || a.solver.to_string();
-    let trace_of = |full: &str| {
-        let t = Trace::build(&a, full, &root_name, &scans, &tables, &owners).with_facts(&pinned);
+    // The constraints are kept as terms: printing is slow, and serializes
+    // threads on Z3's symbol table. Only the trace prints them here.
+    let traced = options.trace.then(|| {
+        let full = a.solver.to_string();
+        let t = Trace::build(&a, &full, &root_name, &scans, &tables, &owners).with_facts(&pinned);
         assert_eq!(t.constraints.len(), n, "every assertion is traced");
-        t
-    };
-    let reduce = || joint::reduce(&asserted, &joint::kept(&a, own_vars));
-    let (constraints, assertions, trace) = match (joint, options.trace) {
-        (false, false) => (print(), n, None),
-        (false, true) => {
-            let full = print();
-            let trace = trace_of(&full);
-            (full, n, Some(trace))
-        }
-        (true, false) => {
-            let (constraints, assertions) = reduce();
-            (constraints, assertions, None)
-        }
-        (true, true) => {
-            let trace = trace_of(&print());
-            let (constraints, assertions) = reduce();
-            (constraints, assertions, Some(trace))
-        }
+        (t, full)
+    });
+    let (trace, full) = traced.unzip();
+    let (constraints, text) = match joint {
+        false => (asserted, full),
+        true => (joint::reduce(&asserted, &joint::kept(&a, own_vars)), None),
     };
     let mut nodes = a.nodes;
     nodes.truncate(own);
@@ -298,8 +286,9 @@ fn analyze(
         scans,
         plan: plan.display_indent().to_string(),
         trace,
-        constraints,
-        assertions,
+        assertions: constraints.len(),
+        constraints: constraints.synchronized(),
+        text: text.map(OnceLock::from).unwrap_or_default(),
         nodes,
     }
 }

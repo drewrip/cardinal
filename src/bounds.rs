@@ -141,21 +141,17 @@ struct Known {
 }
 
 impl Search {
-    /// A solver loaded with `constraints`, bounding variable `root`.
-    pub(crate) fn new(constraints: &str, root: &str) -> (Self, usize) {
+    /// A search over `constraints`, bounding variable `root`.
+    pub(crate) fn new(constraints: &[Bool], root: &str) -> Self {
         let solver = solver_with_limits(FIRST_RLIMIT, FIRST_TIMEOUT_MS);
-        solver.from_string(constraints);
-        let parsed = solver.get_assertions().len();
-        (
-            Search {
-                solver,
-                output: Int::new_const(root),
-                stats: Cell::default(),
-                warm: Cell::new(false),
-                targets: RefCell::default(),
-            },
-            parsed,
-        )
+        constraints.iter().for_each(|f| solver.assert(f));
+        Search {
+            solver,
+            output: Int::new_const(root),
+            stats: Cell::default(),
+            warm: Cell::new(false),
+            targets: RefCell::default(),
+        }
     }
 
     /// The checks so far.
@@ -368,17 +364,24 @@ impl Search {
 mod tests {
     use super::*;
 
+    /// A search over the SMT-LIB `smt`.
+    fn over(smt: &str, root: &str) -> Search {
+        let solver = Solver::new();
+        solver.from_string(smt);
+        Search::new(&solver.get_assertions(), root)
+    }
+
     /// `plan` gives every card the range a search of it alone gives.
     fn plan_matches_lone_searches(smt: &str, vars: &[&str]) {
         let cards: Vec<Int> = vars.iter().map(|v| Int::new_const(*v)).collect();
         let same: Vec<Option<usize>> = (0..vars.len()).map(|i| i.checked_sub(1)).collect();
-        let (search, _) = Search::new(smt, vars[vars.len() - 1]);
+        let search = over(smt, vars[vars.len() - 1]);
         let (ranges, total) = search.plan(&cards, &same);
         for (v, r) in vars.iter().zip(&ranges) {
-            let (alone, _) = Search::new(smt, v);
+            let alone = over(smt, v);
             assert_eq!(*r, alone.bounds(), "{v}");
         }
-        let (alone, _) = Search::new(smt, vars[0]);
+        let alone = over(smt, vars[0]);
         assert_eq!(total, alone.range(&Int::add(&cards)), "total");
     }
 
@@ -400,7 +403,7 @@ mod tests {
     }
 
     fn bounds_of(smt: &str) -> Bounds {
-        Search::new(&format!("(declare-const x Int) {smt}"), "x").0.bounds()
+        over(&format!("(declare-const x Int) {smt}"), "x").bounds()
     }
 
     #[test]
@@ -421,7 +424,7 @@ mod tests {
     /// two checks.
     #[test]
     fn small_lower_bound_is_cheap() {
-        let (search, _) = Search::new("(declare-const x Int) (assert (<= 0 x 5000))", "x");
+        let search = over("(declare-const x Int) (assert (<= 0 x 5000))", "x");
         let i = search.target(&Int::new_const("x"));
         assert_eq!(search.upper(i), Some(5000));
         let before = search.stats().checks();
@@ -433,7 +436,7 @@ mod tests {
     /// limits; the rest the usual ones.
     #[test]
     fn first_check_gets_more_time() {
-        let (search, _) = Search::new("(declare-const x Int) (assert (<= 0 x 5))", "x");
+        let search = over("(declare-const x Int) (assert (<= 0 x 5))", "x");
         assert_eq!(search.limits(), (FIRST_RLIMIT, FIRST_TIMEOUT_MS));
         search.check();
         assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
