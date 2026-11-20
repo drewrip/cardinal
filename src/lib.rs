@@ -171,14 +171,13 @@ impl Analysis {
     /// separate from the analysis itself. Without facts it depends only on
     /// the query, not on the data.
     pub fn bounds(&self) -> Result<Bounds> {
-        Ok(self.search()?.bounds())
+        self.with_search(|s| s.bounds())
     }
 
     /// [`Analysis::bounds`], and how its solver checks went.
     #[doc(hidden)]
     pub fn bounds_with_stats(&self) -> Result<(Bounds, SearchStats)> {
-        let search = self.search()?;
-        Ok((search.bounds(), search.stats()))
+        self.with_search(|s| (s.bounds(), s.stats()))
     }
 
     /// Proves the tightest range on every operator's output cardinality,
@@ -197,8 +196,7 @@ impl Analysis {
     /// [`Analysis::plan_bounds`], and how its solver checks went.
     #[doc(hidden)]
     pub fn plan_bounds_with_stats(&self) -> Result<(PlanBounds, SearchStats)> {
-        let search = self.search()?;
-        let cards: Vec<Int> = self.nodes.iter().map(|n| Int::new_const(n.var.as_str())).collect();
+        let vars: Vec<&str> = self.nodes.iter().map(|n| n.var.as_str()).collect();
         let same: Vec<Option<usize>> = self
             .nodes
             .iter()
@@ -207,7 +205,11 @@ impl Analysis {
                 _ => None,
             })
             .collect();
-        let (ranges, total) = search.plan(&cards, &same);
+        let (ranges, total, stats) = self.with_search(|search| {
+            let cards: Vec<Int> = vars.iter().map(|v| Int::new_const(*v)).collect();
+            let (ranges, total) = search.plan(&cards, &same);
+            (ranges, total, search.stats())
+        })?;
         let nodes = self
             .nodes
             .iter()
@@ -219,7 +221,7 @@ impl Analysis {
                 bounds,
             })
             .collect();
-        Ok((PlanBounds { nodes, total }, search.stats()))
+        Ok((PlanBounds { nodes, total }, stats))
     }
 
     /// The constraints `S`, in SMT-LIB.
@@ -227,14 +229,17 @@ impl Analysis {
         &self.constraints
     }
 
-    /// A search over the constraints, checked to hold all of them.
-    pub(crate) fn search(&self) -> Result<bounds::Search> {
-        let (search, parsed) = bounds::Search::new(&self.constraints, &self.root);
-        if parsed != self.assertions {
-            let n = self.assertions;
-            return Err(Error::Internal(format!("constraints parsed back to {parsed} assertions, expected {n}")));
-        }
-        Ok(search)
+    /// Runs `f` on a search over the constraints, checked to hold all of
+    /// them, in a Z3 context of its own ([`in_own_context`]).
+    fn with_search<R: Send + Sync>(&self, f: impl FnOnce(&bounds::Search) -> R + Send + Sync) -> Result<R> {
+        let (constraints, root, expected) = (self.constraints.as_str(), self.root.as_str(), self.assertions);
+        in_own_context(|| {
+            let (search, parsed) = bounds::Search::new(constraints, root);
+            if parsed != expected {
+                return Err(Error::Internal(format!("constraints parsed back to {parsed} assertions, expected {expected}")));
+            }
+            Ok(f(&search))
+        })
     }
 
     /// Proves each side of `bounds` again, with a minimal set of the
@@ -249,6 +254,18 @@ impl Analysis {
         };
         trace.explain(&trace::claims(&self.root, bounds))
     }
+}
+
+/// Runs `f` in a new Z3 context, which every Z3 object it makes must stay
+/// in.
+///
+/// Z3 reuses the ids of freed terms, and its search heuristics order by
+/// id. In the thread's context, the terms an analysis made and freed (link's
+/// checks, most of all) leave the constraints parsed back with other ids,
+/// which can make every check of a search far slower. A new context gives
+/// the same text the same ids each time.
+fn in_own_context<R: Send + Sync>(f: impl FnOnce() -> R + Send + Sync) -> R {
+    z3::with_z3_config(&z3::Config::new(), f)
 }
 
 /// A foreign key: each row of `table` has `columns` never NULL and equal to
