@@ -34,7 +34,7 @@
 //!   don't nest, with `¬(P1 ∧ P2)` valid, on the classes' cards
 //!   (`disjoint link`). The members' follow by their `eq link`s.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::tree_node::{Transformed, TreeNode};
@@ -99,7 +99,7 @@ struct Linked {
 /// as in its root) ndv, min and max.
 struct Class {
     card: Int,
-    columns: HashMap<Column, Column3>,
+    columns: BTreeMap<Column, Column3>,
 }
 
 struct Column3 {
@@ -273,7 +273,7 @@ impl Link<'_, '_> {
     fn synthetic(&mut self, nodes: &[SpjNode], members: &[(usize, Mapping)]) -> Class {
         let base = format!("eq{}", self.classes);
         self.classes += 1;
-        let mut columns: HashMap<Column, Column3> = HashMap::new();
+        let mut columns: BTreeMap<Column, Column3> = BTreeMap::new();
         for (x, tau) in members {
             let q = Quantities::of(self.a, &nodes[*x]);
             for (j, c) in nodes[*x].columns.iter().enumerate() {
@@ -567,7 +567,7 @@ fn column_pairs<'q>(q: &'q Quantities, j: usize, p: &'q Column3) -> Vec<Pair<'q>
 /// first column projecting it.
 fn own(a: &Analyzer, c: &SpjNode) -> Class {
     let q = Quantities::of(a, c);
-    let mut columns = HashMap::new();
+    let mut columns = BTreeMap::new();
     for (j, col) in c.columns.iter().enumerate() {
         if let Some(Expr::Column(col)) = col {
             columns.entry(col.clone()).or_insert_with(|| Column3 { ndv: q.ndv[j].clone(), min: q.min[j].clone(), max: q.max[j].clone() });

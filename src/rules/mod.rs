@@ -719,12 +719,11 @@ pub(crate) fn expr_bound(e: &Expr, input: &LogicalPlan, l: &OpOutput, cap: usize
     if opaque(e) {
         return None;
     }
-    let factors: Option<Vec<&Int>> = e
-        .column_refs()
-        .into_iter()
-        .map(|c| input.schema().index_of_column(c).ok().map(|i| &l.ndv[i]))
-        .collect();
-    product(&factors?, cap)
+    // By position: `column_refs` is a set, in no fixed order.
+    let positions: Option<BTreeSet<usize>> =
+        e.column_refs().into_iter().map(|c| input.schema().index_of_column(c).ok()).collect();
+    let factors: Vec<&Int> = positions?.iter().map(|&i| &l.ndv[i]).collect();
+    product(&factors, cap)
 }
 
 /// The column `e` reads from `input`, if `e` is that column possibly wrapped in
