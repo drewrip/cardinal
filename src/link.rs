@@ -30,8 +30,9 @@
 //!   representatives is an edge of a graph. Only its transitive reduction
 //!   is asserted (`subset link`): an edge is left out if a path implies
 //!   all its claims, Z3 deriving them.
-//! - **Disjoint**: each pair of nodes whose conjuncts don't nest, with
-//!   `¬(P1 ∧ P2)` valid (`disjoint link`).
+//! - **Disjoint**: each pair of classes whose representatives' conjuncts
+//!   don't nest, with `¬(P1 ∧ P2)` valid, on the classes' cards
+//!   (`disjoint link`). The members' follow by their `eq link`s.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -154,32 +155,36 @@ impl Link<'_, '_> {
         }
 
         // Between representatives: equivalent predicates join a class,
-        // nested ones give an edge.
+        // nested ones give an edge, disjoint ones a disjoint pair.
         let reps: Vec<usize> = (0..linked.len()).filter(|&x| uf.find(x).0 == x).collect();
         let mut edges: Vec<Edge> = vec![];
+        let mut disjoint: Vec<(usize, usize)> = vec![];
         for (i, &r1) in reps.iter().enumerate() {
             for &r2 in &reps[i + 1..] {
                 let (l1, l2) = (&linked[r1], &linked[r2]);
                 let quick = (0..mappings.len()).find_map(|v| {
                     let (k1, k2) = (&l1.keys[v], &l2.keys[0]);
                     match (subset(k2, k1), subset(k1, k2)) {
-                        (true, true) => Some((v, true, true)),
-                        (true, false) => Some((v, true, false)),
-                        (false, true) => Some((v, false, true)),
+                        (true, true) => Some((v, true, true, false)),
+                        (true, false) => Some((v, true, false, false)),
+                        (false, true) => Some((v, false, true, false)),
                         (false, false) => None,
                     }
                 });
-                let relations: Vec<(usize, bool, bool)> = match quick {
+                let relations: Vec<(usize, bool, bool, bool)> = match quick {
                     Some(q) => vec![q],
                     None => (0..mappings.len())
                         .filter_map(|v| {
                             let r = self.decide.relation((id, l1.keys[v].clone(), l2.keys[0].clone()), &l1.variants[v], &l2.variants[0])?;
-                            Some((v, r.sub, r.sup))
+                            Some((v, r.sub, r.sup, r.disjoint))
                         })
                         .collect(),
                 };
-                for (v, sub, sup) in relations {
+                for (v, sub, sup, apart) in relations {
                     let sigma = &mappings[v];
+                    if apart {
+                        disjoint.push((r1, r2));
+                    }
                     match (sub, sup) {
                         (true, true) => uf.union(r1, r2, sigma),
                         (true, false) => edges.push(Edge { sub: r1, sup: r2, sigma: sigma.clone() }),
@@ -206,7 +211,17 @@ impl Link<'_, '_> {
             self.a.assert_property("subset link", subset_link(&classes[&e.sub], &classes[&e.sup], &e.sigma));
         }
 
-        self.disjoint_links(id, &nodes, &linked, &mappings);
+        // A disjoint pair's claim reads only cards: one per pair of classes.
+        let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for (x, y) in disjoint {
+            let (x, y) = (uf.find(x).0, uf.find(y).0);
+            if x != y {
+                pairs.insert((x.min(y), x.max(y)));
+            }
+        }
+        for (x, y) in pairs {
+            self.a.assert_property("disjoint link", disjoint_link(self.a, &classes[&x], &classes[&y], &nodes[0].scans));
+        }
     }
 
     /// The sorted ids of `preds`.
@@ -276,26 +291,6 @@ impl Link<'_, '_> {
             }
         }
         Class { card: Int::new_const(base.as_str()), columns }
-    }
-
-    /// Asserts `disjoint link` for each pair of nodes whose conjuncts don't
-    /// nest under any mapping, under each mapping where `¬(P1 ∧ P2)` is
-    /// valid.
-    fn disjoint_links(&mut self, id: usize, nodes: &[SpjNode], linked: &[Linked], mappings: &[Mapping]) {
-        for (x, l1) in linked.iter().enumerate() {
-            for (y, l2) in linked.iter().enumerate().skip(x + 1) {
-                let k2 = &l2.keys[0];
-                if l1.keys.iter().any(|k1| subset(k1, k2) || subset(k2, k1)) {
-                    continue;
-                }
-                for v in 0..mappings.len() {
-                    let key = (id, l1.keys[v].clone(), k2.clone());
-                    if self.decide.relation(key, &l1.variants[v], &l2.variants[0]).is_some_and(|r| r.disjoint) {
-                        self.a.assert_property("disjoint link", disjoint_link(self.a, &nodes[x], &nodes[y]));
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -501,12 +496,11 @@ fn subset_link(sub: &Class, sup: &Class, sigma: &[usize]) -> Vec<Bool> {
     properties::within(&pairs)
 }
 
-/// No row of the tables' cross product is both `c1`'s and `c2`'s:
-/// `|c1| + |c2| ≤ Π |T_i|` ([`properties::disjoint`]). None if the product
-/// has more than `max_product` factors.
-fn disjoint_link(a: &Analyzer, c1: &SpjNode, c2: &SpjNode) -> Vec<Bool> {
-    let tables: Option<Vec<Int>> = c2
-        .scans
+/// No row of the cross product of `scans`' tables is both `c1`'s and
+/// `c2`'s: `|c1| + |c2| ≤ Π |T_i|` ([`properties::disjoint`]). None if the
+/// product has more than `max_product` factors.
+fn disjoint_link(a: &Analyzer, c1: &Class, c2: &Class, scans: &[(String, SchemaRef)]) -> Vec<Bool> {
+    let tables: Option<Vec<Int>> = scans
         .iter()
         .map(|(t, _)| {
             let mut vars = a.tables.values().filter(|v| v.display == *t);
@@ -518,8 +512,7 @@ fn disjoint_link(a: &Analyzer, c1: &SpjNode, c2: &SpjNode) -> Vec<Bool> {
         .collect();
     let Some(tables) = tables else { return vec![] };
     let Some(whole) = product(&tables.iter().collect::<Vec<_>>(), a.max_product) else { return vec![] };
-    let (q1, q2) = (Quantities::of(a, c1), Quantities::of(a, c2));
-    properties::disjoint(&[&q1.card, &q2.card], &whole)
+    properties::disjoint(&[&c1.card, &c2.card], &whole)
 }
 
 /// An analyzer node's quantities.
