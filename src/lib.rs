@@ -6,76 +6,89 @@
 //! prove on the root's cardinality `X` ([`Analysis::bounds`]), or on every
 //! operator's and their sum ([`Analysis::plan_bounds`]).
 //!
-//! The constraints come from three passes, in order:
+//! An analysis is made by a [`Builder`]: the query to bound
+//! ([`Analysis::sql`], [`Analysis::plan`], ...), then what is known of the
+//! data it runs on: executed plans of other queries
+//! ([`Builder::with_plans`]) and tables' row counts
+//! ([`Builder::with_cardinalities`]).
 //!
-//! 1. [`rules`]: a walk over the plan, one rule per operator, asserting what
-//!    the operator adds and recording each relation it makes and how its
-//!    rows are its inputs'.
-//! 2. [`axioms`]: what holds of any rows whatever made them, asserted over
-//!    those records and between [contexts](rows), in every analysis.
-//! 3. [`facts`]: counts read off plans that ran, added as claims on the
-//!    query's operators ([`Analysis::with_facts`]), assumed consistent with
-//!    the first two unless [`Options::check_facts`] asks to check.
+//! ```ignore
+//! let a = Analysis::sql(&ctx, sql).await?
+//!     .options(options)
+//!     .with_plans(&profiles)
+//!     .with_cardinalities([("lineitem", 6001215)])
+//!     .build()?;
+//! ```
+//!
+//! A [`Batch`] analyzes several queries with the same options, plans and
+//! row counts ([`Analysis::sqls`], [`Analysis::batch`]).
+//!
+//! The constraints come from these passes, in order:
+//!
+//! 1. [`rules`]: a walk over the plan, and over the reference plans' parts
+//!    the query could share rows with ([`joint`]), one rule per operator,
+//!    asserting what the operator adds. Where the plan's shape relates rows
+//!    (an operator and its input, one op output), the
+//!    rules apply [`properties`] of rows.
+//! 2. [`link`]: the same properties, and disjointness, between
+//!    select-project-join subtrees whose predicates Z3 relates.
+//! 3. [`joint`]: each operator of a reference plan pinned to the rows it
+//!    was counted with, and each table given a row count held to it; the
+//!    plans' own variables then substituted away.
 //!
 //! ```text
-//!                 SQL ──parse, optimize──▶ LogicalPlan
-//!                                               │
-//! ┌─ 1. rules: Analyzer::visit ─────────────────▼────────────┐
-//! │ bottom-up, one rule per operator                         │
-//! │   asserts what the operator adds   X ≤ l·r, X = Σ, …     │──┐
-//! │   records each relation            Relation: variables,  │  │
-//! │                                    domains, keys, origin │  │
-//! │   records how relations relate     Link: same rows,      │  │
-//! │                                    subset, wider rows    │  │
+//!       query: SQL ─parse, optimize─▶ LogicalPlan      reference plans
+//!                                               │      (ObservedPlan)
+//! ┌─ 1. rules: Analyzer::visit ─────────────────▼──────────▼─┐
+//! │ bottom-up, one rule per operator, the query's, then the  │
+//! │ plans' parts over its tables                             │
+//! │   each count          ≥ 0                                │
+//! │   each operator       what it adds: X ≤ l·r, X = Σ, …    │──┐
+//! │   with its input      same rows, subset, wider           │  │
+//! │   each op output      ndv ≤ X, domains, keys             │  │
 //! └─────────────────────────────────────────────┬────────────┘  │
-//!                       relations, links, nodes │               │
-//! ┌─ 2. axioms: axioms::assert_all ─────────────▼────────────┐  │
-//! │ every count     ≥ 0                                      │  │
-//! │ each relation   ndv ≤ X, keys, domains, row facts        │  │
-//! │ each link       X ≤ l, ndv ≤ ndv_l, ranges within        │  ├─▶ Z3
-//! │ one table       disjoint filters split it                │  │
-//! │ contexts        ⊆, fewer, joins, semi + anti, …          │──┘
+//!                            op outputs, nodes  │               │
+//! ┌─ 2. link: link::link_all ───────────────────▼────────────┐  │
+//! │ SPJ subtrees: same rows, subset, disjoint, by predicates │  ├─▶ Z3
+//! └─────────────────────────────────────────────┬────────────┘  │
+//! ┌─ 3. pins: joint, Builder::with_cardinalities▼────────────┐  │
+//! │ a counted operator X = rows (≥ where a runtime filter    │  │
+//! │ pruned), a given table |T| = rows; then the plans'       │  │
+//! │ variables substituted out                                │──┘
 //! └─────────────────────────────────────────────┬────────────┘
 //!                  Analysis: constraints, nodes │
-//! ┌─ 3. facts: Analysis::with_facts ────────────▼────────────┐
-//! │ observe ─▶ derive ─▶ apply                               │
-//! │ a claim on an operator; checked against 1, 2 if asked    │──▶ Z3
-//! └─────────────────────────────────────────────┬────────────┘
 //!                                               ▼
 //!                          bounds search: Analysis::bounds, plan_bounds
 //! ```
 
 pub mod analysis;
-pub mod axioms;
+pub mod link;
+mod batch;
 mod bounds;
+mod builder;
 mod domain;
 mod keys;
-pub mod facts;
+mod predicates;
+pub mod joint;
 pub mod observed;
-mod origin;
-pub mod rows;
+pub mod properties;
 pub mod rules;
 pub mod trace;
 mod validate;
 
+pub use batch::Batch;
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
-pub use facts::Facts;
+pub use builder::Builder;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::OnceLock;
 
-use datafusion::catalog::TableProvider;
-use datafusion::common::TableReference;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::datasource::cte_worktable::CteWorkTable;
-use datafusion::datasource::source_as_provider;
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::prelude::SessionContext;
-use z3::ast::Int;
+use z3::ast::{Bool, Int};
+use z3::{Solver, Synchronized};
 
-use analysis::{Analyzer, Node, ScanKind};
+use analysis::Node;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -90,6 +103,10 @@ pub enum Error {
     /// An engine's plan profile that could not be read.
     #[error("unreadable plan profile: {0}")]
     Observed(String),
+    /// Reference plans given for a query with no catalog to read them
+    /// against ([`Analysis::logical`]).
+    #[error("reference plans need a catalog: make the query with Analysis::sql or Analysis::plan")]
+    NoCatalog,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -107,14 +124,16 @@ pub struct Analysis {
     /// Every constraint with the plan node and analyzer line it comes from,
     /// if [`Options::trace`] is set.
     pub trace: Option<Trace>,
-    /// The constraint set `S`, and how many assertions it holds (to check
-    /// that it parses back completely).
-    constraints: String,
+    /// The constraint set `S`, as terms in a Z3 context of their own: the
+    /// bounds search starts from them.
+    constraints: Synchronized<Vec<Bool>>,
+    /// `S` in SMT-LIB, printed on first use ([`Analysis::constraints`]),
+    /// and how many assertions it holds (to check that it parses back
+    /// completely).
+    text: OnceLock<String>,
     assertions: usize,
     /// Every plan node, children before parents.
     nodes: Vec<Node>,
-    /// [`Options::check_facts`].
-    check_facts: bool,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -148,7 +167,7 @@ impl Analysis {
     /// break a constraint derived from it.
     pub async fn validate(&self, ctx: &SessionContext) -> Result<Validation> {
         let (counts, ends, broken) = validate::evaluate(&self.nodes, ctx).await;
-        let mut v = validate::check(&self.constraints, self.assertions, &counts, &ends)?;
+        let mut v = validate::check(self.constraints(), self.assertions, &counts, &ends)?;
         // A broken dependency explains the counts that contradict `S`.
         if broken.is_some() {
             v.violation = broken;
@@ -158,18 +177,20 @@ impl Analysis {
 
     /// Proves the tightest `lower <= X <= upper` on the output cardinality.
     ///
-    /// This runs many solver checks (each limited to one second), so it is
-    /// separate from the analysis itself. Without facts it depends only on
-    /// the query, not on the data.
+    /// This runs many solver checks, each limited to a fixed amount of
+    /// solver work (most often under a second; more for the first, which
+    /// loads the constraints), so it is separate from the analysis itself.
+    /// The limit is not a time, so the bounds do not depend on the
+    /// machine's load. Without facts they depend only on the query, not on
+    /// the data.
     pub fn bounds(&self) -> Result<Bounds> {
-        Ok(self.search()?.bounds())
+        Ok(self.with_search(|s| s.bounds()))
     }
 
     /// [`Analysis::bounds`], and how its solver checks went.
     #[doc(hidden)]
     pub fn bounds_with_stats(&self) -> Result<(Bounds, SearchStats)> {
-        let search = self.search()?;
-        Ok((search.bounds(), search.stats()))
+        Ok(self.with_search(|s| (s.bounds(), s.stats())))
     }
 
     /// Proves the tightest range on every operator's output cardinality,
@@ -188,8 +209,7 @@ impl Analysis {
     /// [`Analysis::plan_bounds`], and how its solver checks went.
     #[doc(hidden)]
     pub fn plan_bounds_with_stats(&self) -> Result<(PlanBounds, SearchStats)> {
-        let search = self.search()?;
-        let cards: Vec<Int> = self.nodes.iter().map(|n| Int::new_const(n.var.as_str())).collect();
+        let vars: Vec<&str> = self.nodes.iter().map(|n| n.var.as_str()).collect();
         let same: Vec<Option<usize>> = self
             .nodes
             .iter()
@@ -198,7 +218,11 @@ impl Analysis {
                 _ => None,
             })
             .collect();
-        let (ranges, total) = search.plan(&cards, &same);
+        let (ranges, total, stats) = self.with_search(|search| {
+            let cards: Vec<Int> = vars.iter().map(|v| Int::new_const(*v)).collect();
+            let (ranges, total) = search.plan(&cards, &same);
+            (ranges, total, search.stats())
+        });
         let nodes = self
             .nodes
             .iter()
@@ -210,40 +234,29 @@ impl Analysis {
                 bounds,
             })
             .collect();
-        Ok((PlanBounds { nodes, total }, search.stats()))
+        Ok((PlanBounds { nodes, total }, stats))
     }
 
-    /// The constraints `S`, in SMT-LIB.
+    /// The constraints `S`, in SMT-LIB. Printed on the first call, which
+    /// can take a while for a large analysis.
     pub fn constraints(&self) -> &str {
-        &self.constraints
+        self.text.get_or_init(|| {
+            in_own_context(|| {
+                let solver = Solver::new();
+                self.constraints.recover().iter().for_each(|f| solver.assert(f));
+                solver.to_string()
+            })
+        })
     }
 
-    pub(crate) fn search(&self) -> Result<bounds::Search> {
-        let (search, parsed) = bounds::Search::new(&self.constraints, &self.root);
-        if parsed != self.assertions {
-            return Err(Error::Internal(format!(
-                "constraints parsed back to {parsed} assertions, expected {}",
-                self.assertions
-            )));
-        }
-        Ok(search)
-    }
-
-    /// This analysis with what `facts` know among its constraints: every row
-    /// count, distinct count and least or greatest value they give of an
-    /// operator's rows, exact or a bound, as a claim on its variable.
-    ///
-    /// The facts must describe the data the bounds are for: a fact read off
-    /// a plan of other data gives bounds about that data. Claims are assumed
-    /// consistent with the constraints; an inconsistent set proves any
-    /// bound. With [`Options::check_facts`], a claim that contradicts them,
-    /// or whose consistency Z3 cannot decide, is left out instead.
-    pub fn with_facts(&self, facts: &Facts) -> Result<Analysis> {
-        facts::apply::apply(self, facts)
+    /// Runs `f` on a search over the constraints, in a Z3 context of its
+    /// own ([`in_own_context`]).
+    fn with_search<R: Send + Sync>(&self, f: impl FnOnce(&bounds::Search) -> R + Send + Sync) -> R {
+        in_own_context(|| f(&bounds::Search::new(&self.constraints.recover(), &self.root)))
     }
 
     /// Proves each side of `bounds` again, with a minimal set of the
-    /// constraints that proves it: which operators, rules and facts a bound
+    /// constraints that proves it: which operators, rules and pins a bound
     /// comes from. Needs [`Options::trace`].
     ///
     /// Proof names are `lower` and `upper`; a side with nothing to prove
@@ -254,6 +267,21 @@ impl Analysis {
         };
         trace.explain(&trace::claims(&self.root, bounds))
     }
+}
+
+/// Runs `f` in a new Z3 context, which every Z3 object it makes must stay
+/// in.
+///
+/// Z3 reuses the ids of freed terms, and its search heuristics order by
+/// id. In the thread's context, the terms an analysis made and freed (link's
+/// checks, most of all) leave the constraints copied in with other ids,
+/// which can make every check of a search far slower. A new context gives
+/// the same constraints the same ids each time.
+///
+/// Nothing run in one calls into rayon ([`Batch`]): a task stolen while
+/// waiting would run in this context, not its own.
+pub(crate) fn in_own_context<R: Send + Sync>(f: impl FnOnce() -> R + Send + Sync) -> R {
+    z3::with_z3_config(&z3::Config::new(), f)
 }
 
 /// A foreign key: each row of `table` has `columns` never NULL and equal to
@@ -308,10 +336,6 @@ pub struct Options {
     /// from ([`Analysis::trace`]), to inspect or explain the analysis.
     /// Defaults to false.
     pub trace: bool,
-    /// Check each claim [`Analysis::with_facts`] adds against the
-    /// constraints, one solver check per claim, and leave out those that
-    /// contradict them. Off, facts are assumed consistent. Defaults to false.
-    pub check_facts: bool,
 }
 
 impl Default for Options {
@@ -320,165 +344,6 @@ impl Default for Options {
             max_product: analysis::DEFAULT_MAX_PRODUCT,
             foreign_keys: Vec::new(),
             trace: false,
-            check_facts: false,
         }
-    }
-}
-
-/// Parses and optimizes `sql` with `ctx`, then analyzes the resulting plan.
-///
-/// A scan counts as a base table only if its provider is the one registered in
-/// `ctx`'s catalog under that name. Every spelling of a table's name
-/// (`users`, `public.users`, ...) therefore maps to one variable, and work tables
-/// and table functions such as `generate_series` are not counted as input.
-pub async fn analyze_sql(ctx: &SessionContext, sql: &str, options: Options) -> Result<Analysis> {
-    let state = ctx.state();
-    let plan = state.create_logical_plan(sql).await?;
-    let plan = state.optimize(&plan)?;
-
-    let catalog = state.config().options().catalog.clone();
-    let (default_catalog, default_schema) = (catalog.default_catalog, catalog.default_schema);
-
-    let mut scans = Vec::new();
-    plan.apply_with_subqueries(|p| {
-        if let LogicalPlan::TableScan(scan) = p {
-            scans.push(scan.clone());
-        }
-        Ok(TreeNodeRecursion::Continue)
-    })?;
-    let mut base = HashMap::new();
-    for scan in scans {
-        let Ok(registered) = ctx.table_provider(scan.table_name.clone()).await else {
-            continue;
-        };
-        let Ok(scanned) = source_as_provider(&scan.source) else {
-            continue;
-        };
-        if provider_ptr(&registered) == provider_ptr(&scanned) {
-            let kind = base_kind(&scan.table_name, &default_catalog, &default_schema);
-            base.insert(provider_ptr(&scanned), kind);
-        }
-    }
-
-    let resolve = |scan: &TableScan| {
-        source_as_provider(&scan.source)
-            .ok()
-            .and_then(|p| base.get(&provider_ptr(&p)).cloned())
-            .unwrap_or(ScanKind::NonBase)
-    };
-    Ok(analyze_with(&plan, &resolve, options))
-}
-
-/// Analyzes an already-built logical plan.
-///
-/// With no catalog to consult, every scan except a recursive CTE's work table
-/// counts as a base table, and names are resolved against DataFusion's default
-/// catalog and schema (`datafusion.public`).
-pub fn analyze_plan(plan: &LogicalPlan, options: Options) -> Analysis {
-    let resolve = |scan: &TableScan| {
-        let is_work_table = source_as_provider(&scan.source)
-            .map(|p| p.downcast_ref::<CteWorkTable>().is_some())
-            .unwrap_or(false);
-        if is_work_table {
-            ScanKind::NonBase
-        } else {
-            base_kind(&scan.table_name, "datafusion", "public")
-        }
-    };
-    analyze_with(plan, &resolve, options)
-}
-
-/// Analyzes `plan`, the plan an engine chose for a query, in place of the
-/// plan DataFusion would choose. Its operators keep the engine's order, so
-/// their rows are the ones the engine's profiles count: see
-/// [`observed::Catalog::to_logical`]. The plan's row counts, if any, are not
-/// read.
-pub fn analyze_observed(catalog: &observed::Catalog, plan: &observed::ObservedPlan, options: Options) -> Result<Analysis> {
-    let plan = catalog.to_logical(plan)?;
-    // Every scan is of a table in the catalog, by its bare name.
-    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
-    Ok(analyze_with(&plan, &resolve, options))
-}
-
-/// [`analyze_observed`] on DuckDB's plan for `sql`, as printed by `EXPLAIN
-/// (FORMAT JSON)` (or by `EXPLAIN (ANALYZE, FORMAT JSON)`).
-pub fn analyze_duckdb(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
-    let plan = observed::from_duckdb_explain(catalog, "", json, sql)?;
-    analyze_observed(catalog, &plan, options)
-}
-
-/// [`analyze_observed`] on PostgreSQL's plan for `sql`, as printed by
-/// `EXPLAIN (VERBOSE, FORMAT JSON)` (or with `ANALYZE`, too).
-pub fn analyze_postgres(catalog: &observed::Catalog, json: &str, sql: Option<&str>, options: Options) -> Result<Analysis> {
-    let plan = observed::from_postgres_explain(catalog, "", json, sql)?;
-    analyze_observed(catalog, &plan, options)
-}
-
-/// Identity of a provider object. An address, not a pointer, so futures holding
-/// it stay `Send`.
-fn provider_ptr(p: &Arc<dyn TableProvider>) -> usize {
-    Arc::as_ptr(p) as *const () as usize
-}
-
-/// Canonical identity and display name for a base table reference.
-fn base_kind(name: &TableReference, default_catalog: &str, default_schema: &str) -> ScanKind {
-    let r = name.clone().resolve(default_catalog, default_schema);
-    let key = format!("{}\0{}\0{}", r.catalog, r.schema, r.table);
-    let display = if *r.catalog == *default_catalog && *r.schema == *default_schema {
-        r.table.to_string()
-    } else {
-        r.to_string()
-    };
-    ScanKind::Base { key, display }
-}
-
-/// The analyzer's nodes for `plan`, and each base-table scan as (scan
-/// variable, table name), as [`analyze_observed`] builds them.
-pub(crate) fn nodes(plan: &LogicalPlan, options: &Options) -> (Vec<Node>, Vec<(String, String)>) {
-    let resolve = |scan: &TableScan| base_kind(&scan.table_name, "datafusion", "public");
-    let mut a = Analyzer::new(&resolve, options.max_product, &options.foreign_keys, false).with_ranges(plan);
-    a.visit(plan);
-    let scans = a.scans.iter().map(|(s, t, _)| (s.clone(), t.clone())).collect();
-    (a.nodes, scans)
-}
-
-fn analyze_with(
-    plan: &LogicalPlan,
-    resolve: &dyn Fn(&TableScan) -> ScanKind,
-    options: Options,
-) -> Analysis {
-    let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
-    let root = a.visit(plan).card;
-    axioms::assert_all(&mut a);
-    let root_name = a.name_of(&root);
-    let constraints = a.solver.to_string();
-    let assertions = a.solver.get_assertions().len();
-
-    let mut tables: Vec<(String, String)> = a
-        .tables
-        .values()
-        .map(|t| (t.display.clone(), t.symbol.clone()))
-        .collect();
-    tables.sort();
-
-    let scans: Vec<(String, String)> = a
-        .scans
-        .iter()
-        .map(|(s, t, _)| (s.clone(), t.clone()))
-        .collect();
-    let trace = options.trace.then(|| Trace::build(&a, &constraints, &root_name, &scans, &tables));
-    if let Some(t) = &trace {
-        assert_eq!(t.constraints.len(), assertions, "every assertion is traced");
-    }
-
-    Analysis {
-        root: root_name,
-        scans,
-        plan: plan.display_indent().to_string(),
-        trace,
-        constraints,
-        assertions,
-        nodes: a.nodes,
-        check_facts: options.check_facts,
     }
 }

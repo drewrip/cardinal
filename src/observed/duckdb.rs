@@ -40,7 +40,7 @@ pub fn from_duckdb(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>)
 
 /// Reads the plan DuckDB chose for a query, as printed by `EXPLAIN (FORMAT
 /// JSON)`, or by `EXPLAIN (ANALYZE, FORMAT JSON)` with its counts ignored.
-/// The plan is not counted: it gives no facts. `sql`, the query, names what
+/// The plan is not counted: it pins nothing. `sql`, the query, names what
 /// the plan prints only by alias and vouches for join conditions, as a
 /// profile's own query text does; without it, a profile's is used.
 pub fn from_duckdb_explain(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>) -> Result<ObservedPlan> {
@@ -49,12 +49,49 @@ pub fn from_duckdb_explain(catalog: &Catalog, name: &str, json: &str, sql: Optio
 
 fn read(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>, counted: bool) -> Result<ObservedPlan> {
     let v: Value = serde_json::from_str(json).map_err(|e| Error::Observed(e.to_string()))?;
+    let v = profile_v1(v);
     let sql = sql.or_else(|| v.get("query_name").and_then(Value::as_str));
     let text = sql.and_then(|q| QueryText::parse(catalog, q));
     let mut b = Builder { catalog, text, counted, nodes: vec![], ctes: HashMap::new(), delims: vec![] };
     let root = b.node(&v)?;
     b.limits();
     Ok(ObservedPlan { name: name.to_string(), nodes: b.nodes, root, counted })
+}
+
+/// A profile in DuckDB 2.0's layout, rewritten into 1.x's, which the reader
+/// takes: the plan under `operator` rather than `children`, the query under
+/// `query.sql`, and each operator's `type`, `intermediate_rows` and
+/// `rows_scanned` for `operator_type`, `operator_cardinality` and
+/// `operator_rows_scanned`. A `UNION` reports 0 rows in 2.0, whatever
+/// passed through it: it is marked `uncounted`. Anything else is returned
+/// as it is.
+fn profile_v1(mut v: Value) -> Value {
+    fn operator_v1(v: &mut Value) {
+        let Some(o) = v.as_object_mut() else { return };
+        if o.get("type").and_then(Value::as_str) == Some("UNION") {
+            o.remove("intermediate_rows");
+            o.insert("uncounted".into(), Value::Bool(true));
+        }
+        for (new, old) in [("type", "operator_type"), ("intermediate_rows", "operator_cardinality"), ("rows_scanned", "operator_rows_scanned")] {
+            if let Some(x) = o.remove(new) {
+                o.insert(old.to_string(), x);
+            }
+        }
+        for c in o.get_mut("children").and_then(Value::as_array_mut).into_iter().flatten() {
+            operator_v1(c);
+        }
+    }
+    let Some(o) = v.as_object_mut() else { return v };
+    if o.contains_key("children") || !o.get("operator").is_some_and(Value::is_array) {
+        return v;
+    }
+    let mut plan = o.remove("operator").unwrap();
+    plan.as_array_mut().unwrap().iter_mut().for_each(operator_v1);
+    o.insert("children".into(), plan);
+    if let Some(q) = o.get("query").and_then(|q| q.get("sql")).cloned() {
+        o.insert("query_name".into(), q);
+    }
+    v
 }
 
 /// Wrappers with no effect on rows.
@@ -144,7 +181,7 @@ impl Builder<'_> {
         }
         let scanned = v.get("operator_rows_scanned").and_then(Value::as_u64);
         let cut_short = matches!(op, Op::Scan { .. }) && scanned.is_some_and(|s| s < rows);
-        let counted = self.counted;
+        let counted = self.counted && !uncounted(v);
         self.nodes.push(ONode { op, rows, counted, children: kids, columns, ordered, blocking: false, engine_op: ty.to_string(), cut_short });
         Ok(self.nodes.len() - 1)
     }
@@ -171,7 +208,7 @@ impl Builder<'_> {
     fn rows(&self, v: &Value, ty: &str) -> Result<u64> {
         match v.get("operator_cardinality").and_then(Value::as_u64) {
             Some(rows) => Ok(rows),
-            None if !self.counted => Ok(0),
+            None if !self.counted || uncounted(v) => Ok(0),
             None => Err(Error::Observed(format!("{ty} has no operator_cardinality"))),
         }
     }
@@ -334,7 +371,7 @@ impl Builder<'_> {
             ("STREAMING_LIMIT" | "LIMIT" | "LIMIT_PERCENT", [_]) => passthrough(Op::Limit { at_most: None }),
             // Its window functions' values follow its input's columns. Each
             // is a window expression over base columns, which only the
-            // analysis reads: facts take window values as unresolved.
+            // analysis reads.
             ("WINDOW" | "STREAMING_WINDOW", [c]) => {
                 let child = &self.nodes[*c];
                 let mut columns = child.columns.clone();
@@ -909,6 +946,12 @@ fn delim_scans(v: &Value, index: &str) -> u64 {
     let own = operator(v) == Some("DELIM_SCAN") && strings(info, "Delim Index").first().map(String::as_str) == Some(index);
     let below: u64 = v.get("children").and_then(Value::as_array).map_or(0, |c| c.iter().map(|c| delim_scans(c, index)).sum());
     u64::from(own) + below
+}
+
+/// Whether the profile does not count operator `v`'s rows: see
+/// [`profile_v1`].
+fn uncounted(v: &Value) -> bool {
+    v.get("uncounted").and_then(Value::as_bool) == Some(true)
 }
 
 /// An operator's type: `operator_type` in a profile, `name` in a plain plan.

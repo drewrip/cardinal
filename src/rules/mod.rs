@@ -2,8 +2,8 @@
 //!
 //! The analysis visits a DataFusion [`LogicalPlan`] bottom-up, and
 //! [`Analyzer::visit_node`] hands each operator to its rule once its inputs
-//! have their relations ([`Rel`]). The rule makes the operator's relation and
-//! relates it to theirs:
+//! have their op outputs ([`OpOutput`]). The rule makes the operator's op
+//! output and relates it to theirs:
 //!
 //! ```text
 //!         Join            X, ndv, min, max  ◀── join: X ≤ l·r, ...
@@ -16,28 +16,24 @@
 //! # Spec
 //!
 //! - **Input**: one operator, visited after its inputs, and its inputs'
-//!   relations: their variables and what is known of their rows (value
+//!   op outputs: their variables and what is known of their rows (value
 //!   domains, keys, the stored table they are rows of).
-//! - **Output**: the operator's relation. That is fresh variables (`X`, the
+//! - **Output**: the operator's op output. That is fresh variables (`X`, the
 //!   output cardinality; per column `ndv`, and `min` and `max` for integer,
 //!   date, timestamp and decimal columns some range or key reads, related
 //!   only between columns of one unit and scale), Z3 assertions relating
-//!   them to the inputs' (`l`, `r`), and records for the
-//!   [axioms](crate::axioms): the relation, with what is known of its rows,
-//!   and each link between it and an input.
+//!   them to the inputs' (`l`, `r`), and a record of the op output, with
+//!   what is known of its rows.
 //! - **Guarantees**: every assertion holds for every execution of the
 //!   operator on any data satisfying the declared keys and foreign keys,
 //!   so the constraints admit every real run (`Analysis::validate` checks
 //!   this against data).
-//! - **Not done**: no axiom is asserted here. What holds of every relation
-//!   whatever its operator (`ndv ≤ X`, a key's `ndv = X`, value domains
-//!   bounding `ndv`, disjoint filters over one table) is asserted by the
-//!   [axioms](crate::axioms) pass once every rule is done. So is what
-//!   follows from rows being another's: a rule records a link, that its
-//!   output is the [same rows](Analyzer::same_rows) as an input, a
-//!   [subset](Analyzer::subset) of them, or [holds](Analyzer::wider) their
-//!   rows, and the axiom states what follows. The rule states only what the
-//!   operator adds.
+//! - **Scope**: what each operator adds, and
+//!   [properties](crate::properties) of rows where the plan makes the
+//!   relationship plain: an operator and its input, one op output
+//!   ([`op_output`]).
+//! - **Not done**: relationships between select-project-join subtrees
+//!   off one path are [link](crate::link)'s.
 //!
 //! # Notation
 //!
@@ -64,18 +60,20 @@
 //! | `Union` | [`Analyzer::union`] |
 //! | `Values` | [`Analyzer::values`] |
 //! | `EmptyRelation` | [`Analyzer::empty_relation`] |
+//! | every op output, and its input | [`op_output`] |
 //!
-//! Unnest, recursive CTEs and the rest get no rule: only the axioms on
-//! their variables. Their inputs are still visited, so their scans count.
+//! Unnest, recursive CTEs and the rest get no rule of their own: only those
+//! on every op output. Their inputs are still visited, so their scans
+//! count.
 //!
 //! A trace names each constraint's rule by the function that asserted it:
 //! the rule's own, or a part of it it calls ([`Analyzer::join_sides`],
-//! [`Analyzer::within`], ...). An axiom asserted for a relation or link a
-//! rule recorded is given to that rule's node, under the axiom's function
-//! ([`Analyzer::subset`], ...).
+//! ...), or the [property](crate::properties) it is (`subset`, ...). An
+//! assertion about an op output is given to the node its rule was for.
 
 mod aggregate;
 pub(crate) mod join;
+pub mod op_output;
 
 use std::collections::BTreeSet;
 
@@ -83,39 +81,25 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Column, DFSchema};
 use datafusion::logical_expr::logical_plan::{
-    Distinct, DistinctOn, EmptyRelation, FetchType, Filter, Limit, LogicalPlan, Projection, SkipType, Sort, TableScan,
+    Aggregate, Distinct, DistinctOn, EmptyRelation, FetchType, Filter, Limit, LogicalPlan, Projection, SkipType, Sort, TableScan,
     Union, Values, Window,
 };
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Cast, Expr, ExprSchemable, Operator, TryCast};
 use z3::ast::Int;
 
-use crate::analysis::{Analyzer, LinkKind, Rel, ScanKind, inexact_filters, int, max, min, product, range_names};
+use crate::analysis::{Analyzer, RawScan, OpOutput, ScanKind, inexact_filters, int, max, min, product, range_names};
 use crate::domain::{self, Dom, Facts};
 use crate::keys::Nulls;
-use crate::origin::Origin;
+use crate::properties::{same, within};
+use op_output::with_card;
 
 impl<'a> Analyzer<'a> {
-    /// Every non-NULL value of `o`'s column `j` is one of `l`'s column `i`.
-    /// Their ends relate only if they count in one unit: a cast of an
-    /// integer to a decimal keeps the value, not the count.
-    pub fn within(&self, o: &Rel, j: usize, l: &Rel, i: usize) {
-        if o.unit[j] != l.unit[i] {
-            return;
-        }
-        if let (Some(a), Some(b)) = (&o.min[j], &l.min[i]) {
-            self.assert(a.ge(b));
-        }
-        if let (Some(a), Some(b)) = (&o.max[j], &l.max[i]) {
-            self.assert(a.le(b));
-        }
-    }
-
     /// The ranges `predicate` holds between two columns on every row of
     /// `o`, the output of `plan` keeping only rows that satisfy it: equal
     /// columns take the same values, and `a < b` puts `b`'s least above
     /// `a`'s least and `a`'s greatest below `b`'s.
-    pub fn range_pairs(&self, predicate: &Expr, plan: &LogicalPlan, o: &Rel) {
+    pub fn range_pairs(&self, predicate: &Expr, plan: &LogicalPlan, o: &OpOutput) {
         let index = |e: &Expr| column_index(plan, e).filter(|&i| o.min[i].is_some());
         for conj in split_conjunction(predicate) {
             let Expr::BinaryExpr(BinaryExpr { left, op, right }) = conj else { continue };
@@ -148,9 +132,8 @@ impl<'a> Analyzer<'a> {
 
     /// Visits `plan`'s inputs and applies its operator's rule
     /// ([the table](self#rules)). A scan also returns its raw scan, before
-    /// pushed-down filters: its cardinality and `ndv` variables, and plan.
-    #[allow(clippy::type_complexity)]
-    pub fn visit_node(&mut self, plan: &LogicalPlan) -> (Rel, Option<(String, Vec<String>, LogicalPlan)>) {
+    /// pushed-down filters.
+    pub fn visit_node(&mut self, plan: &LogicalPlan) -> (OpOutput, Option<RawScan>) {
         let out = match plan {
             LogicalPlan::TableScan(scan) => return self.scan(plan, scan),
             LogicalPlan::Projection(p) => self.projection(plan, p),
@@ -182,11 +165,11 @@ impl<'a> Analyzer<'a> {
 
     /// `Projection`: the same rows, each column computed from them.
     ///
-    /// - **Claim**: [`same rows`](Self::same_rows) as the input, a column or
+    /// - **Claim**: [`same rows`](op_output) as the input, a column or
     ///   an injective cast of one holding its value. Another deterministic
     ///   expression has `ndv ≤ Π ndv` of the columns it reads; a literal `≤
     ///   1` ([`Self::expr_ndv`]).
-    pub fn projection(&mut self, plan: &LogicalPlan, p: &Projection) -> Rel {
+    pub fn projection(&mut self, plan: &LogicalPlan, p: &Projection) -> OpOutput {
         let l = self.visit(&p.input);
         let mut o = self.fresh("Projection", plan);
         let mut columns = vec![];
@@ -196,15 +179,9 @@ impl<'a> Analyzer<'a> {
                 None => self.expr_ndv(&o.ndv[j], e, &p.input, &l),
             }
         }
-        self.link(&o, LinkKind::SameRows, &l, &columns);
+        self.assert_property("same rows", same(&with_card(&o, &l, &columns)));
         o.facts = computed_facts(plan, &p.expr, &p.input, &l.facts);
-        o.rows = l.rows.rename(&|c| passed_column(plan, &p.expr, c));
-        o.origin = l.origin.as_ref().map(|origin| {
-            origin.project(p.expr.iter().map(|e| match strip_alias(e) {
-                Expr::Column(c) => p.input.schema().index_of_column(c).ok(),
-                _ => None,
-            }))
-        });
+        o.subset_bounds = l.subset_bounds.rename(&|c| passed_column(plan, &p.expr, c));
         o
     }
 
@@ -214,7 +191,7 @@ impl<'a> Analyzer<'a> {
     /// - **Claim**: as [`Self::pass_through`] for the input's columns.
     ///   `row_number`, `rank` and `dense_rank` are `≥ 1`, and `row_number`
     ///   with its partition columns is unique ([`Self::window_functions`]).
-    pub fn window(&mut self, plan: &LogicalPlan, p: &Window) -> Rel {
+    pub fn window(&mut self, plan: &LogicalPlan, p: &Window) -> OpOutput {
         let mut o = self.pass_through("Window", plan, &p.input);
         self.window_functions(plan, &p.input, &p.window_expr, &mut o);
         o
@@ -222,37 +199,33 @@ impl<'a> Analyzer<'a> {
 
     /// `Filter`: some of the input's rows, each satisfying the predicate.
     ///
-    /// - **Claim**: a [`subset`](Self::subset) of the input. For `a = b`:
+    /// - **Claim**: a [`subset`](op_output) of the input. For `a = b`:
     ///   `ndv(a) = ndv(b)` ([`Self::filter_ndv`]). `a < b` orders their
     ///   ranges ([`Self::range_pairs`]). The predicate's domains hold above.
     /// - **When**: `a = b` skips floats, whose SQL equality merges values
     ///   distinct as bits (`-0.0 = 0.0`).
-    pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> Rel {
+    pub fn filter(&mut self, plan: &LogicalPlan, f: &Filter) -> OpOutput {
         let l = self.visit(&f.input);
         let mut o = self.fresh("Filter", plan);
-        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
+        self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         self.filter_ndv(&f.predicate, &f.input, &o);
         self.range_pairs(&f.predicate, plan, &o);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
+        o.inherit(&l);
         o.facts.assume(&f.predicate, plan.schema());
-        o.origin = l.origin.clone().map(|x| x.narrow(&o.facts, plan.schema()));
         o
     }
 
     /// `Distinct`: one row per distinct input row.
     ///
-    /// - **Claim**: a [`subset`](Self::subset) of the input; `l ≥ 1 ⇒ X ≥
+    /// - **Claim**: a [`subset`](op_output) of the input; `l ≥ 1 ⇒ X ≥
     ///   1`, `X ≤ Π ndv` of the input's columns, or of the columns that
     ///   determine the rest. Columns keep every value ([`Self::kept_values`]).
     ///   A unique input: `X = l`.
-    pub fn distinct(&mut self, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
+    pub fn distinct(&mut self, plan: &LogicalPlan, input: &LogicalPlan) -> OpOutput {
         let l = self.visit(input);
         let mut o = self.fresh("Distinct", plan);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
-        o.origin = l.origin.clone();
-        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
+        o.inherit(&l);
+        self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         self.assert(l.card.ge(int(1)).implies(o.card.ge(int(1))));
         self.kept_values(plan, &o, &l);
         let all: Vec<&Int> = l.ndv.iter().collect();
@@ -282,7 +255,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X ≤ l`, `l ≥ 1 ⇒ X ≥ 1`, `X ≤ Π ndv` of the `ON`
     ///   expressions, without those the others determine.
-    pub fn distinct_on(&mut self, plan: &LogicalPlan, on: &DistinctOn) -> Rel {
+    pub fn distinct_on(&mut self, plan: &LogicalPlan, on: &DistinctOn) -> OpOutput {
         let l = self.visit(&on.input);
         let mut o = self.fresh("DistinctOn", plan);
         o.facts = computed_facts(plan, &on.select_expr, &on.input, &l.facts);
@@ -309,20 +282,18 @@ impl<'a> Analyzer<'a> {
 
     /// `Sort`: the input's rows in order, or its first `n` with `fetch n`.
     ///
-    /// - **Claim**: [`same rows`](Self::same_rows) as the input; with `fetch
-    ///   n`, a [`subset`](Self::subset) of it with `X = min(n, l)`.
-    pub fn sort(&mut self, plan: &LogicalPlan, s: &Sort) -> Rel {
+    /// - **Claim**: [`same rows`](op_output) as the input; with `fetch
+    ///   n`, a [`subset`](op_output) of it with `X = min(n, l)`.
+    pub fn sort(&mut self, plan: &LogicalPlan, s: &Sort) -> OpOutput {
         let l = self.visit(&s.input);
         let mut o = self.fresh("Sort", plan);
         let columns = aligned(l.ndv.len(), 0);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
-        o.origin = l.origin.clone();
+        o.inherit(&l);
         match s.fetch {
-            None => self.link(&o, LinkKind::SameRows, &l, &columns),
+            None => self.assert_property("same rows", same(&with_card(&o, &l, &columns))),
             // Top-k: exactly the first n rows.
             Some(n) => {
-                self.link(&o, LinkKind::Subset, &l, &columns);
+                self.assert_property("subset", within(&with_card(&o, &l, &columns)));
                 self.assert(o.card.eq(min(&int(n as u64), &l.card)));
             }
         }
@@ -331,16 +302,14 @@ impl<'a> Analyzer<'a> {
 
     /// `Limit`: the input's rows after skipping `k`, at most `n` of them.
     ///
-    /// - **Claim**: a [`subset`](Self::subset) of the input. Literal skip `k`
+    /// - **Claim**: a [`subset`](op_output) of the input. Literal skip `k`
     ///   and fetch `n`: `X = min(n, max(l − k, 0))`; otherwise `X ≤ n` for a
     ///   literal fetch.
-    pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> Rel {
+    pub fn limit(&mut self, plan: &LogicalPlan, lim: &Limit) -> OpOutput {
         let l = self.visit(&lim.input);
         let mut o = self.fresh("Limit", plan);
-        o.facts = l.facts.clone();
-        o.rows = l.rows.clone();
-        o.origin = l.origin.clone();
-        self.link(&o, LinkKind::Subset, &l, &aligned(l.ndv.len(), 0));
+        o.inherit(&l);
+        self.assert_property("subset", within(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         let skip = match lim.get_skip_type() {
             Ok(SkipType::Literal(k)) => Some(k as u64),
             _ => None,
@@ -367,24 +336,22 @@ impl<'a> Analyzer<'a> {
 
     /// `Union` (`UNION ALL`): every input's rows.
     ///
-    /// - **Claim**: each input a [`subset`](Self::subset) of the output; `X
+    /// - **Claim**: each input a [`subset`](op_output) of the output; `X
     ///   = Σ` inputs; `ndv ≤ Σ ndv` per column; each range within the
     ///   inputs' together.
-    pub fn union(&mut self, plan: &LogicalPlan, u: &Union) -> Rel {
-        let inputs: Vec<Rel> = u.inputs.iter().map(|i| self.visit(i)).collect();
+    pub fn union(&mut self, plan: &LogicalPlan, u: &Union) -> OpOutput {
+        let inputs: Vec<OpOutput> = u.inputs.iter().map(|i| self.visit(i)).collect();
         let mut o = self.fresh("Union", plan);
         for j in 0..plan.schema().fields().len() {
-            let dom = u.inputs.iter().zip(&inputs).fold(Dom::nothing(), |acc, (input, rel)| {
-                let col = Expr::Column(Column::from(input.schema().qualified_field(j)));
-                acc.union(&rel.facts.dom(&col, input.schema()))
+            let dom = u.inputs.iter().zip(&inputs).fold(Dom::nothing(), |acc, (input, out)| {
+                acc.union(&out.facts.dom(&col(input, j), input.schema()))
             });
-            let col = Expr::Column(Column::from(plan.schema().qualified_field(j)));
-            o.facts.add(&col, dom, plan.schema());
+            o.facts.add(&col(plan, j), dom, plan.schema());
         }
         let cards: Vec<&Int> = inputs.iter().map(|r| &r.card).collect();
         self.assert(o.card.eq(Int::add(&cards)));
         for input in &inputs {
-            self.link(input, LinkKind::Subset, &o, &aligned(o.ndv.len(), 0));
+            self.assert_property("subset", within(&with_card(input, &o, &aligned(o.ndv.len(), 0))));
         }
         for (j, v) in o.ndv.iter().enumerate() {
             let parts: Vec<&Int> = inputs.iter().map(|r| &r.ndv[j]).collect();
@@ -395,7 +362,7 @@ impl<'a> Analyzer<'a> {
             if inputs.iter().any(|r| r.unit.get(j) != Some(&o.unit[j])) {
                 continue;
             }
-            let ends = |ends: fn(&Rel) -> &Vec<Option<Int>>| -> Option<Vec<Int>> {
+            let ends = |ends: fn(&OpOutput) -> &Vec<Option<Int>>| -> Option<Vec<Int>> {
                 inputs.iter().map(|r| ends(r).get(j).cloned().flatten()).collect()
             };
             if let (Some(lo), Some(los)) = (&o.min[j], ends(|r| &r.min)) {
@@ -412,7 +379,7 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X =` the rows listed; each column within the values
     ///   listed for it.
-    pub fn values(&mut self, plan: &LogicalPlan, v: &Values) -> Rel {
+    pub fn values(&mut self, plan: &LogicalPlan, v: &Values) -> OpOutput {
         let mut o = self.fresh("Values", plan);
         self.assert(o.card.eq(int(v.values.len() as u64)));
         for j in 0..plan.schema().fields().len() {
@@ -420,8 +387,7 @@ impl<'a> Analyzer<'a> {
                 .values
                 .iter()
                 .fold(Dom::nothing(), |acc, row| acc.union(&Facts::default().dom(&row[j], plan.schema())));
-            let col = Expr::Column(Column::from(plan.schema().qualified_field(j)));
-            o.facts.add(&col, dom, plan.schema());
+            o.facts.add(&col(plan, j), dom, plan.schema());
         }
         o
     }
@@ -429,7 +395,7 @@ impl<'a> Analyzer<'a> {
     /// `EmptyRelation`: no rows, or one without columns.
     ///
     /// - **Claim**: `X = 0`, or `1` if it produces a row.
-    pub fn empty_relation(&mut self, plan: &LogicalPlan, e: &EmptyRelation) -> Rel {
+    pub fn empty_relation(&mut self, plan: &LogicalPlan, e: &EmptyRelation) -> OpOutput {
         let o = self.fresh("EmptyRelation", plan);
         self.assert(o.card.eq(int(e.produce_one_row as u64)));
         o
@@ -440,17 +406,18 @@ impl<'a> Analyzer<'a> {
     ///
     /// - **Claim**: `X = |T|`, the table's variable, shared by every scan of
     ///   it. Pushed-down filters add a filter over the scan (`ScanFilter`),
-    ///   a [`subset`](Self::subset) of the scan's rows with the filters'
+    ///   a [`subset`](op_output) of the scan's rows with the filters'
     ///   domains, unless the provider applies them inexactly. A pushed-down
     ///   `fetch` bounds nothing.
     /// - **Why**: a provider must return at least `fetch` rows and may return
     ///   more; DataFusion keeps the limit above.
-    #[allow(clippy::type_complexity)]
-    pub fn scan(
-        &mut self,
-        plan: &LogicalPlan,
-        scan: &TableScan,
-    ) -> (Rel, Option<(String, Vec<String>, LogicalPlan)>) {
+    pub fn scan(&mut self, plan: &LogicalPlan, scan: &TableScan) -> (OpOutput, Option<RawScan>) {
+        // The scan before pushed-down filters and fetch: its keys are the
+        // table's, with no column pinned.
+        let mut raw = scan.clone();
+        raw.filters.clear();
+        raw.fetch = None;
+        let raw = LogicalPlan::TableScan(raw);
         let mut raw_scan = None;
         let mut out = match (self.resolve)(scan) {
             ScanKind::Base { key, display } => {
@@ -461,21 +428,24 @@ impl<'a> Analyzer<'a> {
                 let schema = plan.schema();
                 for (j, field) in schema.fields().iter().enumerate() {
                     if !field.is_nullable() {
-                        let col = Expr::Column(Column::from(schema.qualified_field(j)));
-                        s.facts.add(&col, Dom::non_null(), schema);
+                        s.facts.add(&field_col(schema, j), Dom::non_null(), schema);
                     }
                 }
-                self.relations[s.id].scan = Some(scan.clone());
+                self.composite_key(scan, &s);
+                if self.referenced_sizes {
+                    self.referenced_tables(scan);
+                    self.referenced_size(scan, &s);
+                }
                 let name = self.name_of(&s.card);
                 self.scans.push((name.clone(), display, s.card.clone()));
-                s.origin = Some(Origin::scan(&key, schema).narrow(&s.facts, schema));
                 if !scan.filters.is_empty() {
-                    // The raw scan, before pushed-down filters and fetch.
-                    let mut raw = scan.clone();
-                    raw.filters.clear();
-                    raw.fetch = None;
-                    raw_scan = Some((name, self.names_of(&s), LogicalPlan::TableScan(raw)));
-                    self.raw_ranges = (range_names(&s.min), range_names(&s.max));
+                    raw_scan = Some(RawScan {
+                        var: name,
+                        ndv_vars: self.names_of(&s),
+                        min_vars: range_names(&s.min),
+                        max_vars: range_names(&s.max),
+                        plan: raw.clone(),
+                    });
                 }
                 s
             }
@@ -487,9 +457,9 @@ impl<'a> Analyzer<'a> {
         // and may return more (DataFusion keeps the Limit above), so it bounds
         // nothing.
         if !scan.filters.is_empty() {
-            self.finish(&out, None);
+            self.finish(&out, &raw);
             let mut f = self.fresh("ScanFilter", plan);
-            self.link(&f, LinkKind::Subset, &out, &aligned(out.ndv.len(), 0));
+            self.assert_property("subset", within(&with_card(&f, &out, &aligned(out.ndv.len(), 0))));
             f.facts = out.facts.clone();
             // Filters applied inexactly may let through rows that fail them.
             if !inexact_filters(scan) {
@@ -498,7 +468,6 @@ impl<'a> Analyzer<'a> {
                     self.range_pairs(filter, plan, &f);
                 }
             }
-            f.origin = out.origin.clone().map(|x| x.narrow(&f.facts, plan.schema()));
             out = f;
         }
         (out, raw_scan)
@@ -506,7 +475,7 @@ impl<'a> Analyzer<'a> {
 
     /// Ranking functions number rows from 1, and `row_number()` numbers each
     /// partition's rows 1, 2, 3, ...: with the partition keys, it is unique.
-    pub fn window_functions(&self, plan: &LogicalPlan, input: &LogicalPlan, exprs: &[Expr], o: &mut Rel) {
+    pub fn window_functions(&self, plan: &LogicalPlan, input: &LogicalPlan, exprs: &[Expr], o: &mut OpOutput) {
         let n = input.schema().fields().len();
         for (i, e) in exprs.iter().enumerate() {
             let Expr::WindowFunction(w) = strip_alias(e) else {
@@ -518,21 +487,14 @@ impl<'a> Analyzer<'a> {
             }
             let c = col(plan, n + i);
             o.facts.add(&c, Dom::at_least(1), plan.schema());
-            if name != "row_number" {
-                continue;
-            }
-            let partition: Option<Vec<Expr>> = w
-                .params
-                .partition_by
+            let Some(partition) = row_number(e) else { continue };
+            let key: Option<Vec<Expr>> = partition
                 .iter()
-                .map(|p| match strip_alias(p) {
-                    Expr::Column(_) => Some(strip_alias(p).clone()),
-                    _ => None,
-                })
+                .map(|p| matches!(strip_alias(p), Expr::Column(_)).then(|| strip_alias(p).clone()))
                 .collect();
-            if let Some(mut key) = partition {
+            if let Some(mut key) = key {
                 key.push(c);
-                o.rows.keys.push(key);
+                o.subset_bounds.keys.push(key);
             }
         }
     }
@@ -540,26 +502,25 @@ impl<'a> Analyzer<'a> {
     /// `Subquery`, `SubqueryAlias` and `Repartition`: the input's rows, whose
     /// columns come first and unchanged. `kind` names the operator.
     ///
-    /// - **Claim**: [`same rows`](Self::same_rows) as the input, column for
+    /// - **Claim**: [`same rows`](op_output) as the input, column for
     ///   column.
-    pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> Rel {
+    pub fn pass_through(&mut self, kind: &str, plan: &LogicalPlan, input: &LogicalPlan) -> OpOutput {
         let l = self.visit(input);
         let mut o = self.fresh(kind, plan);
-        self.link(&o, LinkKind::SameRows, &l, &aligned(l.ndv.len(), 0));
+        self.assert_property("same rows", same(&with_card(&o, &l, &aligned(l.ndv.len(), 0))));
         o.facts = l.facts.by_position(input.schema(), plan.schema());
         let by_position = |c: &Column| {
             let i = input.schema().index_of_column(c).ok()?;
             child_column(plan, i)
         };
-        o.rows = l.rows.rename(&by_position);
-        o.origin = l.origin.as_ref().map(|x| x.with_width(plan.schema().fields().len()));
+        o.subset_bounds = l.subset_bounds.rename(&by_position);
         o
     }
 
     /// `o` keeps every value of `l`'s columns: `ndv ≥` its input's. Not for
     /// floats: deduplicating by SQL equality can merge values that are
     /// distinct as bits (`-0.0` and `0.0`).
-    pub fn kept_values(&self, plan: &LogicalPlan, o: &Rel, l: &Rel) {
+    pub fn kept_values(&self, plan: &LogicalPlan, o: &OpOutput, l: &OpOutput) {
         for (j, (a, b)) in o.ndv.iter().zip(&l.ndv).enumerate() {
             if !plan.schema().field(j).data_type().is_floating() {
                 self.assert(a.ge(b));
@@ -568,8 +529,9 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Bounds output column `v`, computed by `e` over the rows of `input`, if
-    /// `e` is not a column: those the axioms relate.
-    pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &Rel) {
+    /// `e` is not a column: a column's are related as the same rows'
+    /// ([`op_output`]).
+    pub fn expr_ndv(&self, v: &Int, e: &Expr, input: &LogicalPlan, l: &OpOutput) {
         if let Some(bound) = expr_bound(e, input, l, self.max_product) {
             self.assert(v.le(bound));
         }
@@ -577,29 +539,15 @@ impl<'a> Analyzer<'a> {
 
     /// `ndv(a) = ndv(b)` on `o`, the output of filtering `input` by
     /// `predicate`, for each `a = b` it holds.
-    pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &Rel) {
-        // SQL equality on floats identifies values that are distinct as bits
-        // (`-0.0 = 0.0`), so these rules skip float columns.
-        let index = |e: &Expr| {
-            let i = key_column(input, e).and_then(|c| input.schema().index_of_column(&c).ok())?;
-            (!input.schema().field(i).data_type().is_floating()).then_some(i)
-        };
-        for conj in split_conjunction(predicate) {
-            if let Expr::BinaryExpr(BinaryExpr {
-                left,
-                op: Operator::Eq,
-                right,
-            }) = conj
-                && let (Some(a), Some(b)) = (index(left), index(right))
-            {
-                // Every surviving row has a = b (neither NULL).
-                self.assert(o.ndv[a].eq(&o.ndv[b]));
-            }
+    pub fn filter_ndv(&self, predicate: &Expr, input: &LogicalPlan, o: &OpOutput) {
+        // Every surviving row has a = b (neither NULL).
+        for (a, b) in equalities(predicate, input) {
+            self.assert(o.ndv[a].eq(&o.ndv[b]));
         }
     }
 }
 
-/// `n` columns paired with the same positions of another relation's, from
+/// `n` columns paired with the same positions of another op output's, from
 /// position `at` on: `(at + i, i)`.
 pub(crate) fn aligned(n: usize, at: usize) -> Vec<(usize, usize)> {
     (0..n).map(|i| (at + i, i)).collect()
@@ -633,7 +581,12 @@ pub(crate) fn unproject(e: &Expr, plan: &LogicalPlan, exprs: &[Expr]) -> Option<
 
 /// Output column `j` of `plan`, as an expression.
 pub(crate) fn col(plan: &LogicalPlan, j: usize) -> Expr {
-    Expr::Column(Column::from(plan.schema().qualified_field(j)))
+    field_col(plan.schema(), j)
+}
+
+/// Column `j` of `schema`, as an expression.
+pub(crate) fn field_col(schema: &DFSchema, j: usize) -> Expr {
+    Expr::Column(Column::from(schema.qualified_field(j)))
 }
 
 /// Facts on the output of an operator computing `exprs` over the rows of
@@ -665,6 +618,21 @@ pub(crate) fn strip_alias(e: &Expr) -> &Expr {
         Expr::Alias(a) => strip_alias(&a.expr),
         e => e,
     }
+}
+
+/// The partition of `e`, if it is an unfiltered `row_number()`: it numbers
+/// each partition's rows 1, 2, 3, ..., so it is unique with them.
+pub(crate) fn row_number(e: &Expr) -> Option<&[Expr]> {
+    match strip_alias(e) {
+        Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => Some(&f.params.partition_by),
+        _ => None,
+    }
+}
+
+/// True if `agg` groups by ROLLUP, CUBE or GROUPING SETS, which may emit
+/// more rows than they read and repeat keys across grouping levels.
+pub(crate) fn grouping_sets(agg: &Aggregate) -> bool {
+    agg.group_expr.iter().any(|e| matches!(e, Expr::GroupingSet(_)))
 }
 
 /// True unless `e` is a deterministic function of the columns it reads: it
@@ -743,7 +711,7 @@ pub(crate) fn with_equalities(
 /// `input`, or `None` if nothing better than the row count is known. A
 /// deterministic function of some columns takes at most as many values as
 /// there are combinations of theirs.
-pub(crate) fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> Option<Int> {
+pub(crate) fn expr_bound(e: &Expr, input: &LogicalPlan, l: &OpOutput, cap: usize) -> Option<Int> {
     if let Some(c) = key_column(input, e) {
         let i = input.schema().index_of_column(&c).ok()?;
         return Some(l.ndv[i].clone());
@@ -751,12 +719,11 @@ pub(crate) fn expr_bound(e: &Expr, input: &LogicalPlan, l: &Rel, cap: usize) -> 
     if opaque(e) {
         return None;
     }
-    let factors: Option<Vec<&Int>> = e
-        .column_refs()
-        .into_iter()
-        .map(|c| input.schema().index_of_column(c).ok().map(|i| &l.ndv[i]))
-        .collect();
-    product(&factors?, cap)
+    // By position: `column_refs` is a set, in no fixed order.
+    let positions: Option<BTreeSet<usize>> =
+        e.column_refs().into_iter().map(|c| input.schema().index_of_column(c).ok()).collect();
+    let factors: Vec<&Int> = positions?.iter().map(|&i| &l.ndv[i]).collect();
+    product(&factors, cap)
 }
 
 /// The column `e` reads from `input`, if `e` is that column possibly wrapped in
@@ -792,18 +759,11 @@ pub(crate) fn injective_cast(from: &DataType, to: &DataType) -> bool {
         _ => None,
     };
     from == to
+        || domain::wider_type(from, to)
         || matches!(
             (from, to),
-            (Int8, Int16 | Int32 | Int64)
-                | (Int16, Int32 | Int64)
-                | (Int32, Int64)
-                | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
-                | (UInt16, UInt32 | UInt64 | Int32 | Int64)
-                | (UInt32, UInt64 | Int64)
-                | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
-                // Floats hold integers exactly up to 2^24 and 2^53.
-                | (Int8 | Int16 | UInt8 | UInt16, Float32)
-                | (Int8 | Int16 | Int32 | UInt8 | UInt16 | UInt32, Float64)
+            // Floats hold integers exactly up to 2^24 and 2^53.
+            (Int8 | Int16 | UInt8 | UInt16, Float32) | (Int8 | Int16 | Int32 | UInt8 | UInt16 | UInt32, Float64)
         )
         || match (digits, to) {
             (Some(d), Decimal128(p, s) | Decimal256(p, s)) => i16::from(*p) - i16::from(*s) >= d,
@@ -871,6 +831,31 @@ pub(crate) fn scan_pinned(scan: &TableScan, schema: &DFSchema) -> Vec<Column> {
         }
     }
     out
+}
+
+/// For an operator whose rows are some of its one input's, none repeated,
+/// with the input's columns first and unchanged: the input, and whether it
+/// keeps every row, in order. The walks that follow columns down a plan
+/// ([`Analyzer::covers_key`], [`Analyzer::fd_closure`],
+/// [`Analyzer::stored_column`], ...) pass through these alike; a
+/// projection, which computes its columns, each handles itself.
+///
+/// | Operator | Keeps every row |
+/// |---|---|
+/// | `Sort` without fetch, `Repartition`, `Subquery`, `SubqueryAlias`, `Window` | yes |
+/// | `Filter`, `Sort` with fetch, `Limit`, `Distinct` | no |
+pub(crate) fn passed_rows(plan: &LogicalPlan) -> Option<(&LogicalPlan, bool)> {
+    Some(match plan {
+        LogicalPlan::Sort(s) => (&s.input, s.fetch.is_none()),
+        LogicalPlan::Repartition(r) => (&r.input, true),
+        LogicalPlan::Subquery(s) => (&s.subquery, true),
+        LogicalPlan::SubqueryAlias(a) => (&a.input, true),
+        LogicalPlan::Window(w) => (&w.input, true),
+        LogicalPlan::Filter(f) => (&f.input, false),
+        LogicalPlan::Limit(l) => (&l.input, false),
+        LogicalPlan::Distinct(Distinct::All(input)) => (input, false),
+        _ => return None,
+    })
 }
 
 /// Positions of `cols` in `plan`'s output.

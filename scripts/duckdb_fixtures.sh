@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Regenerates the DuckDB EXPLAIN ANALYZE fixtures under tests/duckdb from
-# TPC-H at scale factor 0.01: the catalog, a profile per query, each TPC-H
-# query's plain EXPLAIN plan, and the true counts that tests/facts.rs checks
-# the derived facts against.
+# TPC-H at scale factor 0.01, with DuckDB 1.5: the catalog, a profile per
+# query, and each TPC-H query's plain EXPLAIN plan.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,11 +43,3 @@ done
 for f in "$out"/extra/*.sql; do
   profile "$f" "${f%.sql}.json"
 done
-
-duckdb "$db" -json < "$out/expected.sql" > "$out/expected.json"
-
-# Every fact the tests derive that counts rows of base tables, counted.
-(cd "$root" && cargo test -q --test facts dump_fact_queries > /dev/null)
-# DuckDB 1.5.0's common_subplan optimizer gives two counts over the same rows
-# one value (see tests/live/mod.rs).
-{ echo "SET disabled_optimizers = 'common_subplan';"; cat "$out/fact_checks.sql"; } | duckdb "$db" -json > "$out/fact_checks.json"

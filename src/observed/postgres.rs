@@ -64,7 +64,7 @@ pub fn from_postgres(catalog: &Catalog, name: &str, json: &str, sql: Option<&str
 
 /// Reads the plan PostgreSQL chose for a query, as printed by `EXPLAIN
 /// (VERBOSE, FORMAT JSON)`, or by `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)`
-/// with its counts ignored. The plan is not counted: it gives no facts.
+/// with its counts ignored. The plan is not counted: it pins nothing.
 pub fn from_postgres_explain(catalog: &Catalog, name: &str, json: &str, sql: Option<&str>) -> Result<ObservedPlan> {
     read(catalog, name, json, sql, false)
 }

@@ -1,11 +1,11 @@
 //! An observed plan as a DataFusion [`LogicalPlan`] of the same shape, so
 //! that a query can be analyzed as an engine planned it.
 //!
-//! Facts name the rows an engine's operators computed. A query planned by
-//! DataFusion asks about the rows of DataFusion's operators, which may join
-//! in another order or push other filters into scans, and so asks about rows
-//! no engine counted. Read from the engine's own plan, the query asks about
-//! the rows its profiles count.
+//! Profiles count the rows an engine's operators computed. A query planned
+//! by DataFusion asks about the rows of DataFusion's operators, which may
+//! join in another order or push other filters into scans, and so asks
+//! about rows no engine counted. Read from the engine's own plan, the query
+//! asks about the rows its profiles count.
 //!
 //! The plan is built as written, never optimized. Every operator outputs the
 //! base-table instance columns of its input (`lineitem#3.l_orderkey`), which
@@ -446,7 +446,7 @@ impl UserDefinedLogicalNodeCore for Opaque {
 }
 
 /// A predicate that did not resolve: `opaque('<text>')`, volatile, so that
-/// it bounds nothing and no fact names the rows it keeps.
+/// it bounds nothing.
 fn opaque_pred(text: &str) -> Expr {
     opaque_fn(text, DataType::Boolean)
 }

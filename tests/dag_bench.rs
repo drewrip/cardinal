@@ -1,27 +1,26 @@
-//! Facts from the TABLE models of dbt DAGs, bounding the VIEW models of the
-//! same DAGs.
+//! The TABLE models of dbt DAGs as reference plans, bounding the VIEW models
+//! of the same DAGs.
 //!
 //! Each project of a [dag-bench](https://github.com/) checkout (`projects/*`,
 //! with a compiled `target/manifest.json` and a built DuckDB warehouse) is a
 //! DAG of models over source tables, each materialized as a TABLE or a VIEW.
 //! Every TABLE model's query runs, profiled, in the warehouse (read only, so
-//! nothing is rebuilt), with one thread and with four; every fact and bound
-//! read off the profiles is checked against its true count. Each VIEW model's
+//! nothing is rebuilt), with one thread and with four. Each VIEW model's
 //! query is then analyzed by DataFusion, over empty tables of the same schema
 //! with the DAG's views defined as views (so that a view reads, as DuckDB's
-//! plans do, its definition over the stored tables), and bounded without
-//! facts and with the TABLE models'. Both must hold the view's true row
+//! plans do, its definition over the stored tables), and bounded alone and
+//! with the TABLE models' profiles as reference plans
+//! ([`cardinal::Builder::with_plans`]). Both must hold the view's true row
 //! count.
 //!
 //! `CARDINAL_DAG_BENCH` is the checkout (default `~/dag-bench`),
 //! `CARDINAL_DAG_ONLY` a substring of the projects to run, and
-//! `CARDINAL_DAG_SHOW` (any value) prints every fact and bound.
 //! `CARDINAL_DAG_PLANNER` is how views are planned:
 //! `datafusion` (the default), `duckdb` (DuckDB's `EXPLAIN (FORMAT JSON)` of
 //! the view's query, analyzed as DuckDB planned it), or `both`. Every
 //! model's query is read with the VIEW models it reads inlined.
-//! `CARDINAL_DAG_DUMP` is a JSON file to write each project's models, facts
-//! and results to (`{dag}` in it is the project). Needs the `duckdb`
+//! `CARDINAL_DAG_DUMP` is a JSON file to write each project's models and
+//! results to (`{dag}` in it is the project). Needs the `duckdb`
 //! CLI; skipped without it or the checkout. `CARDINAL_LIVE_TIMEOUT` sets each
 //! DuckDB call's time limit in seconds.
 //!
@@ -47,15 +46,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cardinal::facts::{Fact, FactKind, FactSet, Ratio};
 use cardinal::observed::Catalog;
-use cardinal::{Bounds, Facts, ForeignKey, Options};
+use cardinal::{Bounds, ForeignKey, Options};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::common::{Constraint, Constraints};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
 use datafusion::prelude::{SessionConfig, SessionContext};
-use live::{Engine, TIMED_OUT, duckdb_available};
+use live::{Engine, duckdb_available};
 use serde_json::Value;
 
 /// A model of the DAG.
@@ -347,66 +345,6 @@ async fn context(dag: &Dag) -> (SessionContext, Vec<String>, Vec<ForeignKey>) {
     (ctx, undefined, foreign)
 }
 
-fn agrees(kind: &FactKind, value: Ratio, n: u64, of: Option<u64>) -> bool {
-    match (kind, of) {
-        (FactKind::Unique { .. }, Some(of)) => n == of,
-        (_, Some(of)) => Ratio::new(n, of) == Some(value),
-        (_, None) => value.as_int() == Some(n),
-    }
-}
-
-/// Every fact and bound of `facts` against its count: the failures, and how
-/// many were counted true, could not be counted, and timed out.
-fn check(engine: &Engine, catalog: &Catalog, facts: &FactSet) -> (Vec<String>, usize, usize, usize) {
-    let mut checks: Vec<(&Fact, bool, usize, Option<usize>)> = vec![];
-    let mut sql: Vec<String> = vec![];
-    let mut index: HashMap<String, usize> = HashMap::new();
-    let mut at = |q: String, sql: &mut Vec<String>| {
-        *index.entry(q.clone()).or_insert_with(|| {
-            sql.push(q);
-            sql.len() - 1
-        })
-    };
-    let mut uncountable = 0;
-    for (f, bound) in facts.iter().map(|f| (f, false)).chain(facts.bounds().map(|f| (f, true))) {
-        match f.kind.count_sql_in(catalog, facts, engine.dialect()) {
-            Some(c) => {
-                let v = at(c.value, &mut sql);
-                let of = c.of.map(|q| at(q, &mut sql));
-                checks.push((f, bound, v, of));
-            }
-            None => uncountable += 1,
-        }
-    }
-    let counted = engine.values(&sql);
-    let (mut failures, mut ok, mut slow) = (vec![], 0, 0);
-    for (f, bound, v, of) in checks {
-        let (n, of) = match (&counted[v], of.map(|o| &counted[o])) {
-            (Ok(n), None) => (*n, None),
-            (Ok(n), Some(Ok(o))) => (*n, Some(*o)),
-            (Err(e), _) | (_, Some(Err(e))) if e == TIMED_OUT => {
-                slow += 1;
-                continue;
-            }
-            (Err(e), _) | (_, Some(Err(e))) => {
-                failures.push(format!("{}: does not count: {}", f.kind, e.lines().next().unwrap_or_default()));
-                continue;
-            }
-        };
-        let right = match bound {
-            true => f.value.as_int().is_some_and(|b| b >= n),
-            false => agrees(&f.kind, f.value, n, of),
-        };
-        if right {
-            ok += 1;
-        } else {
-            let sign = if bound { "<=" } else { "=" };
-            failures.push(format!("{} {sign} {} but is {n}{}", f.kind, f.value, of.map(|o| format!("/{o}")).unwrap_or_default()));
-        }
-    }
-    (failures, ok, uncountable, slow)
-}
-
 /// `sql` with every VIEW model it reads replaced by its definition, itself
 /// inlined, as a derived table under the name it was read by: the query an
 /// engine plans. `None` if it does not parse.
@@ -451,40 +389,16 @@ fn inline(sql: &str, views: &HashMap<String, String>) -> Option<String> {
     query(sql.trim().trim_end_matches(';'), views, 0).map(|q| q.to_string())
 }
 
-/// Writes `dag`'s models and dependencies, its TABLE models' facts and
-/// bounds (with the models each was read from), and each view's results, by
+/// Writes `dag`'s models and dependencies, and each view's results, by
 /// planner, as JSON to `path` (`{dag}` in it is the project's name).
 fn dump(
     path: &str,
     dag: &Dag,
-    facts: &FactSet,
     table_rows: &HashMap<String, u64>,
     views: &BTreeMap<String, serde_json::Map<String, Value>>,
 ) {
     use serde_json::json;
     let name_of = |id: &str| id.rsplit('.').next().unwrap_or(id).to_string();
-    let origins = |f: &Fact| -> (Vec<String>, Vec<String>) {
-        let (mut models, mut rules) = (vec![], vec![]);
-        for o in &f.origins {
-            match o {
-                cardinal::facts::Origin::Observed { query, rule, .. } => {
-                    models.push(query.split('/').nth(1).unwrap_or(query).to_string());
-                    rules.push(rule.to_string());
-                }
-                cardinal::facts::Origin::Derived { rule } => rules.push(format!("derived: {rule}")),
-                cardinal::facts::Origin::Counted => rules.push("counted".to_string()),
-            }
-        }
-        for v in [&mut models, &mut rules] {
-            v.sort();
-            v.dedup();
-        }
-        (models, rules)
-    };
-    let fact = |f: &Fact, bound: bool| {
-        let (models, rules) = origins(f);
-        json!({ "kind": f.kind.to_string(), "value": f.value.to_string(), "bound": bound, "from": models, "rules": rules })
-    };
     let models: Vec<Value> = dag
         .models
         .iter()
@@ -498,8 +412,7 @@ fn dump(
             })
         })
         .collect();
-    let all: Vec<Value> = facts.iter().map(|f| fact(f, false)).chain(facts.bounds().map(|f| fact(f, true))).collect();
-    let out = json!({ "dag": dag.name, "models": models, "facts": all });
+    let out = json!({ "dag": dag.name, "models": models });
     let path = path.replace("{dag}", &dag.name);
     std::fs::write(&path, serde_json::to_string_pretty(&out).unwrap()).unwrap();
     println!("  wrote {path}");
@@ -509,9 +422,8 @@ fn dump(
 struct Summary {
     tables: usize,
     profiled: usize,
-    facts: usize,
-    bounds: usize,
-    counted: usize,
+    /// Reference plans.
+    plans: usize,
     views: usize,
     bounded: usize,
     tighter: usize,
@@ -519,7 +431,7 @@ struct Summary {
 }
 
 #[tokio::test]
-async fn table_facts_bound_views() {
+async fn table_plans_bound_views() {
     let root = std::env::var("CARDINAL_DAG_BENCH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("dag-bench"));
@@ -559,8 +471,8 @@ async fn table_facts_bound_views() {
             dag.models.iter().filter(|m| !m.table).map(|m| (m.name.to_lowercase(), m.sql.clone())).collect();
         let inlined = |m: &Model| inline(&m.sql, &views).unwrap_or_else(|| m.sql.clone());
 
-        // The TABLE models' facts.
-        let mut set = FactSet::default();
+        // The TABLE models' profiles.
+        let mut plans = vec![];
         let mut table_rows: HashMap<String, u64> = HashMap::new();
         for m in dag.models.iter().filter(|m| m.table) {
             let mut ok = false;
@@ -573,7 +485,7 @@ async fn table_facts_bound_views() {
                         if p.nodes[p.root].counted {
                             table_rows.insert(m.name.clone(), p.nodes[p.root].rows);
                         }
-                        set.observe(&p);
+                        plans.push(p);
                         ok = true;
                     }
                     Err(e) if *variant == variants[0] => println!("  table {} not profiled: {}", m.name, e.lines().next().unwrap_or_default()),
@@ -582,42 +494,8 @@ async fn table_facts_bound_views() {
             }
             s.profiled += usize::from(ok);
         }
-        let facts = Facts::new(set);
-        for c in &facts.set().conflicts {
-            failures.push(format!("{}: conflict: {} = {} vs {}", dag.name, c.kind, c.values.0, c.values.1));
-        }
-        if std::env::var("CARDINAL_DAG_SHOW").is_ok() {
-            let from = |f: &Fact| {
-                let mut q: Vec<String> = f
-                    .origins
-                    .iter()
-                    .map(|o| match o {
-                        cardinal::facts::Origin::Observed { query, .. } => query.split('/').nth(1).unwrap_or(query).to_string(),
-                        cardinal::facts::Origin::Derived { rule } => format!("derived ({rule})"),
-                        cardinal::facts::Origin::Counted => "counted".to_string(),
-                    })
-                    .collect();
-                q.sort();
-                q.dedup();
-                q.join(", ")
-            };
-            for f in facts.set().iter() {
-                println!("  fact  {f}    [{}]", from(f));
-            }
-            for b in facts.set().bounds() {
-                println!("  bound {} <= {}    [{}]", b.kind, b.value, from(b));
-            }
-        }
-        let (wrong, counted, uncountable, slow) = check(&dag.engine, &catalog, facts.set());
-        failures.extend(wrong.into_iter().map(|w| format!("{}: {w}", dag.name)));
-        (s.facts, s.bounds, s.counted) = (facts.set().len(), facts.set().bounds().count(), counted);
-        println!(
-            "  {} of {} tables profiled: {} facts and {} bounds; {counted} counted true, {uncountable} not countable, {slow} too slow to count",
-            s.profiled,
-            s.tables,
-            s.facts,
-            s.bounds
-        );
+        s.plans = plans.len();
+        println!("  {} of {} tables profiled: {} plans", s.profiled, s.tables, s.plans);
 
         // Each VIEW model, bounded with them, as each planner plans it.
         let base = s.clone();
@@ -626,7 +504,7 @@ async fn table_facts_bound_views() {
             let mut s = base.clone();
             let mut skipped = vec![];
             println!("  planned by {planner}:");
-            println!("  {:<34} {:>10}  {:<20} {:<20}", "view", "rows", "no facts", "facts");
+            println!("  {:<34} {:>10}  {:<20} {:<20}", "view", "rows", "alone", "with plans");
             for m in dag.models.iter().filter(|m| !m.table) {
                 // PostgreSQL may have only the tables: the views inlined.
                 let run = if postgres { inlined(m) } else { m.sql.clone() };
@@ -643,33 +521,34 @@ async fn table_facts_bound_views() {
                     }
                 };
                 let options = Options { foreign_keys: foreign_keys.clone(), ..Default::default() };
-                let analyzed = match planner {
-                    // The view's query with the views it reads inlined, as
-                    // the engine plans it: so its text says what the plan reads.
-                    "engine" => Some(inlined(m))
-                        .ok_or_else(|| "does not inline".to_string())
-                        .and_then(|sql| {
-                            let j = dag.engine.plan(&sql)?;
-                            let plan = dag.engine.read_plan(&catalog, &m.name, &j, &sql)?;
-                            cardinal::analyze_observed(&catalog, &plan, options).map_err(|e| e.to_string())
-                        }),
-                    _ => cardinal::analyze_sql(&ctx, &m.sql, options).await.map_err(|e| e.to_string()),
+                // The view's query with the views it reads inlined, as the
+                // engine plans it: so its text says what the plan reads.
+                let engine_plan = match planner {
+                    "engine" => Some(dag.engine.plan(&inlined(m)).and_then(|j| dag.engine.read_plan(&catalog, &m.name, &j, &inlined(m)))),
+                    _ => None,
                 };
-                let a = match analyzed {
-                    Ok(a) => a,
+                let query = match &engine_plan {
+                    Some(Ok(plan)) => Ok(cardinal::Analysis::plan(&catalog, plan).options(options)),
+                    Some(Err(e)) => Err(e.clone()),
+                    None => cardinal::Analysis::sql(&ctx, &m.sql).await.map(|q| q.options(options)).map_err(|e| e.to_string()),
+                };
+                let q = match query {
+                    Ok(q) => q,
                     Err(e) => {
                         skipped.push(format!("{}: not analyzed: {}", m.name, e.lines().next().unwrap_or_default()));
                         continue;
                     }
                 };
-                let (Ok(plain), Ok(with)) = (a.bounds(), a.with_facts(&facts).and_then(|a| a.bounds())) else {
+                let plain = q.clone().build().and_then(|a| a.bounds());
+                let with = q.with_plans(&plans).build().and_then(|a| a.bounds());
+                let (Ok(plain), Ok(with)) = (plain, with) else {
                     skipped.push(format!("{}: no bounds proven", m.name));
                     continue;
                 };
                 s.bounded += 1;
                 s.tighter += usize::from(with.upper.is_some_and(|hi| plain.upper.is_none_or(|h| hi < h)));
                 s.exact += usize::from(with.upper == Some(truth) && plain.upper != Some(truth));
-                for (which, b) in [("no facts", plain), ("facts", with)] {
+                for (which, b) in [("alone", plain), ("with plans", with)] {
                     if !b.holds(truth) {
                         failures.push(format!("{}/{} {planner} {which}: {b} does not hold {truth}", dag.name, m.name));
                     }
@@ -678,7 +557,7 @@ async fn table_facts_bound_views() {
                 let range = |b: Bounds| serde_json::json!({ "lo": b.lower, "hi": b.upper });
                 let entry = dumped.entry(m.name.clone()).or_default();
                 entry.insert("rows".into(), truth.into());
-                entry.insert(planner.into(), serde_json::json!({ "none": range(plain), "facts": range(with) }));
+                entry.insert(planner.into(), serde_json::json!({ "none": range(plain), "plans": range(with) }));
             }
             for u in &undefined {
                 println!("  view not defined in DataFusion: {u}");
@@ -690,18 +569,17 @@ async fn table_facts_bound_views() {
             summaries.push((format!("{}/{planner}", dag.name), s));
         }
         if let Ok(path) = std::env::var("CARDINAL_DAG_DUMP") {
-            dump(&path, &dag, facts.set(), &table_rows, &dumped);
+            dump(&path, &dag, &table_rows, &dumped);
         }
     }
 
-    println!("{:<22} {:>6} {:>6} {:>12} {:>7} {:>7} {:>8} {:>6}", "dag", "tables", "views", "facts/bounds", "checked", "bounded", "tighter", "exact");
+    println!("{:<22} {:>6} {:>6} {:>6} {:>7} {:>8} {:>6}", "dag", "tables", "views", "plans", "bounded", "tighter", "exact");
     for (name, s) in &summaries {
         println!(
-            "{name:<22} {:>6} {:>6} {:>12} {:>7} {:>7} {:>8} {:>6}",
+            "{name:<22} {:>6} {:>6} {:>6} {:>7} {:>8} {:>6}",
             format!("{}/{}", s.profiled, s.tables),
             s.views,
-            format!("{}/{}", s.facts, s.bounds),
-            s.counted,
+            s.plans,
             s.bounded,
             s.tighter,
             s.exact

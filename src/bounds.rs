@@ -1,9 +1,17 @@
 //! Bounds on a query's output cardinality.
 //!
 //! The largest `lo` and smallest `hi` with `lo <= X <= hi` that Z3 proves,
-//! each by binary search, of the root's cardinality or of any operator's
-//! ([`PlanBounds`]). A bound is reported only when Z3 proves it; an undecided
-//! check never yields one.
+//! of the root's cardinality or of any operator's ([`PlanBounds`]). A bound
+//! is reported only when Z3 proves it; an undecided check never yields one.
+//!
+//! `hi` is searched first, by binary search from `2^30` down, and caps the
+//! search for `lo`, which gallops up from 0 and then bisects. Each check
+//! that fails to prove a claim needs a model, which can take its whole
+//! budget, so the searches avoid them: `lo` is most often small.
+//!
+//! Each check's budget is a resource limit (Z3's `rlimit`), not a time:
+//! the same constraints give the same bounds however loaded the machine
+//! is. A generous timeout only guards against a check that stalls.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -12,7 +20,7 @@ use std::time::{Duration, Instant};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
-use crate::analysis::solver_with_timeout;
+use crate::analysis::{set_limits, solver_with_limits};
 
 /// The proven range of a query's output cardinality `X`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -65,8 +73,19 @@ pub struct NodeBounds {
 
 /// Largest constant tried; a bound needing more is treated as unbounded.
 const CAP: u64 = 1 << 30;
-/// Per-check timeout: bounds are best-effort, so give up quickly.
-const TIMEOUT_MS: u32 = 1_000;
+/// Per-check resource limit: bounds are best-effort, so give up quickly.
+/// Z3 applies it to each check. Proofs take far less; what reaches it is
+/// most often the search for a model refuting a claim, at a few tenths of
+/// a second to a few seconds on an unloaded core, as Z3 counts work
+/// unevenly.
+const RLIMIT: u32 = 300_000;
+/// The first check of a search, which also loads the constraints into the
+/// solver.
+const FIRST_RLIMIT: u32 = 10_000_000;
+/// Wall-clock limits, only against a check that stalls without spending
+/// its resources: far beyond what its resource limit takes.
+const TIMEOUT_MS: u32 = 10_000;
+const FIRST_TIMEOUT_MS: u32 = 60_000;
 
 /// How a bounds search's solver checks came out, and how long they took.
 #[doc(hidden)]
@@ -76,7 +95,7 @@ pub struct SearchStats {
     pub sat: u32,
     /// Checks that found none: a claim proven, or contradicted.
     pub unsat: u32,
-    /// Checks that gave up, mostly at the timeout.
+    /// Checks that gave up, mostly at the resource limit.
     pub unknown: u32,
     pub time: Duration,
 }
@@ -100,8 +119,10 @@ pub(crate) struct Search {
     solver: Solver,
     output: Int,
     stats: Cell<SearchStats>,
-    /// The variables a [`Search::plan`] bounds, and what the checks so far
-    /// tell of each.
+    /// Whether a check has run, loading the constraints.
+    warm: Cell<bool>,
+    /// The variables searched for bounds, and what the checks so far tell
+    /// of each: every model a check finds narrows each one's search.
     targets: RefCell<Vec<(Int, Known)>>,
 }
 
@@ -120,20 +141,17 @@ struct Known {
 }
 
 impl Search {
-    /// A solver loaded with `constraints`, bounding variable `root`.
-    pub(crate) fn new(constraints: &str, root: &str) -> (Self, usize) {
-        let solver = solver_with_timeout(TIMEOUT_MS);
-        solver.from_string(constraints);
-        let parsed = solver.get_assertions().len();
-        (
-            Search {
-                solver,
-                output: Int::new_const(root),
-                stats: Cell::default(),
-                targets: RefCell::default(),
-            },
-            parsed,
-        )
+    /// A search over `constraints`, bounding variable `root`.
+    pub(crate) fn new(constraints: &[Bool], root: &str) -> Self {
+        let solver = solver_with_limits(FIRST_RLIMIT, FIRST_TIMEOUT_MS);
+        constraints.iter().for_each(|f| solver.assert(f));
+        Search {
+            solver,
+            output: Int::new_const(root),
+            stats: Cell::default(),
+            warm: Cell::new(false),
+            targets: RefCell::default(),
+        }
     }
 
     /// The checks so far.
@@ -141,10 +159,22 @@ impl Search {
         self.stats.get()
     }
 
+    /// The resource and time limits of the next check: larger for the
+    /// first.
+    fn limits(&self) -> (u32, u32) {
+        if self.warm.get() { (RLIMIT, TIMEOUT_MS) } else { (FIRST_RLIMIT, FIRST_TIMEOUT_MS) }
+    }
+
     /// Checks the solver, counting the outcome.
     fn check(&self) -> SatResult {
+        let first = !self.warm.get();
         let start = Instant::now();
         let result = self.solver.check();
+        self.warm.set(true);
+        if first {
+            let (rlimit, ms) = self.limits();
+            set_limits(&self.solver, rlimit, ms);
+        }
         let mut stats = self.stats.get();
         stats.time += start.elapsed();
         match result {
@@ -209,37 +239,10 @@ impl Search {
         proven
     }
 
-    /// Adds `claim` to the constraints if it is consistent with them:
-    /// `Some(true)` if added, `Some(false)` if it contradicts them, and
-    /// `None` if that is undecided (it is then not added).
-    pub(crate) fn assume(&self, claim: &Bool) -> Option<bool> {
-        self.solver.push();
-        self.solver.assert(claim);
-        match self.check() {
-            SatResult::Sat => Some(true),
-            result => {
-                self.solver.pop(1);
-                (result == SatResult::Unsat).then_some(false)
-            }
-        }
-    }
-
-    /// The largest `N` with `x >= N`.
-    fn lower(&self, x: &Int) -> u64 {
-        smallest(0, CAP, |n| !self.proves(x.ge(Int::from_u64(n + 1))))
-    }
-
-    /// The smallest `N` with `x <= N`.
-    fn constant(&self, x: &Int) -> Option<u64> {
-        if !self.proves(x.le(Int::from_u64(CAP))) {
-            return None;
-        }
-        Some(smallest(0, CAP, |n| self.proves(x.le(Int::from_u64(n)))))
-    }
-
-    /// The proven range of `x`.
+    /// The proven range of `x`, a target of the search.
     fn range(&self, x: &Int) -> Bounds {
-        Bounds { lower: self.lower(x), upper: self.constant(x) }
+        let i = self.target(x);
+        self.range_of(i)
     }
 
     /// The proven range of `X`.
@@ -247,12 +250,41 @@ impl Search {
         self.range(&self.output)
     }
 
+    /// The index of target `x`, made one if it is not yet.
+    fn target(&self, x: &Int) -> usize {
+        let mut targets = self.targets.borrow_mut();
+        match targets.iter().position(|(t, _)| t == x) {
+            Some(i) => i,
+            None => {
+                targets.push((x.clone(), Known::default()));
+                targets.len() - 1
+            }
+        }
+    }
+
     /// The largest `N` with `x >= N` of target `i`, searched only where the
     /// checks so far leave it: from what is proven up to the least value seen.
-    fn lower_of(&self, i: usize) -> u64 {
+    ///
+    /// It gallops up from what is proven (`+1`, `+2`, `+4`, …), then
+    /// bisects below the first claim that fails. A proof is cheap, while a
+    /// refutation needs a model, which can take the whole timeout: a small
+    /// lower bound, the most common, costs about one failed check.
+    fn lower(&self, i: usize) -> u64 {
         let k = self.known(i);
-        let mut hi = [k.least, k.ceil, Some(CAP)].into_iter().flatten().min().unwrap_or(CAP);
-        let mut lo = k.floor.min(hi);
+        let top = [k.least, k.ceil, Some(CAP)].into_iter().flatten().min().unwrap_or(CAP);
+        let mut lo = k.floor.min(top);
+        let mut step = 1;
+        let mut hi = loop {
+            let n = (lo + step).min(top);
+            if n <= lo {
+                return lo;
+            }
+            if !self.proves_at_least(i, n) {
+                break self.known(i).least.map_or(n - 1, |l| l.min(n - 1)).max(lo);
+            }
+            lo = n;
+            step *= 2;
+        };
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if self.proves_at_least(i, mid + 1) {
@@ -266,8 +298,8 @@ impl Search {
 
     /// The smallest `N` with `x <= N` of target `i`, searched only where the
     /// checks so far leave it: from the greatest value seen up to what is
-    /// proven.
-    fn constant_of(&self, i: usize) -> Option<u64> {
+    /// proven. Searched before [`Self::lower`], which it caps.
+    fn upper(&self, i: usize) -> Option<u64> {
         if self.known(i).most.is_some_and(|m| m > CAP) {
             return None;
         }
@@ -288,8 +320,11 @@ impl Search {
         Some(hi)
     }
 
+    /// The proven range of target `i`: the upper bound first, whose proof
+    /// caps the lower bound's search.
     fn range_of(&self, i: usize) -> Bounds {
-        Bounds { lower: self.lower_of(i), upper: self.constant_of(i) }
+        let upper = self.upper(i);
+        Bounds { lower: self.lower(i), upper }
     }
 
     /// The proven range of each of `cards`, and of their sum. Each card is
@@ -325,34 +360,28 @@ impl Search {
     }
 }
 
-/// The smallest value in `lo..=hi` satisfying a monotone `pred` that holds at `hi`.
-fn smallest(mut lo: u64, mut hi: u64, pred: impl Fn(u64) -> bool) -> u64 {
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if pred(mid) {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    hi
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A search over the SMT-LIB `smt`.
+    fn over(smt: &str, root: &str) -> Search {
+        let solver = Solver::new();
+        solver.from_string(smt);
+        Search::new(&solver.get_assertions(), root)
+    }
 
     /// `plan` gives every card the range a search of it alone gives.
     fn plan_matches_lone_searches(smt: &str, vars: &[&str]) {
         let cards: Vec<Int> = vars.iter().map(|v| Int::new_const(*v)).collect();
         let same: Vec<Option<usize>> = (0..vars.len()).map(|i| i.checked_sub(1)).collect();
-        let (search, _) = Search::new(smt, vars[vars.len() - 1]);
+        let search = over(smt, vars[vars.len() - 1]);
         let (ranges, total) = search.plan(&cards, &same);
         for (v, r) in vars.iter().zip(&ranges) {
-            let (alone, _) = Search::new(smt, v);
+            let alone = over(smt, v);
             assert_eq!(*r, alone.bounds(), "{v}");
         }
-        let (alone, _) = Search::new(smt, vars[0]);
+        let alone = over(smt, vars[0]);
         assert_eq!(total, alone.range(&Int::add(&cards)), "total");
     }
 
@@ -371,5 +400,55 @@ mod tests {
             &format!("{decls} (assert (<= 0 a 10)) (assert (= (+ a b) 10)) (assert (>= b 0)) (assert (= c (- 10 a))) (assert (<= 0 d 1))"),
             &["a", "b", "c", "d"],
         );
+    }
+
+    fn bounds_of(smt: &str) -> Bounds {
+        over(&format!("(declare-const x Int) {smt}"), "x").bounds()
+    }
+
+    #[test]
+    fn lower_bounds_are_exact() {
+        for n in [0, 1, 7, 1_000] {
+            let b = bounds_of(&format!("(assert (<= {n} x 5000))"));
+            assert_eq!(b, Bounds { lower: n, upper: Some(5000) });
+        }
+        assert_eq!(bounds_of("(assert (= x 5))"), Bounds { lower: 5, upper: Some(5) });
+    }
+
+    #[test]
+    fn lower_bound_without_an_upper_one() {
+        assert_eq!(bounds_of("(assert (>= x 7))"), Bounds { lower: 7, upper: None });
+    }
+
+    /// Once the upper bound is searched, a lower bound of 0 costs at most
+    /// two checks.
+    #[test]
+    fn small_lower_bound_is_cheap() {
+        let search = over("(declare-const x Int) (assert (<= 0 x 5000))", "x");
+        let i = search.target(&Int::new_const("x"));
+        assert_eq!(search.upper(i), Some(5000));
+        let before = search.stats().checks();
+        assert_eq!(search.lower(i), 0);
+        assert!(search.stats().checks() - before <= 2, "{:?}", search.stats());
+    }
+
+    /// The first check, which loads the constraints, gets the larger
+    /// limits; the rest the usual ones.
+    #[test]
+    fn first_check_gets_more_time() {
+        let search = over("(declare-const x Int) (assert (<= 0 x 5))", "x");
+        assert_eq!(search.limits(), (FIRST_RLIMIT, FIRST_TIMEOUT_MS));
+        search.check();
+        assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
+        search.check();
+        assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
+    }
+
+    /// Z3 is the pinned release, not an older system library: older ones
+    /// prove far slower.
+    #[test]
+    fn z3_is_recent() {
+        let v: Vec<u32> = z3::full_version().split('.').take(2).map(|n| n.parse().unwrap()).collect();
+        assert!(v >= vec![4, 13], "Z3 {}", z3::full_version());
     }
 }

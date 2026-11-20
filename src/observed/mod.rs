@@ -42,7 +42,7 @@ pub struct ObservedPlan {
     pub nodes: Vec<ONode>,
     pub root: usize,
     /// Whether each operator's `rows` were counted. A plan read from a plain
-    /// `EXPLAIN` was not run: its rows are 0, and it gives no facts.
+    /// `EXPLAIN` was not run: its rows are 0, and it pins nothing.
     pub counted: bool,
 }
 
@@ -309,9 +309,8 @@ pub(crate) fn qualified(relation: &str, name: &str) -> Expr {
 /// so a literal takes its column's type (`l_quantity < 10.00` reads
 /// `Decimal128(10.00,15,2)`, as in an optimized plan), then simplified
 /// (constants folded). `schema` gives the columns of each relation: an
-/// instance's table's, or an aggregate's values. Facts read off any engine's
-/// plan, and the plans they are matched against, pass through here, so that
-/// one predicate reads one way. An expression over a relation without a
+/// instance's table's, or an aggregate's values. Every engine's plan passes
+/// through here, so that one predicate reads one way. An expression over a relation without a
 /// schema does not type-check, and is only simplified.
 pub(crate) fn normalize(e: Expr, schema: &dyn Fn(&str) -> Option<SchemaRef>) -> Expr {
     let mut columns = DFSchema::empty();

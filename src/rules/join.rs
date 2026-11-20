@@ -2,12 +2,14 @@
 
 use datafusion::common::{Column, JoinType, NullEquality};
 use datafusion::logical_expr::Expr;
-use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
+use datafusion::logical_expr::logical_plan::{Join, LogicalPlan};
 use z3::ast::Int;
 
-use super::{aligned, child_column, col, column_index, exact_index, key_column, strip_alias};
-use crate::analysis::{Analyzer, LinkKind, Rel, Rows, ScanKind, int, min};
+use super::op_output::{columns, ranges, with_card};
+use super::{aligned, child_column, col, exact_index, key_column, passed_rows, strip_alias};
+use crate::analysis::{Analyzer, OpOutput, SubsetBounds, ScanKind, int, min};
 use crate::domain::Facts;
+use crate::properties::{same, within};
 
 impl<'a> Analyzer<'a> {
     /// `Join` of every kind. Notation as in [the module](super#notation).
@@ -21,13 +23,13 @@ impl<'a> Analyzer<'a> {
     ///     ≤ inner + l`; right: the mirror;
     ///   - full: `X ≥ l`, `X ≥ r`, `X ≤ inner + l + r`, and `≤ l + r` with a
     ///     unique key;
-    ///   - semi and anti: a [`subset`](Self::subset) of the kept side; on a
+    ///   - semi and anti: a [`subset`](super::op_output) of the kept side; on a
     ///     foreign key from it, semi `X =` it and anti `X = 0`;
-    ///   - mark: the [`same rows`](Self::same_rows) as the kept side.
+    ///   - mark: the [`same rows`](super::op_output) as the kept side.
     ///
     ///   Outer and anti joins are also stated in terms of their auxiliary
     ///   joins ([`Self::join_parts`]). Columns ([`Self::join_sides`]): a side
-    ///   no row pads [holds](Self::wider) its rows, a preserved side every
+    ///   no row pads [holds](super::op_output) its rows, a preserved side every
     ///   value; a padded side's `ndv ≤` its own `+ 1` (NULL), within its
     ///   range; a semi join's equi-key holds the other side's key. On an
     ///   inner join, the two equi-keys' `ndv` are equal, and a side on a
@@ -39,19 +41,20 @@ impl<'a> Analyzer<'a> {
     ///   once if each matches exactly once (inner, on a foreign key from it)
     ///   or at most once (outer, on the other side's unique key), so a
     ///   foreign key to such a side reaches every row of its table.
-    pub fn join(&mut self, plan: &LogicalPlan, join: &Join) -> Rel {
+    pub fn join(&mut self, plan: &LogicalPlan, join: &Join) -> OpOutput {
         let l = self.visit(&join.left);
         let r = self.visit(&join.right);
         let equi = !join.on.is_empty();
         let cross = !equi && join.filter.is_none();
         let (lk, rk): (Vec<&Expr>, Vec<&Expr>) = join.on.iter().map(|(a, b)| (a, b)).unzip();
-        // A unique key on one side means each row of the other side matches at
-        // most once.
-        let ru = equi && self.key_is_unique(join, &join.right, &rk);
-        let lu = equi && self.key_is_unique(join, &join.left, &lk);
-        // A foreign key from one side to every row of the other's table: each
-        // of the first side's rows matches exactly once.
-        let (fl, fr) = self.foreign_key(join);
+        let (fk_left, fk_right) = self.foreign_key(join);
+        let keys = JoinKeys {
+            right_unique: equi && self.key_is_unique(join, &join.right, &rk),
+            left_unique: equi && self.key_is_unique(join, &join.left, &lk),
+            fk_left,
+            fk_right,
+        };
+        let JoinKeys { right_unique: ru, left_unique: lu, fk_left: fl, fk_right: fr } = keys;
         let kind = format!(
             "{:?}{}Join",
             join.join_type,
@@ -126,17 +129,17 @@ impl<'a> Analyzer<'a> {
             | JoinType::LeftMark
             | JoinType::RightMark => {}
         }
-        self.join_parts(join, &o, &l, &r, &inner, (ru, lu, fl, fr));
+        self.join_parts(join, &o, &l, &r, &inner, keys);
         self.join_overlap(join, &o, &l, &r);
         self.join_sides(join, &o, &l, &r);
-        self.join_ndv_kept(join, &o, &l, &r, (fl, fr));
+        self.join_ndv_kept(join, &o, &l, &r, keys);
         self.join_ranges(plan, join, &o);
         o.facts = join_facts(plan, join, &l.facts, &r.facts);
         // Semi, anti and mark joins keep a subset of one side's rows.
-        o.rows = match join.join_type {
-            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.rows.clone(),
-            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.rows.clone(),
-            _ => Rows::default(),
+        o.subset_bounds = match join.join_type {
+            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.subset_bounds.clone(),
+            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.subset_bounds.clone(),
+            _ => SubsetBounds::default(),
         };
         // On an outer join, a padded-side column that is never NULL on matched
         // rows is NULL exactly on the padded rows: at most the other side's
@@ -156,23 +159,16 @@ impl<'a> Analyzer<'a> {
             let values = if full { Int::add(&[&inner, &r.card]) } else { inner.clone() };
             let keys = if full { &[][..] } else { &rk[..] };
             for c in never_null_when_matched(join, &join.right, &r.facts, keys) {
-                o.rows.nulls.push((col(plan, nl + c), l.card.clone(), values.clone()));
+                o.subset_bounds.nulls.push((col(plan, nl + c), l.card.clone(), values.clone()));
             }
         }
         if pad_left {
             let values = if full { Int::add(&[&inner, &l.card]) } else { inner.clone() };
             let keys = if full { &[][..] } else { &lk[..] };
             for c in never_null_when_matched(join, &join.left, &l.facts, keys) {
-                o.rows.nulls.push((col(plan, c), r.card.clone(), values.clone()));
+                o.subset_bounds.nulls.push((col(plan, c), r.card.clone(), values.clone()));
             }
         }
-        let width = plan.schema().fields().len();
-        o.origin = match join.join_type {
-            JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark => l.origin.as_ref(),
-            JoinType::RightSemi | JoinType::RightAnti | JoinType::RightMark => r.origin.as_ref(),
-            _ => None,
-        }
-        .map(|x| x.with_width(width).narrow(&o.facts, plan.schema()));
         o
     }
 
@@ -186,15 +182,12 @@ impl<'a> Analyzer<'a> {
     ///   NULL-aware), `r − m_r` (right anti). Each `m ≤` its side and `≤ i`,
     ///   `i ≥ 1 ⇒ m ≥ 1`; `m = i` if the other side's key is unique, and
     ///   `m = i =` its side on a foreign key from it.
-    ///
-    /// `keys` says whether the right and left keys are unique, and whether a
-    /// foreign key goes from the left or the right side to all of the other.
-    pub fn join_parts(&mut self, join: &Join, o: &Rel, l: &Rel, r: &Rel, inner: &Int, keys: (bool, bool, bool, bool)) {
+    pub fn join_parts(&mut self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput, inner: &Int, keys: JoinKeys) {
         let parts = auxiliary_joins(join);
         if parts.is_empty() {
             return;
         }
-        let (ru, lu, fl, fr) = keys;
+        let JoinKeys { right_unique: ru, left_unique: lu, fk_left: fl, fk_right: fr } = keys;
         let name = self.name_of(&o.card);
         let mut count = |suffix: &str| {
             parts.iter().any(|(s, _)| *s == suffix).then(|| self.new_var(format!("{name}_{suffix}")))
@@ -242,18 +235,15 @@ impl<'a> Analyzer<'a> {
     /// (inclusion–exclusion), less one per side whose key may be NULL. An anti
     /// join (not NULL-aware) keeps each row whose key the other side lacks:
     /// `ndv ≥ ndv_l − 1 − ndv_r`.
-    pub fn join_overlap(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    pub fn join_overlap(&self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput) {
         if join.on.len() != 1 || join.null_equality == NullEquality::NullEqualsNull {
             return;
         }
         let (a, b) = &join.on[0];
-        let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { return };
-        if join.left.schema().field(ia).data_type().is_floating() || join.right.schema().field(ib).data_type().is_floating() {
-            return;
-        }
-        let non_null = |side: &LogicalPlan, rel: &Rel, i: usize| {
-            let nullable = !rel.facts.dom(&col(side, i), side.schema()).never_null();
-            &rel.ndv[i] - int(nullable as u64)
+        let Some((ia, ib)) = exact_pair(join, a, b) else { return };
+        let non_null = |side: &LogicalPlan, out: &OpOutput, i: usize| {
+            let nullable = !out.facts.dom(&col(side, i), side.schema()).never_null();
+            &out.ndv[i] - int(nullable as u64)
         };
         let (vl, vr) = (non_null(&join.left, l, ia), non_null(&join.right, r, ib));
         let out = match join.join_type {
@@ -275,22 +265,19 @@ impl<'a> Analyzer<'a> {
     /// exactly once (a foreign key to all of the other's table) keeps every
     /// value of its columns, `ndv ≥` its own; and each pair of equi-keys
     /// holds equal values on every row, so equal `ndv`.
-    pub fn join_ndv_kept(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel, (fl, fr): (bool, bool)) {
+    pub fn join_ndv_kept(&self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput, keys: JoinKeys) {
         if join.join_type != JoinType::Inner {
             return;
         }
         let nl = l.ndv.len();
-        if fl {
+        if keys.fk_left {
             self.kept(o, l, 0);
         }
-        if fr {
+        if keys.fk_right {
             self.kept(o, r, nl);
         }
-        for (a, b) in &join.on {
-            let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { continue };
-            if !join.left.schema().field(ia).data_type().is_floating() && !join.right.schema().field(ib).data_type().is_floating() {
-                self.assert(o.ndv[ia].eq(&o.ndv[nl + ib]));
-            }
+        for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
+            self.assert(o.ndv[ia].eq(&o.ndv[nl + ib]));
         }
     }
 
@@ -382,14 +369,7 @@ impl<'a> Analyzer<'a> {
                 let key = a.group_expr.get(i)?;
                 self.stored_column(&a.input, &key_column(&a.input, key)?, path)
             }
-            LogicalPlan::Filter(_)
-            | LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::Window(_)
-            | LogicalPlan::Distinct(Distinct::All(_)) => through(plan.inputs()[0], path),
+            p if let Some((input, _)) = passed_rows(p) => through(input, path),
             // A padded side's columns may be NULL.
             LogicalPlan::Join(join) => {
                 let nl = join.left.schema().fields().len();
@@ -421,11 +401,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             LogicalPlan::Projection(p) => self.every_row(&p.input, &key_column(&p.input, &p.expr[i])?),
-            LogicalPlan::Sort(s) if s.fetch.is_none() => through(&s.input),
-            LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::Window(_) => through(plan.inputs()[0]),
+            p if let Some((input, true)) = passed_rows(p) => through(input),
             // A side whose rows each match exactly once (a foreign key to all
             // of the other's table), or on an outer join at most once, keeps
             // each of them once.
@@ -452,13 +428,12 @@ impl<'a> Analyzer<'a> {
     /// are the same, and so are their ranges; its filter orders its columns'
     /// ([`Self::range_pairs`]). Disjoint ranges leave no row with a value, so
     /// none at all.
-    pub fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &Rel) {
+    pub fn join_ranges(&self, plan: &LogicalPlan, join: &Join, o: &OpOutput) {
         if join.join_type != JoinType::Inner {
             return;
         }
         let nl = join.left.schema().fields().len();
-        for (a, b) in &join.on {
-            let (Some(ia), Some(ib)) = (column_index(&join.left, a), column_index(&join.right, b)) else { continue };
+        for (ia, ib) in join.on.iter().filter_map(|(a, b)| exact_pair(join, a, b)) {
             if let (Some(a_lo), Some(a_hi), Some(b_lo), Some(b_hi)) = (&o.min[ia], &o.max[ia], &o.min[nl + ib], &o.max[nl + ib])
                 && o.unit[ia] == o.unit[nl + ib]
             {
@@ -472,37 +447,41 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Part of [`Self::join`]: what a join's output columns hold of its
-    /// inputs'. A side no row pads [holds](Self::wider) its rows, and a
+    /// inputs'. A side no row pads [holds](super::op_output) its rows, and a
     /// preserved side (left of a left join) every value. A padded side's
     /// rows, or NULL: `ndv ≤` its own `+ 1`, values within its range. A semi
-    /// or anti join is a [`subset`](Self::subset) of the kept side, a mark
-    /// join the [same rows](Self::same_rows), and a semi join's equi-key
+    /// or anti join is a [`subset`](super::op_output) of the kept side, a mark
+    /// join the [same rows](super::op_output), and a semi join's equi-key
     /// holds the other side's key (not floats, merged by SQL equality).
-    pub fn join_sides(&self, join: &Join, o: &Rel, l: &Rel, r: &Rel) {
+    pub fn join_sides(&self, join: &Join, o: &OpOutput, l: &OpOutput, r: &OpOutput) {
         let (nl, nr) = (l.ndv.len(), r.ndv.len());
         match join.join_type {
             JoinType::Inner => {
-                self.link(o, LinkKind::Wider, l, &aligned(nl, 0));
-                self.link(o, LinkKind::Wider, r, &aligned(nr, nl));
+                self.assert_property("wider", within(&columns(o, l, &aligned(nl, 0))));
+                self.assert_property("wider", within(&columns(o, r, &aligned(nr, nl))));
             }
             JoinType::Left => {
-                self.link(o, LinkKind::Wider, l, &aligned(nl, 0));
+                self.assert_property("wider", within(&columns(o, l, &aligned(nl, 0))));
                 self.kept(o, l, 0);
                 self.padded(o, r, nl);
             }
             JoinType::Right => {
                 self.padded(o, l, 0);
-                self.link(o, LinkKind::Wider, r, &aligned(nr, nl));
+                self.assert_property("wider", within(&columns(o, r, &aligned(nr, nl))));
                 self.kept(o, r, nl);
             }
             JoinType::Full => {
                 self.padded(o, l, 0);
                 self.padded(o, r, nl);
             }
-            JoinType::LeftSemi | JoinType::LeftAnti => self.link(o, LinkKind::Subset, l, &aligned(nl, 0)),
-            JoinType::RightSemi | JoinType::RightAnti => self.link(o, LinkKind::Subset, r, &aligned(nr, 0)),
-            JoinType::LeftMark => self.link(o, LinkKind::SameRows, l, &aligned(nl, 0)),
-            JoinType::RightMark => self.link(o, LinkKind::SameRows, r, &aligned(nr, 0)),
+            JoinType::LeftSemi | JoinType::LeftAnti => {
+                self.assert_property("subset", within(&with_card(o, l, &aligned(nl, 0))))
+            }
+            JoinType::RightSemi | JoinType::RightAnti => {
+                self.assert_property("subset", within(&with_card(o, r, &aligned(nr, 0))))
+            }
+            JoinType::LeftMark => self.assert_property("same rows", same(&with_card(o, l, &aligned(nl, 0)))),
+            JoinType::RightMark => self.assert_property("same rows", same(&with_card(o, r, &aligned(nr, 0)))),
         }
         // Matched equi-key values exist on both sides.
         let semi = match join.join_type {
@@ -513,17 +492,15 @@ impl<'a> Analyzer<'a> {
         let keys: Vec<(usize, usize)> = join
             .on
             .iter()
-            .filter_map(|(a, b)| {
-                let (ia, ib) = (exact_index(&join.left, a)?, exact_index(&join.right, b)?);
-                Some(if semi { (ia, ib) } else { (ib, ia) })
-            })
+            .filter_map(|(a, b)| exact_pair(join, a, b))
+            .map(|(ia, ib)| if semi { (ia, ib) } else { (ib, ia) })
             .collect();
-        self.link(o, LinkKind::Wider, if semi { r } else { l }, &keys);
+        self.assert_property("wider", within(&columns(o, if semi { r } else { l }, &keys)));
     }
 
     /// `side`'s columns, from `o`'s position `at` on, keep every value of
     /// `side`'s: each of its rows is one of `o`'s.
-    fn kept(&self, o: &Rel, side: &Rel, at: usize) {
+    fn kept(&self, o: &OpOutput, side: &OpOutput, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
             self.assert(o.ndv[at + i].ge(v));
         }
@@ -531,12 +508,32 @@ impl<'a> Analyzer<'a> {
 
     /// `side`'s columns, from `o`'s position `at` on, hold a row of `side`
     /// or NULL.
-    fn padded(&self, o: &Rel, side: &Rel, at: usize) {
+    fn padded(&self, o: &OpOutput, side: &OpOutput, at: usize) {
         for (i, v) in side.ndv.iter().enumerate() {
             self.assert(o.ndv[at + i].le(v + int(1)));
-            self.within(o, at + i, side, i);
         }
+        self.assert_property("within", within(&ranges(o, side, &aligned(side.ndv.len(), at))));
     }
+}
+
+/// What a join's keys say of how its rows match.
+#[derive(Debug, Clone, Copy)]
+pub struct JoinKeys {
+    /// The right key is unique: each left row matches at most once.
+    pub right_unique: bool,
+    /// The left key is unique: each right row matches at most once.
+    pub left_unique: bool,
+    /// The keys are a foreign key from the left to every row of the right
+    /// side's table: each left row matches exactly once.
+    pub fk_left: bool,
+    /// The mirror: each right row matches exactly once.
+    pub fk_right: bool,
+}
+
+/// The positions of equi-key pair `a = b` in `join`'s left and right
+/// inputs, if both are columns and not floats ([`exact_index`]).
+pub(crate) fn exact_pair(join: &Join, a: &Expr, b: &Expr) -> Option<(usize, usize)> {
+    Some((exact_index(&join.left, a)?, exact_index(&join.right, b)?))
 }
 
 /// Positions of `side`'s columns that are never NULL on a row matched by
@@ -547,7 +544,7 @@ pub(crate) fn never_null_when_matched(join: &Join, side: &LogicalPlan, facts: &F
     let keys_non_null = join.null_equality != NullEquality::NullEqualsNull;
     (0..schema.fields().len())
         .filter(|&i| {
-            let c = Expr::Column(Column::from(schema.qualified_field(i)));
+            let c = super::field_col(schema, i);
             let key = keys_non_null && keys.iter().any(|k| strip_alias(k) == &c);
             key || facts.dom(&c, schema).never_null()
         })

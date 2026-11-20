@@ -3,7 +3,7 @@
 
 mod common;
 
-use cardinal::{Analysis, Bounds, Options, Proof, ProofStatus, Trace, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, Options, Proof, ProofStatus, Trace};
 use datafusion::prelude::SessionContext;
 
 /// `users(id PRIMARY KEY, age)` and `orders(id PRIMARY KEY, user_id)`,
@@ -19,9 +19,13 @@ async fn shop() -> SessionContext {
     ctx
 }
 
-async fn traced(sql: &str) -> Analysis {
+async fn traced_query(sql: &str) -> Builder<'static> {
     let options = Options { trace: true, ..Default::default() };
-    analyze_sql(&shop().await, sql, options).await.unwrap()
+    Analysis::sql(&shop().await, sql).await.unwrap().options(options)
+}
+
+async fn traced(sql: &str) -> Analysis {
+    traced_query(sql).await.build().unwrap()
 }
 
 fn node_of<'a>(t: &'a Trace, kind: &str) -> usize {
@@ -30,7 +34,7 @@ fn node_of<'a>(t: &'a Trace, kind: &str) -> usize {
 
 #[tokio::test]
 async fn untraced_analysis_has_no_trace() {
-    let a = analyze_sql(&shop().await, "SELECT * FROM users", Options::default()).await.unwrap();
+    let a = Analysis::sql(&shop().await, "SELECT * FROM users").await.unwrap().build().unwrap();
     assert!(a.trace.is_none());
     assert!(a.explain(&Bounds::default()).is_err());
 }
@@ -41,7 +45,7 @@ async fn every_constraint_has_a_source_and_every_node_constraints() {
     let t = a.trace.as_ref().unwrap();
     for c in &t.constraints {
         assert!(c.node.is_none_or(|n| n < t.nodes.len()), "{c:?}");
-        let sources = ["src/analysis.rs:", "src/axioms.rs:", "src/keys.rs:", "src/rules/"];
+        let sources = ["src/analysis.rs:", "src/link.rs:", "src/keys.rs:", "src/rules/"];
         assert!(sources.iter().any(|s| c.source.contains(s)), "{c:?}");
         assert!(!c.function.is_empty(), "{c:?}");
         assert!(!c.vars.is_empty(), "{c:?}");
@@ -71,8 +75,8 @@ async fn trace_round_trips_through_json() {
 
 /// `sql`, traced, with `users` holding 100 rows and `orders` 300.
 async fn traced_sized(sql: &str) -> Analysis {
-    let a = traced(sql).await;
-    a.with_facts(&common::table_sizes(&[("users", 100), ("orders", 300)])).unwrap()
+    let q = traced_query(sql).await;
+    q.with_cardinalities([("users", 100), ("orders", 300)].iter().cloned()).build().unwrap()
 }
 
 /// Whether `proof`'s core has a constraint that a fact gave.
@@ -126,4 +130,15 @@ async fn unbounded_has_nothing_to_prove() {
     let bounds = a.bounds().unwrap();
     assert_eq!(bounds.upper, None);
     assert!(a.explain(&bounds).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn link_assertions_are_traced() {
+    let a = traced("SELECT id FROM users WHERE age < 18 UNION ALL SELECT id FROM users WHERE age >= 18").await;
+    let t = a.trace.as_ref().unwrap();
+    let linked: Vec<&str> =
+        t.constraints.iter().filter(|c| c.source.contains("src/link.rs:")).map(|c| c.function.as_str()).collect();
+    for f in ["disjoint link", "eq link", "subset link"] {
+        assert!(linked.contains(&f), "no {f} in {linked:?}");
+    }
 }

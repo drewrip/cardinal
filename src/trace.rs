@@ -8,6 +8,7 @@
 //! rules that give it.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::panic::Location;
 
 use serde::{Deserialize, Serialize};
@@ -16,13 +17,14 @@ use z3::{Params, SatResult, Solver};
 
 use crate::analysis::{Analyzer, Node};
 use crate::bounds::Bounds;
-use crate::facts::Fact;
 use crate::{Error, Result};
 
 /// Every constraint of an analysis, with where each comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trace {
     /// Every plan node, children before parents; a node's id is its index.
+    /// The query's come first, then each reference plan's
+    /// ([`TraceNode::plan`]).
     pub nodes: Vec<TraceNode>,
     /// Every constraint, in the order Z3 was given them; a constraint's id is
     /// its index.
@@ -51,6 +53,10 @@ pub struct TraceNode {
     pub inputs: Vec<usize>,
     /// For a scan with pushed-down filters: the unfiltered scan's variable.
     pub raw_var: Option<String>,
+    /// The reference plan the node is of ([`crate::Builder::with_plans`]);
+    /// `None` for the query's own.
+    #[serde(default)]
+    pub plan: Option<String>,
 }
 
 /// One constraint given to Z3.
@@ -62,7 +68,7 @@ pub struct Constraint {
     /// The constraint in infix notation, see [`infix`].
     pub infix: String,
     /// The node the constraint describes, or `None` for one over several
-    /// relations of a table (partitions of its rows).
+    /// nodes, or of a table's size.
     pub node: Option<usize>,
     /// The analyzer's source line that made the constraint, as `file:line`.
     pub source: String,
@@ -72,40 +78,38 @@ pub struct Constraint {
     pub code: String,
     /// The variables the constraint mentions.
     pub vars: Vec<String>,
-    /// For a constraint a fact gave ([`crate::Analysis::with_facts`]): which, and
-    /// what it says. `None` for the analyzer's own.
+    /// For a table's given row count
+    /// ([`crate::Builder::with_cardinalities`]), or a reference plan's count
+    /// ([`crate::Builder::with_plans`]): which, and what it says. `None` for
+    /// the analyzer's own.
     #[serde(default)]
     pub fact: Option<FactInfo>,
 }
 
-/// What a fact constraint asserts, and the facts it is read from.
+/// What a given or observed count asserts, and what it is read from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactInfo {
-    /// What kind of claim it is: `pinned rows`, `pinned ndv`, `ndv cap`,
-    /// `range floor`, `range cap`, `row cap` or `floor`.
+    /// What kind of claim it is: `given rows` of a table's row count, or
+    /// `observed rows` or `observed floor` of a reference plan.
     pub source: String,
-    /// The facts it is read from.
+    /// What it is read from.
     pub facts: Vec<FactRef>,
     /// The value it holds its variable to, e.g. `= 6001215` or `<= 50`.
     pub value: String,
 }
 
-/// One fact, by its text, and where it was read.
+/// One count, by its text, and where it was read: for a reference plan's
+/// count, `|plan#operator engine operator|`, and `plan#operator`; for a
+/// table's given count, `|table|`, and `given`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactRef {
-    /// The fact without its value, e.g. `|lineitem|`.
+    /// The count without its value, e.g. `|lineitem|`.
     pub text: String,
-    /// Each of the fact's [`crate::facts::Origin`]s, as text.
+    /// Where it was read, as text.
     pub origins: Vec<String>,
 }
 
-impl FactRef {
-    pub(crate) fn of(f: &Fact) -> FactRef {
-        FactRef { text: f.kind.to_string(), origins: f.origins.iter().map(|o| o.to_string()).collect() }
-    }
-}
-
-/// A claim a fact gave, as [`crate::Analysis::with_facts`] asserts it.
+/// A claim a given or observed count gave, as asserted.
 pub(crate) struct FactClaim {
     pub claim: Bool,
     /// The plan node whose variable it holds.
@@ -150,11 +154,12 @@ const SHRINK_MAX: usize = 300;
 /// lines that made each one.
 const SOURCES: &[(&str, &str)] = &[
     ("analysis.rs", include_str!("analysis.rs")),
-    ("axioms.rs", include_str!("axioms.rs")),
+    ("link.rs", include_str!("link.rs")),
     ("keys.rs", include_str!("keys.rs")),
     ("rules/mod.rs", include_str!("rules/mod.rs")),
     ("rules/aggregate.rs", include_str!("rules/aggregate.rs")),
     ("rules/join.rs", include_str!("rules/join.rs")),
+    ("rules/op_output.rs", include_str!("rules/op_output.rs")),
 ];
 
 impl Trace {
@@ -164,6 +169,7 @@ impl Trace {
         root: &str,
         scans: &[(String, String)],
         tables: &[(String, String)],
+        plans: &[(Range<usize>, String)],
     ) -> Trace {
         let declarations: String = constraints
             .lines()
@@ -171,7 +177,12 @@ impl Trace {
             .map(|l| format!("{l}\n"))
             .collect();
         let declared = declared(&declarations);
-        let nodes = a.nodes.iter().enumerate().map(|(id, n)| node(id, n)).collect();
+        let nodes = a
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, n)| TraceNode { plan: plans.iter().find(|(r, _)| r.contains(&id)).map(|(_, p)| p.clone()), ..node(id, n) })
+            .collect();
         let sources: Vec<(&str, Vec<&str>)> = SOURCES.iter().map(|(p, s)| (*p, s.lines().collect())).collect();
         let constraints = a
             .log
@@ -234,7 +245,8 @@ impl Trace {
         trace
     }
 
-    /// This trace with only the analyzer's constraints, none from facts.
+    /// This trace with only the analyzer's constraints, none from row counts or
+    /// reference plans' counts.
     pub fn without_facts(&self) -> Trace {
         let mut trace = self.clone();
         trace.constraints.retain(|c| c.fact.is_none());
@@ -406,7 +418,8 @@ fn node(id: usize, n: &Node) -> TraceNode {
         var: n.var.clone(),
         columns,
         inputs: n.inputs.clone(),
-        raw_var: n.raw_scan.as_ref().map(|(v, _, _)| v.clone()),
+        raw_var: n.raw_scan.as_ref().map(|r| r.var.clone()),
+        plan: None,
     }
 }
 

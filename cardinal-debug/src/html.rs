@@ -1,22 +1,25 @@
 //! A dump as one self-contained HTML page: the result's bounds, the plan tree
-//! with every operator's bounds beside its constraints, linked both ways, and
-//! a selector that picks out the constraints each proof needs. With facts,
-//! the page can switch to the analysis without them.
+//! (and the reference plans' parts) with every operator's bounds beside its
+//! constraints, linked both ways, a selector that picks out the constraints
+//! each proof needs. With reference plans or row counts, the page can switch to
+//! the analysis without them.
 
 use serde_json::json;
 
 use crate::{Dump, column_names};
 
 /// The page for `dump`, opened on proof `proof` if given, and without its
-/// facts if `without_facts`.
-pub fn render(dump: &Dump, proof: Option<&str>, without_facts: bool) -> String {
-    let trace = dump.facts.as_ref().map_or(&dump.trace, |f| &f.trace);
+/// reference plans and facts if `plain`.
+pub fn render(dump: &Dump, proof: Option<&str>, plain: bool) -> String {
+    let trace = dump.informed.as_ref().map_or(&dump.trace, |f| &f.trace);
+    let mut names = column_names(&dump.trace);
+    names.extend(column_names(trace));
     let data = json!({
         "dump": dump,
-        "names": column_names(trace),
-        "smt2": trace.to_smt2(),
+        "names": names,
+        "smt2": { "plain": dump.trace.to_smt2(), "informed": dump.informed.as_ref().map(|f| f.trace.to_smt2()) },
         "proof": proof,
-        "withoutFacts": without_facts,
+        "plain": plain,
     });
     // Keep `</script>` in the data from closing the tag it sits in.
     let data = data.to_string().replace("</", "<\\/");
@@ -69,7 +72,6 @@ details pre { padding: 8px; background: var(--sub); border: 1px solid var(--rule
 .note { color: var(--muted); }
 .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--open); }
 [hidden] { display: none !important; }
-body.nofacts .fm { display: none; }
 
 /* Bounds: a closed range in bold, one with no upper end in amber. */
 .bd { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-weight: 600; white-space: nowrap; }
@@ -103,7 +105,6 @@ table.proofs .status { font-weight: 600; }
 table.facts { margin-top: 2px; }
 table.facts th, table.facts td { padding: 3px 12px 3px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; overflow-wrap: anywhere; }
 table.facts thead th { border-bottom: 1px solid var(--rule); font-size: 12px; font-weight: 500; }
-#conflicts-box { margin-top: 8px; color: var(--open); }
 
 /* Toolbar */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 16px;
@@ -192,8 +193,8 @@ dl.notation dd { margin: 0; }
         <dt>|t|, T{n}_{t}</dt><dd>Rows in base table t.</dd>
         <dt>op{n}_{Kind}</dt><dd>Rows output by plan node n.</dd>
         <dt>op{n}_{Kind}[col]</dt><dd>Distinct values of column col in node n's output (NULL counts as one).</dd>
-        <dt>part{n}</dt><dd>Rows of a table shared by relations whose rows are disjoint.</dd>
-        <dt>◆</dt><dd>A constraint a fact gave, or a node with one.</dd>
+        <dt>part{n}</dt><dd>Rows of a table shared by op outputs whose rows are disjoint.</dd>
+        <dt>◆</dt><dd>A constraint a fact or a reference plan's count (a pin) gave, or a node with one.</dd>
         <dt>≥ n</dt><dd>No upper bound was proven.</dd>
       </dl>
     </details>
@@ -210,18 +211,15 @@ dl.notation dd { margin: 0; }
 </section>
 
 <section id="facts" hidden>
-  <details><summary>Facts used: <span id="facts-n"></span></summary>
+  <details><summary>Pins and row counts used: <span id="facts-n"></span></summary>
     <table class="facts"><thead><tr><th>Kind</th><th>Claim</th><th>From facts</th><th>Read off</th></tr></thead><tbody id="facts-used"></tbody></table>
-  </details>
-  <details id="conflicts-box" hidden open><summary class="warn">Facts left out for contradicting the constraints: <span id="conflicts-n"></span></summary>
-    <table class="facts"><tbody id="conflicts"></tbody></table>
   </details>
 </section>
 
 <div class="toolbar">
   <input type="search" id="search" placeholder="Filter constraints…" aria-label="Filter constraints">
   <label title="Show only the constraints the selected proof needs"><input type="checkbox" id="only"> Only needed</label>
-  <label id="hide-label" hidden title="Show the analysis as if no facts were given"><input type="checkbox" id="hide"> Without facts</label>
+  <label id="hide-label" hidden title="Show the analysis as if no reference plans or facts were given"><input type="checkbox" id="hide"> Plain</label>
   <span class="count" id="count"></span>
   <button id="copy">Copy SMT-LIB</button>
   <button id="save">Save .smt2</button>
@@ -246,385 +244,386 @@ dl.notation dd { margin: 0; }
 <script>
 (() => {
   const D = JSON.parse(document.getElementById('data').textContent);
-  const dump = D.dump, F = dump.facts, t = F ? F.trace : dump.trace, names = D.names;
-  // The proofs to select: with facts if they were proven, else the base
-  // ones, whose constraints come first in the trace with facts too.
-  const compare = !!(F && F.explained);
-  const proofs = compare ? F.proofs : dump.proofs;
-  const baseOf = {};
-  if (compare) F.proofs.forEach((p, i) => { if (F.base_proofs[i]) baseOf[p.name] = F.base_proofs[i]; });
-  const isFact = c => !!c.fact;
-  const $ = id => document.getElementById(id);
-  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-  const statusOf = p => typeof p.status === 'string' ? p.status : 'Unknown';
-  const hiding = () => !!F && $('hide').checked;
+  // The page as written, to mount again on switching views.
+  const ORIGINAL = document.body.innerHTML;
+  let ac = null;
 
-  // A bound, compactly: "= 60,175", "≤ 25", "3 – 25", or "≥ 100" when no
-  // upper end was proven.
-  const num = n => Number(n).toLocaleString('en-US');
-  function boundText(s) {
-    if (!s) return { text: '—', open: true };
-    let m;
-    if ((m = s.match(/^X = (\d+)$/))) return { text: '= ' + num(m[1]), open: false };
-    if ((m = s.match(/^(\d+) <= X <= (\d+)$/))) return { text: m[1] === '0' ? '≤ ' + num(m[2]) : `${num(m[1])} – ${num(m[2])}`, open: false };
-    if ((m = s.match(/^X <= (\d+)$/))) return { text: '≤ ' + num(m[1]), open: false };
-    if ((m = s.match(/^X >= (\d+)$/))) return { text: '≥ ' + num(m[1]), open: true };
-    return { text: s, open: !/<=|=/.test(s) };
-  }
-  function setBound(e, s, other) {
-    const b = boundText(s);
-    e.textContent = b.text;
-    e.classList.toggle('open', b.open);
-    e.title = (s ?? 'not computed') + (other && other !== s ? `\n${hiding() ? 'with' : 'without'} facts: ${other}` : '');
-  }
-  const bd = () => el('span', 'bd');
+  // Mounts the page: plain (without reference plans and facts) or informed;
+  // `keep` carries the proof selected and the filters over.
+  function mount(plain, keep) {
+    if (ac) { ac.abort(); document.body.innerHTML = ORIGINAL; }
+    ac = new AbortController();
+    const on = (e, ev, f) => e.addEventListener(ev, f, { signal: ac.signal });
+    const dump = D.dump, I = dump.informed, names = D.names;
+    const informed = !!I && !plain;
+    const t = informed ? I.trace : dump.trace;
+    const smt2 = informed ? D.smt2.informed : D.smt2.plain;
+    const compare = !!(I && I.explained);
+    // The proofs to select, each with a core into `t`: informed, the ones
+    // proven with the plans and facts; plain, the same claims proven
+    // without them, or the plain bounds' own.
+    const proofs = informed ? (compare ? I.proofs : []) : (compare ? I.base_proofs : dump.proofs);
+    // The other view's proof of each claim, for its status.
+    const otherOf = {};
+    if (compare) I.proofs.forEach((p, i) => { if (I.base_proofs[i]) otherOf[p.name] = informed ? I.base_proofs[i] : p; });
+    const isFact = c => !!c.fact;
+    const isPin = c => !!c.fact && c.fact.source.startsWith('observed');
+    const $ = id => document.getElementById(id);
+    const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const statusOf = p => typeof p.status === 'string' ? p.status : 'Unknown';
+    const otherName = informed ? 'plain' : 'informed';
 
-  // Header.
-  $('query').textContent = dump.query.trim();
-  $('plan').textContent = dump.plan;
-  if (F) $('hide-label').hidden = false;
-  const partitions = t.constraints.filter(c => c.node === null).length;
-  const facts = t.constraints.filter(isFact).length;
-  $('stats').textContent = `${t.nodes.length} plan nodes · ${t.constraints.length} constraints` +
-    (partitions ? ` (${partitions} over table partitions)` : '') + (F ? ` · ${facts} from facts` : '');
-  const basePlan = dump.plan_bounds, factPlan = F ? F.plan_bounds : null;
-  $('total-card').hidden = !(basePlan || factPlan);
-  function header() {
-    const facts = F && !hiding();
-    const [out, outOther] = facts ? [F.bounds, dump.bounds] : [dump.bounds, F?.bounds];
+    // A bound, compactly: "= 60,175", "≤ 25", "3 – 25", or "≥ 100" when no
+    // upper end was proven.
+    const num = n => Number(n).toLocaleString('en-US');
+    function boundText(s) {
+      if (!s) return { text: '—', open: true };
+      let m;
+      if ((m = s.match(/^X = (\d+)$/))) return { text: '= ' + num(m[1]), open: false };
+      if ((m = s.match(/^(\d+) <= X <= (\d+)$/))) return { text: m[1] === '0' ? '≤ ' + num(m[2]) : `${num(m[1])} – ${num(m[2])}`, open: false };
+      if ((m = s.match(/^X <= (\d+)$/))) return { text: '≤ ' + num(m[1]), open: false };
+      if ((m = s.match(/^X >= (\d+)$/))) return { text: '≥ ' + num(m[1]), open: true };
+      return { text: s, open: !/<=|=/.test(s) };
+    }
+    function setBound(e, s, other) {
+      const b = boundText(s);
+      e.textContent = b.text;
+      e.classList.toggle('open', b.open);
+      e.title = (s ?? 'not computed') + (other && other !== s ? `\n${otherName}: ${other}` : '');
+    }
+    const bd = () => el('span', 'bd');
+
+    // Header.
+    $('query').textContent = dump.query.trim();
+    $('plan').textContent = dump.plan;
+    if (I) { $('hide-label').hidden = false; $('hide').checked = plain; }
+    const partitions = t.constraints.filter(c => c.node === null).length;
+    const referenced = t.nodes.filter(n => n.plan).length;
+    const pins = t.constraints.filter(isPin).length, facts = t.constraints.filter(isFact).length - pins;
+    $('stats').textContent = `${t.nodes.length} plan nodes` + (referenced ? ` (${referenced} of ${I.plans.length} reference plans)` : '') +
+      ` · ${t.constraints.length} constraints` + (partitions ? ` (${partitions} over table partitions)` : '') +
+      (informed ? ` · ${pins} pins · ${facts} from facts` : '') + (I && !informed ? ' · plain' : '');
+    const [plan, planOther] = informed ? [I.plan_bounds, dump.plan_bounds] : [dump.plan_bounds, I?.plan_bounds];
+    const [out, outOther] = informed ? [I.bounds, dump.bounds] : [dump.bounds, I?.bounds];
+    $('total-card').hidden = !plan;
     setBound($('out'), out, outOther);
-    const [plan, planOther] = facts ? [factPlan, basePlan] : [basePlan, factPlan];
     if (plan) setBound($('total'), plan.total, planOther?.total);
-    const was = (e, a, b) => { e.textContent = F && a !== b ? `${facts ? 'without' : 'with'} facts ${boundText(b).text}` : ''; };
+    const was = (e, a, b) => { e.textContent = I && a !== b ? `${otherName} ${boundText(b).text}` : ''; };
     was($('out-was'), out, outOther);
     if (plan) was($('total-was'), plan.total, planOther?.total);
-  }
 
-  // The node each variable describes.
-  const owner = {};
-  for (const n of t.nodes) {
-    owner[n.var] = n.id;
-    if (n.raw_var) owner[n.raw_var] = n.id;
-    for (const [, nv] of n.columns) owner[nv] = n.id;
-  }
-  const isVar = s => owner[s] !== undefined || t.tables.some(([, sym]) => sym === s) || /^part\d+$/.test(s);
-  const byNode = {};
-  for (const c of t.constraints) (byNode[c.node ?? 'p'] ??= []).push(c);
-
-  // An operator's label: its kind in bold, the rest muted.
-  function opLabel(n, cls, inline) {
-    const line = n.label.split('\n')[0];
-    const i = line.indexOf(':');
-    const box = el('span', cls);
-    box.append(el('b', null, i < 0 ? line : line.slice(0, i)));
-    if (i >= 0) box.append(inline ? ' ' : '', el(inline ? 'span' : 'div', 'd m', line.slice(i + 1).trim()));
-    return box;
-  }
-  // What a node's fact pins, for its tooltip.
-  function pinned(n) {
-    const mine = [n.var, n.raw_var].filter(x => x);
-    return (byNode[n.id] ?? []).filter(c => c.fact && c.vars.length === 1 && mine.includes(c.vars[0]))
-      .map(c => `◆ ${c.vars[0] === n.var ? 'rows' : names[c.vars[0]] ?? c.vars[0]} ${c.fact.value}`);
-  }
-
-  // Plan tree, root first; nodes no other node takes as input are roots.
-  const used = new Set(t.nodes.flatMap(n => n.inputs));
-  const roots = t.nodes.filter(n => !used.has(n.id)).map(n => n.id).reverse();
-  const treeNodes = {}, order = [], bounds = [];
-  function build(id) {
-    const n = t.nodes[id];
-    order.push(id);
-    const li = el('li');
-    const alias = n.label.startsWith('SubqueryAlias');
-    const row = el('div', alias ? 'pn alias' : 'pn');
-    row.dataset.node = id;
-    row.title = [n.label, n.var, ...pinned(n)].join('\n');
-    const idBox = el('span', 'id m', String(id));
-    if ((byNode[id] ?? []).some(isFact)) idBox.append(el('span', 'fm', '◆'));
-    const b = bd();
-    bounds.push([b, id]);
-    const count = el('span', 'n m');
-    row.append(idBox, opLabel(n, 'op'), b, count);
-    treeNodes[id] = { row, count };
-    li.append(row);
-    if (n.inputs.length) {
-      const ul = el('ul');
-      for (const i of n.inputs) ul.append(build(i));
-      li.append(ul);
+    // The node each variable describes.
+    const owner = {};
+    for (const n of t.nodes) {
+      owner[n.var] = n.id;
+      if (n.raw_var) owner[n.raw_var] = n.id;
+      for (const [, nv] of n.columns) owner[nv] = n.id;
     }
-    return li;
-  }
-  const top = el('ul');
-  roots.forEach((r, i) => {
-    if (i > 0) top.append(el('li', 'sub', 'Subquery inside an expression'));
-    top.append(build(r));
-  });
-  $('tree').append(top);
+    const isVar = s => owner[s] !== undefined || t.tables.some(([, sym]) => sym === s) || /^part\d+$/.test(s);
+    const byNode = {};
+    for (const c of t.constraints) (byNode[c.node ?? 'p'] ??= []).push(c);
 
-  // A formula, each variable named by its column and linked to its node.
-  function formula(text) {
-    const f = el('td', 'f m');
-    for (const part of text.split(/([A-Za-z0-9_]+)/)) {
-      if (!part) continue;
-      if (isVar(part)) {
-        const s = el('span', 'var', names[part] ?? part);
-        s.dataset.var = part;
-        s.title = part;
-        f.append(s);
-      } else {
-        f.append(document.createTextNode(part));
-      }
+    // An operator's label: its kind in bold, the rest muted.
+    function opLabel(n, cls, inline) {
+      const line = n.label.split('\n')[0];
+      const i = line.indexOf(':');
+      const box = el('span', cls);
+      box.append(el('b', null, i < 0 ? line : line.slice(0, i)));
+      if (i >= 0) box.append(inline ? ' ' : '', el(inline ? 'span' : 'div', 'd m', line.slice(i + 1).trim()));
+      return box;
     }
-    return f;
-  }
+    // What a node's facts and pins hold it to, for its tooltip.
+    function pinned(n) {
+      const mine = [n.var, n.raw_var].filter(x => x);
+      return (byNode[n.id] ?? []).filter(c => c.fact && c.vars.length === 1 && mine.includes(c.vars[0]))
+        .map(c => `◆ ${c.vars[0] === n.var ? 'rows' : names[c.vars[0]] ?? c.vars[0]} ${c.fact.value}`);
+    }
 
-  // Constraint table: one header row per node, then its constraints.
-  const heads = {}, rows = {};
-  function group(key) {
-    const cs = byNode[key] ?? [];
-    if (!cs.length) return;
-    const gh = el('tr', 'gh');
-    const td = el('td');
-    td.colSpan = 3;
-    const line = el('div', 'row');
-    if (key === 'p') {
-      line.append(el('span', 'lab', null));
-      line.firstChild.append(el('b', null, 'Table partitions'), el('span', 'd', ' — relations of one table with disjoint rows share its rows'));
-    } else {
-      const n = t.nodes[key];
-      const lab = el('span', 'lab');
-      lab.append(el('span', 'm note', `${key}  `), opLabel(n, null, true));
-      lab.title = `${n.label}\n${n.var}`;
+    // Plan tree, root first; nodes no other node takes as input are roots:
+    // the query's, then each reference plan's parts.
+    const used = new Set(t.nodes.flatMap(n => n.inputs));
+    const rootsOf = {};
+    for (const n of t.nodes) if (!used.has(n.id)) (rootsOf[n.plan ?? ''] ??= []).push(n.id);
+    const treeNodes = {}, order = [], bounds = [];
+    function build(id) {
+      const n = t.nodes[id];
+      order.push(id);
+      const li = el('li');
+      const alias = n.label.startsWith('SubqueryAlias');
+      const row = el('div', alias ? 'pn alias' : 'pn');
+      row.dataset.node = id;
+      row.title = [n.label, n.var, ...pinned(n)].join('\n');
+      const idBox = el('span', 'id m', String(id));
+      if ((byNode[id] ?? []).some(isFact)) idBox.append(el('span', 'fm', '◆'));
       const b = bd();
-      bounds.push([b, key]);
-      line.append(lab, b);
-      gh.dataset.node = key;
-    }
-    td.append(line);
-    gh.append(td);
-    heads[key] = gh;
-    $('list').append(gh);
-    for (const c of cs) {
-      const r = el('tr', isFact(c) ? 'c fact' : 'c');
-      r.dataset.c = c.id;
-      const rule = el('td', 'rule m', isFact(c) ? `fact: ${c.fact.source}` : c.function);
-      rule.title = c.source;
-      r.append(el('td', 'id m', 'c' + c.id + (isFact(c) ? ' ◆' : '')), formula(c.infix), rule);
-      const x = el('tr', 'x');
-      x.hidden = true;
-      const xd = el('td');
-      xd.colSpan = 3;
-      const kv = el('table');
-      const details = [['SMT-LIB', c.smt], ['Made by', `${c.function} at ${c.source}`], ['Code', c.code]];
-      if (isFact(c)) {
-        details.push(['Asserts', `${names[c.vars[0]] ?? c.vars[0] ?? ''} ${c.fact.value}`]);
-        for (const f of c.fact.facts) details.push(['Fact', f.text + (f.origins.length ? `\nread off ${f.origins.join(', ')}` : '')]);
+      bounds.push([b, id]);
+      const count = el('span', 'n m');
+      row.append(idBox, opLabel(n, 'op'), b, count);
+      treeNodes[id] = { row, count };
+      li.append(row);
+      if (n.inputs.length) {
+        const ul = el('ul');
+        for (const i of n.inputs) ul.append(build(i));
+        li.append(ul);
       }
-      for (const [k, v] of details) {
-        const tr = el('tr');
-        const val = el('td');
-        val.append(el('pre', null, v));
-        tr.append(el('th', null, k), val);
-        kv.append(tr);
-      }
-      xd.append(kv);
-      x.append(xd);
-      r.addEventListener('click', () => { x.hidden = !x.hidden; });
-      rows[c.id] = { r, x };
-      $('list').append(r, x);
+      return li;
     }
-  }
-  for (const id of order) group(id);
-  group('p');
+    const top = el('ul');
+    (rootsOf[''] ?? []).slice().reverse().forEach((r, i) => {
+      if (i > 0) top.append(el('li', 'sub', 'Subquery inside an expression'));
+      top.append(build(r));
+    });
+    for (const [name, rs] of Object.entries(rootsOf)) {
+      if (!name) continue;
+      top.append(el('li', 'sub', `Reference plan ${name}`));
+      for (const r of rs.slice().reverse()) top.append(build(r));
+    }
+    $('tree').append(top);
 
-  // Every operator's bounds, with facts unless they are hidden.
-  function nodeBounds() {
-    const [plan, other] = F && !hiding() ? [factPlan, basePlan] : [basePlan, factPlan];
+    // A formula, each variable named by its column and linked to its node.
+    function formula(text) {
+      const f = el('td', 'f m');
+      for (const part of text.split(/([A-Za-z0-9_]+)/)) {
+        if (!part) continue;
+        if (isVar(part)) {
+          const s = el('span', 'var', names[part] ?? part);
+          s.dataset.var = part;
+          s.title = part;
+          f.append(s);
+        } else {
+          f.append(document.createTextNode(part));
+        }
+      }
+      return f;
+    }
+
+    // Constraint table: one header row per node, then its constraints.
+    const heads = {}, rows = {};
+    function group(key) {
+      const cs = byNode[key] ?? [];
+      if (!cs.length) return;
+      const gh = el('tr', 'gh');
+      const td = el('td');
+      td.colSpan = 3;
+      const line = el('div', 'row');
+      if (key === 'p') {
+        line.append(el('span', 'lab', null));
+        line.firstChild.append(el('b', null, 'Table partitions'), el('span', 'd',  ' — op outputs of one table with disjoint rows share its rows'));
+      } else {
+        const n = t.nodes[key];
+        const lab = el('span', 'lab');
+        lab.append(el('span', 'm note', `${key}${n.plan ? ' ' + n.plan : ''}  `), opLabel(n, null, true));
+        lab.title = `${n.label}\n${n.var}`;
+        const b = bd();
+        bounds.push([b, key]);
+        line.append(lab, b);
+        gh.dataset.node = key;
+      }
+      td.append(line);
+      gh.append(td);
+      heads[key] = gh;
+      $('list').append(gh);
+      for (const c of cs) {
+        const r = el('tr', isFact(c) ? 'c fact' : 'c');
+        r.dataset.c = c.id;
+        const rule = el('td', 'rule m', isPin(c) ? `pin: ${c.fact.source}` : isFact(c) ? `fact: ${c.fact.source}` : c.function);
+        rule.title = c.source;
+        r.append(el('td', 'id m', 'c' + c.id + (isFact(c) ? ' ◆' : '')), formula(c.infix), rule);
+        const x = el('tr', 'x');
+        x.hidden = true;
+        const xd = el('td');
+        xd.colSpan = 3;
+        const kv = el('table');
+        const details = [['SMT-LIB', c.smt], ['Made by', `${c.function} at ${c.source}`], ['Code', c.code]];
+        if (isFact(c)) {
+          details.push(['Asserts', `${names[c.vars[0]] ?? c.vars[0] ?? ''} ${c.fact.value}`]);
+          for (const f of c.fact.facts) details.push([isPin(c) ? 'Count' : 'Fact', f.text + (f.origins.length ? `\nread off ${f.origins.join(', ')}` : '')]);
+        }
+        for (const [k, v] of details) {
+          const tr = el('tr');
+          const val = el('td');
+          val.append(el('pre', null, v));
+          tr.append(el('th', null, k), val);
+          kv.append(tr);
+        }
+        xd.append(kv);
+        x.append(xd);
+        on(r, 'click', () => { x.hidden = !x.hidden; });
+        rows[c.id] = { r, x };
+        $('list').append(r, x);
+      }
+    }
+    for (const id of order) group(id);
+    group('p');
+
+    // Every operator's bounds: the query's only.
     for (const [e, id] of bounds) {
-      e.hidden = !plan;
-      if (plan) setBound(e, plan.nodes[id], other?.nodes[id]);
+      const b = plan?.nodes[id];
+      e.hidden = b === undefined;
+      if (b !== undefined) setBound(e, b, planOther?.nodes[id]);
     }
-  }
 
-  // Hover: a node lights its constraints' header and its tree entry; a
-  // variable lights every use of it and the node it describes.
-  const lit = [];
-  const light = e => { if (e) { e.classList.add('hl'); lit.push(e); } };
-  const clear = () => { while (lit.length) lit.pop().classList.remove('hl'); };
-  document.addEventListener('mouseover', e => {
-    const target = e.target;
-    const v = target.closest('.var');
-    const n = target.closest('[data-node]');
-    const r = target.closest('tr.c');
-    clear();
-    if (v) {
-      document.querySelectorAll('.var').forEach(x => { if (x.dataset.var === v.dataset.var) light(x); });
-      const o = owner[v.dataset.var];
-      if (o !== undefined) light(treeNodes[o].row);
-    } else if (n) {
-      light(treeNodes[+n.dataset.node]?.row);
-      light(heads[+n.dataset.node]);
-    } else if (r) {
-      const o = t.constraints[+r.dataset.c].node;
-      if (o !== null) { light(treeNodes[o].row); light(heads[o]); }
-    }
-  });
-  $('tree').addEventListener('click', e => {
-    const n = e.target.closest('[data-node]');
-    const h = n && heads[+n.dataset.node];
-    if (h && !h.hidden) h.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
-  $('list').addEventListener('click', e => {
-    const h = e.target.closest('tr.gh');
-    if (h && h.dataset.node !== undefined) treeNodes[+h.dataset.node].row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  });
+    // Hover: a node lights its constraints' header and its tree entry; a
+    // variable lights every use of it and the node it describes.
+    const lit = [];
+    const light = e => { if (e) { e.classList.add('hl'); lit.push(e); } };
+    const clear = () => { while (lit.length) lit.pop().classList.remove('hl'); };
+    on(document, 'mouseover', e => {
+      const target = e.target;
+      const v = target.closest('.var');
+      const n = target.closest('[data-node]');
+      const r = target.closest('tr.c');
+      clear();
+      if (v) {
+        document.querySelectorAll('.var').forEach(x => { if (x.dataset.var === v.dataset.var) light(x); });
+        const o = owner[v.dataset.var];
+        if (o !== undefined) light(treeNodes[o].row);
+      } else if (n) {
+        light(treeNodes[+n.dataset.node]?.row);
+        light(heads[+n.dataset.node]);
+      } else if (r) {
+        const o = t.constraints[+r.dataset.c].node;
+        if (o !== null) { light(treeNodes[o].row); light(heads[o]); }
+      }
+    });
+    on($('tree'), 'click', e => {
+      const n = e.target.closest('[data-node]');
+      const h = n && heads[+n.dataset.node];
+      if (h && !h.hidden) h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    on($('list'), 'click', e => {
+      const h = e.target.closest('tr.gh');
+      if (h && h.dataset.node !== undefined) treeNodes[+h.dataset.node].row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
 
-  // Facts: used, and conflicts.
-  const factRows = [];
-  if (F) {
-    $('facts').hidden = false;
+    // Pins and row counts used.
+    const factRows = [];
     const row = (body, cells) => {
       const r = el('tr');
       for (const [text, cls] of cells) r.append(el('td', cls, text));
       $(body).append(r);
       factRows.push(r);
     };
-    const used = t.constraints.filter(isFact);
-    $('facts-n').textContent = String(used.length);
-    for (const c of used) {
-      const f = c.fact, read = f.facts.flatMap(x => x.origins);
-      const claim = `${c.vars.map(v => names[v] ?? v).join(', ')} ${f.value}`;
-      row('facts-used', [[f.source, 'note'], [claim, 'm'], [f.facts.map(x => x.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
+    if (informed) {
+      $('facts').hidden = false;
+      const used = t.constraints.filter(isFact);
+      $('facts-n').textContent = `${pins} pins, ${facts} row counts`;
+      for (const c of used) {
+        const f = c.fact, read = f.facts.flatMap(x => x.origins);
+        const claim = `${c.vars.map(v => names[v] ?? v).join(', ')} ${f.value}`;
+        row('facts-used', [[f.source, 'note'], [claim, 'm'], [f.facts.map(x => x.text).join(', '), 'm'], [read.length ? read.join(', ') : '—', 'm note']]);
+      }
     }
-    if (F.conflicts.length) {
-      $('conflicts-box').hidden = false;
-      $('conflicts-n').textContent = String(F.conflicts.length);
-      for (const c of F.conflicts) row('conflicts', [[c, 'm']]);
-    }
-  }
 
-  // Proofs: the one shown is the base proof while facts are hidden.
-  let current = null;
-  const proofRows = {};
-  const statusLabel = { Proven: ['proven', 'good'], Refuted: ['refuted', 'bad'], Unknown: ['unknown', 'warn'] };
-  const shown = p => (hiding() && compare ? baseOf[p.name] : null) ?? p;
-  const all = el('tr');
-  all.append(el('td', 'note', 'none'), el('td', 'note', 'every constraint'), el('td'), el('td'));
-  all.addEventListener('click', () => select(null));
-  $('proofs').append(all);
-  for (const p of proofs) {
-    const r = el('tr');
-    const cells = [el('td', 'm'), el('td'), el('td', 'm'), el('td', 'm note')];
-    r.append(...cells);
-    r.addEventListener('click', () => select(p.name));
-    proofRows[p.name] = { r, cells, p };
-    $('proofs').append(r);
-  }
-  function proofTable() {
-    for (const { r, cells: [claim, result, needs, from], p } of Object.values(proofRows)) {
-      const q = shown(p), s = statusOf(q), proven = s === 'Proven';
-      claim.textContent = q.claim;
-      claim.title = q.name;
+    // Proofs.
+    let current = null;
+    const proofRows = {};
+    const statusLabel = { Proven: ['proven', 'good'], Refuted: ['refuted', 'bad'], Unknown: ['unknown', 'warn'] };
+    const all = el('tr');
+    all.append(el('td', 'note', 'none'), el('td', 'note', informed && !compare ? 'proofs skipped (--no-explain)' : 'every constraint'), el('td'), el('td'));
+    on(all, 'click', () => select(null));
+    $('proofs').append(all);
+    for (const p of proofs) {
+      const r = el('tr');
+      const [claim, result, needs, from] = [el('td', 'm'), el('td'), el('td', 'm'), el('td', 'm note')];
+      r.append(claim, result, needs, from);
+      on(r, 'click', () => select(p.name));
+      proofRows[p.name] = { r, p };
+      $('proofs').append(r);
+      const s = statusOf(p), proven = s === 'Proven';
+      claim.textContent = p.claim;
+      claim.title = p.name;
       const [label, cls] = statusLabel[s];
-      result.textContent = '';
       result.append(el('span', 'status ' + cls, label));
-      const base = compare && !hiding() ? baseOf[p.name] : null;
-      if (base && statusOf(base) !== s) result.append(el('span', 'note', ` · ${statusLabel[statusOf(base)][0]} without facts`));
-      const k = proven ? q.core.filter(c => isFact(t.constraints[c])).length : 0;
-      needs.textContent = proven ? String(q.core.length) + (k ? ` (${k} ◆)` : '') : '—';
-      const nodes = [...new Set(q.core.map(c => t.constraints[c].node).filter(n => n !== null))].sort((a, b) => a - b);
+      const other = otherOf[p.name];
+      if (other && other !== p && statusOf(other) !== s) result.append(el('span', 'note', ` · ${statusLabel[statusOf(other)][0]} ${otherName}`));
+      const k = proven ? p.core.filter(c => isFact(t.constraints[c])).length : 0;
+      needs.textContent = proven ? String(p.core.length) + (k ? ` (${k} ◆)` : '') : '—';
+      const nodes = [...new Set(p.core.map(c => t.constraints[c].node).filter(n => n !== null))].sort((a, b) => a - b);
       from.textContent = proven && nodes.length ? nodes.join(' ') : '—';
-      r.title = s === 'Unknown' ? q.status.Unknown : '';
+      r.title = s === 'Unknown' ? p.status.Unknown : '';
     }
+
+    function select(name) {
+      current = proofs.find(p => p.name === name) ?? null;
+      all.classList.toggle('on', !current);
+      for (const [k, { r }] of Object.entries(proofRows)) r.classList.toggle('on', k === name);
+      const core = new Set(current ? current.core : []);
+      const perNode = {};
+      for (const c of core) { const n = t.constraints[c].node; perNode[n] = (perNode[n] ?? 0) + 1; }
+      for (const [id, { r }] of Object.entries(rows)) {
+        r.classList.toggle('core', core.has(+id));
+        r.classList.toggle('out', !!current && !core.has(+id));
+      }
+      for (const [id, { row, count }] of Object.entries(treeNodes)) {
+        const total = (byNode[id] ?? []).length;
+        const k = perNode[id] ?? 0;
+        row.classList.toggle('core', k > 0);
+        row.classList.toggle('out', !!current && k === 0);
+        count.textContent = current ? `${k}/${total}` : String(total);
+        count.title = current ? `${k} of this node's ${total} constraints are needed` : `${total} constraints`;
+      }
+      const ex = $('explain');
+      ex.hidden = !current;
+      if (current) {
+        const s = statusOf(current);
+        ex.textContent = s === 'Proven'
+          ? (current.core.length === 1
+              ? `${current.claim} follows from one constraint, marked below.`
+              : `${current.claim} follows from the ${current.core.length} constraints marked below, taken together; dropping any one of them leaves it unproven.`)
+          : s === 'Refuted'
+            ? `${current.claim} does not follow: some assignment satisfies every constraint and breaks it.`
+            : `${current.claim}: Z3 could not decide (${current.status.Unknown}).`;
+      }
+      filter();
+    }
+
+    function filter() {
+      const q = $('search').value.trim().toLowerCase();
+      const only = $('only').checked && current;
+      const core = new Set(current ? current.core : []);
+      let n = 0;
+      for (const [id, { r, x }] of Object.entries(rows)) {
+        const c = t.constraints[+id];
+        const origins = c.fact ? c.fact.facts.flatMap(f => [f.text, ...f.origins]) : [];
+        const text = [c.infix, c.smt, c.function, c.source, c.code, ...origins, ...c.vars.map(v => names[v] ?? v)].join(' ').toLowerCase();
+        const hide = (q && !text.includes(q)) || (only && !core.has(+id));
+        r.hidden = hide;
+        if (hide) x.hidden = true;
+        if (!hide) n++;
+      }
+      for (const [key, h] of Object.entries(heads)) h.hidden = !(byNode[key] ?? []).some(c => !rows[c.id].r.hidden);
+      const count = $('count');
+      count.textContent = '';
+      if (current) {
+        const s = statusOf(current);
+        count.append(el('span', 'sel', current.claim), s === 'Proven' ? `: ${current.core.length} needed · ` : `: ${s.toLowerCase()} · `);
+      }
+      count.append(`${n} of ${t.constraints.length} shown`);
+      for (const r of factRows) r.hidden = !!q && !r.textContent.toLowerCase().includes(q);
+    }
+
+    on($('search'), 'input', filter);
+    on($('only'), 'change', filter);
+    on($('hide'), 'change', () => mount($('hide').checked, { proof: current?.name, search: $('search').value, only: $('only').checked }));
+    on($('copy'), 'click', async () => {
+      try { await navigator.clipboard.writeText(smt2); $('copy').textContent = 'Copied'; }
+      catch { $('copy').textContent = 'Copy failed'; }
+      setTimeout(() => { $('copy').textContent = 'Copy SMT-LIB'; }, 1500);
+    });
+    on($('save'), 'click', () => {
+      const a = el('a');
+      a.href = URL.createObjectURL(new Blob([smt2], { type: 'text/plain' }));
+      a.download = 'cardinal.smt2';
+      a.click();
+    });
+
+    $('search').value = keep.search ?? '';
+    $('only').checked = !!keep.only;
+    select(keep.proof ?? null);
   }
 
-  function select(name) {
-    const p = proofs.find(p => p.name === name);
-    current = p ? shown(p) : null;
-    all.classList.toggle('on', !current);
-    for (const [k, { r }] of Object.entries(proofRows)) r.classList.toggle('on', k === name);
-    const core = new Set(current ? current.core : []);
-    const perNode = {};
-    for (const c of core) { const n = t.constraints[c].node; perNode[n] = (perNode[n] ?? 0) + 1; }
-    for (const [id, { r }] of Object.entries(rows)) {
-      r.classList.toggle('core', core.has(+id));
-      r.classList.toggle('out', !!current && !core.has(+id));
-    }
-    for (const [id, { row, count }] of Object.entries(treeNodes)) {
-      const total = (byNode[id] ?? []).filter(c => !(hiding() && isFact(c))).length;
-      const k = perNode[id] ?? 0;
-      row.classList.toggle('core', k > 0);
-      row.classList.toggle('out', !!current && k === 0);
-      count.textContent = current ? `${k}/${total}` : String(total);
-      count.title = current ? `${k} of this node's ${total} constraints are needed` : `${total} constraints`;
-    }
-    const ex = $('explain');
-    ex.hidden = !current;
-    if (current) {
-      const s = statusOf(current);
-      ex.textContent = s === 'Proven'
-        ? (current.core.length === 1
-            ? `${current.claim} follows from one constraint, marked below.`
-            : `${current.claim} follows from the ${current.core.length} constraints marked below, taken together; dropping any one of them leaves it unproven.`)
-        : s === 'Refuted'
-          ? `${current.claim} does not follow: some assignment satisfies every constraint and breaks it.`
-          : `${current.claim}: Z3 could not decide (${current.status.Unknown}).`;
-    }
-    filter();
-  }
-
-  function filter() {
-    const q = $('search').value.trim().toLowerCase();
-    const only = $('only').checked && current;
-    const core = new Set(current ? current.core : []);
-    let n = 0;
-    for (const [id, { r, x }] of Object.entries(rows)) {
-      const c = t.constraints[+id];
-      const origins = c.fact ? c.fact.facts.flatMap(f => [f.text, ...f.origins]) : [];
-      const text = [c.infix, c.smt, c.function, c.source, c.code, ...origins, ...c.vars.map(v => names[v] ?? v)].join(' ').toLowerCase();
-      const hide = (q && !text.includes(q)) || (only && !core.has(+id)) || (hiding() && isFact(c));
-      r.hidden = hide;
-      if (hide) x.hidden = true;
-      if (!hide) n++;
-    }
-    for (const [key, h] of Object.entries(heads)) h.hidden = !(byNode[key] ?? []).some(c => !rows[c.id].r.hidden);
-    const count = $('count');
-    count.textContent = '';
-    if (current) {
-      const s = statusOf(current);
-      count.append(el('span', 'sel', current.claim), s === 'Proven' ? `: ${current.core.length} needed · ` : `: ${s.toLowerCase()} · `);
-    }
-    count.append(`${n} of ${t.constraints.length} shown`);
-    for (const r of factRows) r.hidden = !!q && !r.textContent.toLowerCase().includes(q);
-  }
-
-  function refresh() {
-    document.body.classList.toggle('nofacts', hiding());
-    header();
-    nodeBounds();
-    proofTable();
-    select(current ? current.name : null);
-  }
-  $('search').addEventListener('input', filter);
-  $('only').addEventListener('change', filter);
-  $('hide').addEventListener('change', refresh);
-
-  $('copy').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(D.smt2); $('copy').textContent = 'Copied'; }
-    catch { $('copy').textContent = 'Copy failed'; }
-    setTimeout(() => { $('copy').textContent = 'Copy SMT-LIB'; }, 1500);
-  });
-  $('save').addEventListener('click', () => {
-    const a = el('a');
-    a.href = URL.createObjectURL(new Blob([D.smt2], { type: 'text/plain' }));
-    a.download = 'cardinal.smt2';
-    a.click();
-  });
-
-  if (D.proof) $('only').checked = true;
-  if (D.withoutFacts) $('hide').checked = true;
-  current = D.proof ? { name: D.proof } : null;
-  refresh();
+  mount(!!D.plain, { proof: D.proof, only: !!D.proof });
 })();
 </script>
 </body>

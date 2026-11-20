@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use cardinal::{Analysis, Bounds, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -57,8 +57,27 @@ fn setup() -> SessionContext {
     ctx
 }
 
-async fn run(sql: &str) -> Analysis {
-    let a = analyze_sql(&setup(), sql, Default::default()).await.unwrap();
+/// A query, and its analysis.
+struct Run {
+    query: Builder<'static>,
+    a: Analysis,
+}
+
+impl Run {
+    fn new(query: Builder<'static>) -> Run {
+        Run { a: query.clone().build().unwrap(), query }
+    }
+}
+
+impl std::ops::Deref for Run {
+    type Target = Analysis;
+    fn deref(&self) -> &Analysis {
+        &self.a
+    }
+}
+
+async fn run(sql: &str) -> Run {
+    let a = Run::new(Analysis::sql(&setup(), sql).await.unwrap());
     println!("== {sql}\n{}\n{}\n", a.plan, a.constraints());
     a
 }
@@ -72,23 +91,23 @@ fn size(table: &str) -> u64 {
 
 /// `a`'s bounds with its tables held to their [`size`]s, and the rows its
 /// scans read.
-fn sized(a: &Analysis) -> (Bounds, u64) {
+fn sized(a: &Run) -> (Bounds, u64) {
     let sizes: Vec<(&str, u64)> = a.scans.iter().map(|(_, t)| (t.as_str(), size(t))).collect();
-    let b = common::sized(a, &sizes);
+    let b = common::sized(&a.query, &sizes);
     let read = sizes.iter().map(|(_, n)| n).sum();
     println!("with {sizes:?}: {b}, reading {read}");
     (b, read)
 }
 
 /// Asserts that `a` outputs at most the rows it reads.
-fn assert_reduces(a: &Analysis) -> Bounds {
+fn assert_reduces(a: &Run) -> Bounds {
     let (b, read) = sized(a);
     assert!(b.upper.is_some_and(|hi| hi <= read), "expected at most {read} rows, got {b}");
     b
 }
 
 /// Asserts that `sql` outputs at most the rows it reads.
-async fn reduces(sql: &str) -> Analysis {
+async fn reduces(sql: &str) -> Run {
     let a = run(sql).await;
     assert_reduces(&a);
     a
@@ -96,7 +115,7 @@ async fn reduces(sql: &str) -> Analysis {
 
 /// Asserts that `sql` may output more rows than it reads, and returns its
 /// bounds with its tables held to their sizes.
-async fn might_grow(sql: &str) -> (Analysis, Bounds) {
+async fn might_grow(sql: &str) -> (Run, Bounds) {
     let a = run(sql).await;
     let (b, read) = sized(&a);
     assert!(b.upper.is_none_or(|hi| hi > read), "expected more than {read} rows, got {b}");
@@ -347,13 +366,11 @@ async fn table_named_like_an_operator_variable() {
     let mem = MemTable::try_new(schema, vec![vec![]]).unwrap();
     ctx.register_table(TableReference::bare("op1_Filter"), Arc::new(mem))
         .unwrap();
-    let a = analyze_sql(&ctx, r#"SELECT * FROM "op1_Filter" WHERE x > 1"#, Default::default())
-        .await
-        .unwrap();
+    let a = Run::new(Analysis::sql(&ctx, r#"SELECT * FROM "op1_Filter" WHERE x > 1"#).await.unwrap());
     assert!(a.constraints().contains("(declare-fun T0_op1_Filter () Int)"));
     assert!(a.constraints().contains("(declare-fun op1_Filter () Int)"));
     // The table's size holds the table, not the filter of the same name.
-    let b = common::sized(&a, &[("op1_Filter", 5)]);
+    let b = common::sized(&a.query, &[("op1_Filter", 5)]);
     assert_eq!(b, Bounds { lower: 0, upper: Some(5) });
 }
 
@@ -374,7 +391,7 @@ async fn pushed_down_scan_filters_and_fetch() {
     .unwrap()
     .build()
     .unwrap();
-    let a = cardinal::analyze_plan(&plan, Default::default());
+    let a = Run::new(Analysis::logical(plan));
     assert_reduces(&a);
     assert!(has_op(&a, "ScanFilter"));
     // A scan's fetch is a hint (providers may return more rows), so it must not
@@ -408,18 +425,39 @@ async fn validate_catches_a_false_primary_key() {
             vec![0],
         )]));
     ctx.register_table("people", Arc::new(mem)).unwrap();
-    let a = analyze_sql(
-        &ctx,
-        "SELECT * FROM people a JOIN people b ON a.age = b.age",
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let a = Run::new(Analysis::sql(&ctx, "SELECT * FROM people a JOIN people b ON a.age = b.age").await.unwrap());
     assert_reduces(&a);
     let v = a.validate(&ctx).await.unwrap();
     assert_eq!(v.violation.as_deref(), Some("op0_Scan_people_c0"));
     assert_eq!(v.rows["op0_Scan_people"], 3);
     assert_eq!(v.rows["op0_Scan_people_c0"], 1);
+}
+
+#[tokio::test]
+async fn raw_scan_keys_ignore_pushed_filters() {
+    use datafusion::common::{Constraint, Constraints};
+    use datafusion::datasource::provider_as_source;
+    use datafusion::logical_expr::{LogicalPlanBuilder, col, lit};
+    // `(a, b)` is the key. Pushed `a = 1` makes `b` unique on the scan's
+    // rows, but not on the raw scan's.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int64, false),
+        Field::new("b", DataType::Int64, false),
+    ]));
+    let mem = Arc::new(
+        MemTable::try_new(schema, vec![vec![]])
+            .unwrap()
+            .with_constraints(Constraints::new_unverified(vec![Constraint::PrimaryKey(vec![0, 1])])),
+    );
+    let plan = LogicalPlanBuilder::scan_with_filters("pairs", provider_as_source(mem), None, vec![col("a").eq(lit(1i64))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // MemTable ignores pushed filters, so validating would count the
+    // filtered scan's rows wrong: check the claims instead.
+    let a = Analysis::logical(plan).build().unwrap();
+    assert!(a.constraints().contains("(= op1_ScanFilter_c1 op1_ScanFilter)"));
+    assert!(!a.constraints().contains("(= op0_Scan_pairs_c1 op0_Scan_pairs)"));
 }
 
 // --- Join keys: only declared keys count as unique --------------------------
@@ -445,13 +483,7 @@ async fn unique_constraint_matches_once() {
             0,
         ])]));
     ctx.register_table("accounts", Arc::new(mem)).unwrap();
-    let a = analyze_sql(
-        &ctx,
-        "SELECT * FROM accounts a JOIN accounts b ON a.email = b.email",
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let a = Run::new(Analysis::sql(&ctx, "SELECT * FROM accounts a JOIN accounts b ON a.email = b.email").await.unwrap());
     assert_reduces(&a);
     assert!(has_op(&a, "InnerKeyJoin"));
 }
@@ -589,9 +621,7 @@ async fn validate_never_executes_dml() {
     // Previously validating an INSERT inserted the rows.
     let ctx = SessionContext::new();
     data_table(&ctx, "t", &[("x", (0..10).collect())], &[]);
-    let a = analyze_sql(&ctx, "INSERT INTO t VALUES (1), (2)", Default::default())
-        .await
-        .unwrap();
+    let a = Analysis::sql(&ctx, "INSERT INTO t VALUES (1), (2)").await.unwrap().build().unwrap();
     a.validate(&ctx).await.unwrap();
     assert_eq!(row_count(&ctx, "t").await, 10);
 }
@@ -602,13 +632,7 @@ async fn validate_is_consistent_under_random() {
     // saw different rows than the union did: 18 of 20 runs reported a violation.
     let ctx = SessionContext::new();
     data_table(&ctx, "t", &[("x", (0..200).collect())], &[]);
-    let a = analyze_sql(
-        &ctx,
-        "SELECT x FROM t WHERE random() < 0.5 UNION ALL SELECT x FROM t WHERE random() < 0.5",
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let a = Analysis::sql(&ctx, "SELECT x FROM t WHERE random() < 0.5 UNION ALL SELECT x FROM t WHERE random() < 0.5").await.unwrap().build().unwrap();
     for _ in 0..20 {
         let v = a.validate(&ctx).await.unwrap();
         assert_eq!(v.violation, None);
@@ -622,14 +646,8 @@ async fn validation_handles_duplicate_column_names() {
     // fall back to re-running the subtree, which re-rolled random().
     let ctx = SessionContext::new();
     data_table(&ctx, "t", &[("x", (0..30).map(|i| i % 4).collect())], &[]);
-    let a = analyze_sql(
-        &ctx,
-        "SELECT * FROM (SELECT * FROM (SELECT * FROM t WHERE random() < 0.5) a
-                        JOIN t b ON a.x = b.x) j WHERE random() < 0.5",
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let a = Analysis::sql(&ctx, "SELECT * FROM (SELECT * FROM (SELECT * FROM t WHERE random() < 0.5) a
+                        JOIN t b ON a.x = b.x) j WHERE random() < 0.5").await.unwrap().build().unwrap();
     for _ in 0..10 {
         let v = a.validate(&ctx).await.unwrap();
         assert_eq!(v.violation, None);
@@ -642,9 +660,7 @@ async fn scan_fetch_is_not_a_bound() {
     // generate_series ignores the pushed-down fetch=2 and returns 4 rows, which
     // broke the old `scan <= fetch` constraint.
     let ctx = SessionContext::new();
-    let a = analyze_sql(&ctx, "SELECT * FROM generate_series(0, 3) LIMIT 2", Default::default())
-        .await
-        .unwrap();
+    let a = Analysis::sql(&ctx, "SELECT * FROM generate_series(0, 3) LIMIT 2").await.unwrap().build().unwrap();
     let v = a.validate(&ctx).await.unwrap();
     assert_eq!(v.violation, None);
     assert_eq!(v.rows[&a.root], 2);
@@ -657,13 +673,7 @@ async fn odd_table_names_round_trip() {
     let ctx = SessionContext::new();
     let name = r#"we|ird "x" (tbl)"#;
     data_table(&ctx, name, &[("id", vec![1, 2, 3])], &[0]);
-    let a = analyze_sql(
-        &ctx,
-        r#"SELECT * FROM "we|ird ""x"" (tbl)" a JOIN "we|ird ""x"" (tbl)" b ON a.id = b.id"#,
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let a = Run::new(Analysis::sql(&ctx, r#"SELECT * FROM "we|ird ""x"" (tbl)" a JOIN "we|ird ""x"" (tbl)" b ON a.id = b.id"#).await.unwrap());
     assert_reduces(&a);
     assert_eq!(a.scans[0].1, name);
     let v = a.validate(&ctx).await.unwrap();
@@ -684,13 +694,7 @@ async fn cast_join_key_stays_unique() {
             vec![0],
         )]));
     ctx.register_table("small", Arc::new(mem)).unwrap();
-    let a = analyze_sql(
-        &ctx,
-        "SELECT * FROM orders o JOIN small s ON o.user_id = s.id",
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let a = Run::new(Analysis::sql(&ctx, "SELECT * FROM orders o JOIN small s ON o.user_id = s.id").await.unwrap());
     assert!(a.plan.contains("CAST"), "{}", a.plan);
     assert!(has_op(&a, "InnerKeyJoin"), "{}", a.constraints());
     assert_reduces(&a);
@@ -712,15 +716,29 @@ async fn keyed_join_also_bounded_by_product() {
 fn futures_are_send() {
     fn assert_send<T: Send>(_: &T) {}
     let ctx = SessionContext::new();
-    let analyze = analyze_sql(&ctx, "SELECT 1", Default::default());
+    let analyze = Analysis::sql(&ctx, "SELECT 1");
     assert_send(&analyze);
     drop(analyze);
-    let a = cardinal::analyze_plan(&datafusion::logical_expr::LogicalPlan::EmptyRelation(
+    let a = Analysis::logical(datafusion::logical_expr::LogicalPlan::EmptyRelation(
         datafusion::logical_expr::EmptyRelation {
             produce_one_row: true,
             schema: Arc::new(datafusion::common::DFSchema::empty()),
         },
-    ), Default::default());
+    ))
+    .build()
+    .unwrap();
     let validate = a.validate(&ctx);
     assert_send(&validate);
+}
+
+#[tokio::test]
+async fn top_n_by_other_orders_are_other_rows() {
+    // The first two rows by `a` and by `b` are as many, but not the same.
+    let ctx = SessionContext::new();
+    for sql in ["CREATE TABLE t (a BIGINT, b BIGINT)", "INSERT INTO t VALUES (1, 9), (2, 8), (3, 1), (3, 2)"] {
+        ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    }
+    let sql = "SELECT DISTINCT x.a, y.a FROM (SELECT a FROM t ORDER BY a LIMIT 2) x, (SELECT a FROM t ORDER BY b LIMIT 2) y";
+    let a = Analysis::sql(&ctx, sql).await.unwrap().build().unwrap();
+    assert_eq!(a.validate(&ctx).await.unwrap().violation, None);
 }

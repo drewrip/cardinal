@@ -11,10 +11,12 @@
 //! `CARDINAL_FUZZ_N` sets the number of queries (default 250),
 //! `CARDINAL_FUZZ_SEED` the seed, and `CARDINAL_FUZZ_TRACE` (any value) prints
 //! each query and its time to stderr, to find slow ones.
+//! `CARDINAL_FUZZ_PLAN` (any value) also checks every operator's bounds
+//! ([`cardinal::Analysis::plan_bounds`]), which is not in use.
 
 mod common;
 
-use cardinal::analyze_sql;
+use cardinal::Analysis;
 use common::{Rng, check_bounds, shop_datasets};
 use datafusion::prelude::SessionContext;
 
@@ -335,7 +337,7 @@ struct Stats {
 }
 
 /// Checks one query on every context of one mode; returns its upper bound
-/// without facts, or `None` if DataFusion cannot plan it.
+/// without row counts, or `None` if DataFusion cannot plan it.
 async fn check_mode(
     sql: &str,
     ctxs: &[(String, SessionContext)],
@@ -352,11 +354,13 @@ async fn check_mode(
         if df.collect().await.is_err() {
             return None;
         }
-        let a = match analyze_sql(ctx, sql, Default::default()).await {
-            Ok(a) => a,
-            Err(_) => return None,
+        let Ok(query) = Analysis::sql(ctx, sql).await else {
+            return None;
         };
-        // Bounds without facts depend only on the query; compute them once
+        let Ok(a) = query.clone().build() else {
+            return None;
+        };
+        // Bounds without row counts depend only on the query; compute them once
         // per mode.
         let b = *bounds.get_or_insert_with(|| a.bounds().unwrap());
         let v = a.validate(ctx).await.unwrap();
@@ -389,16 +393,18 @@ async fn check_mode(
             }
         }
         if v.violation.is_none() {
-            let sized = common::sized(&a, &sizes);
+            let sized = common::sized(&query, &sizes);
             for f in check_bounds(&sized, &a, &v) {
                 failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
             }
             if v.rows.get(&a.root).is_some_and(|&n| sized.lower == n && sized.upper == Some(n)) {
                 stats.exact += 1;
             }
-            let plan = a.with_facts(&common::table_sizes(&sizes)).unwrap().plan_bounds().unwrap();
-            for f in common::check_plan_bounds(&plan, &v) {
-                failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
+            if std::env::var("CARDINAL_FUZZ_PLAN").is_ok() {
+                let plan = query.with_cardinalities(sizes.iter().cloned()).build().unwrap().plan_bounds().unwrap();
+                for f in common::check_plan_bounds(&plan, &v) {
+                    failures.push(format!("{dname}: with sizes {sizes:?}, {f}: {sql}\n{}", a.plan));
+                }
             }
         }
     }

@@ -3,8 +3,7 @@
 # at scale factor 0.01, the data DuckDB's dbgen makes for tests/duckdb: a
 # profile per query (TPC-H's, tests/duckdb/extra's and tests/postgres/extra's),
 # each TPC-H query's plain EXPLAIN plan, the profiles again with indexes on
-# the keys, and again in parallel, one over a partial index, and the true
-# counts that tests/postgres.rs checks the derived facts against.
+# the keys, and again in parallel, and one over a partial index.
 #
 #
 # Connects as psql does (PGHOST, PGPORT, PGUSER, ...), and (re)creates the
@@ -132,11 +131,3 @@ JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indpred IS NOT NULL;
 SQL
 psql -q -d "$db" -c "DROP INDEX orders_urgent"
 
-# Every fact the tests derive that counts rows of base tables, counted: of
-# the plans with indexes, too.
-(cd "$root" && cargo test -q --test postgres dump_fact_queries > /dev/null)
-{
-  echo "SELECT json_agg(t) FROM ("
-  sed -e 's/;[[:space:]]*$//' "$out/fact_checks.sql"
-  echo ") t;"
-} | psql -q -At -d "$db" > "$out/fact_checks.json"

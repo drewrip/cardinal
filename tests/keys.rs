@@ -5,7 +5,7 @@
 mod common;
 
 use cardinal::observed::Catalog;
-use cardinal::{Analysis, Bounds, ForeignKey, Options, analyze_duckdb, analyze_sql};
+use cardinal::{Analysis, Bounds, Builder, ForeignKey, Options};
 use datafusion::prelude::SessionContext;
 
 /// Data satisfying every declared key. `codes.code` is UNIQUE and holds
@@ -41,14 +41,14 @@ async fn context() -> SessionContext {
     ctx
 }
 
-/// `sql` analyzed with `foreign_keys`, checked against the data.
-async fn analyze(sql: &str, foreign_keys: Vec<ForeignKey>) -> Analysis {
+/// `sql` with `foreign_keys`, its analysis checked against the data.
+async fn analyze(sql: &str, foreign_keys: Vec<ForeignKey>) -> Builder<'static> {
     let ctx = context().await;
     let options = Options { foreign_keys, ..Default::default() };
-    let a = analyze_sql(&ctx, sql, options).await.unwrap();
-    let v = a.validate(&ctx).await.unwrap();
+    let query = Analysis::sql(&ctx, sql).await.unwrap().options(options);
+    let v = query.clone().build().unwrap().validate(&ctx).await.unwrap();
     assert_eq!(v.violation, None, "{sql}");
-    a
+    query
 }
 
 /// Sizes for the tables, all different (any satisfy the keys), so that a
@@ -67,7 +67,7 @@ const SIZES: &[(&str, u64)] = &[
 
 /// The output's bounds, with no foreign keys.
 async fn bounds(sql: &str) -> Bounds {
-    let b = analyze(sql, vec![]).await.bounds().unwrap();
+    let b = analyze(sql, vec![]).await.build().unwrap().bounds().unwrap();
     println!("{sql}\n  {b}");
     b
 }
@@ -291,7 +291,7 @@ async fn observed_plans_see_declared_keys() {
         let catalog = Catalog::from_context(&ctx).await.unwrap();
         let sql = "SELECT f.id, d.name FROM facts f JOIN dims d ON f.dim_id = d.id";
         let options = Options { ..Default::default() };
-        let a = analyze_duckdb(&catalog, DUCKDB_KEY_JOIN, Some(sql), options).unwrap();
+        let a = Analysis::duckdb(&catalog, DUCKDB_KEY_JOIN, Some(sql)).unwrap().options(options);
         common::sized(&a, &[("facts", 1000), ("dims", 100)]).upper
     };
     assert_eq!(bounds(true).await, Some(1000));
@@ -308,7 +308,7 @@ async fn validation_checks_the_dependencies_relied_on() {
         ctx.sql(sql).await.unwrap().collect().await.unwrap();
     }
     let sql = "SELECT id, x FROM dup GROUP BY id, x";
-    let a = analyze_sql(&ctx, sql, Options::default()).await.unwrap();
+    let a = Analysis::sql(&ctx, sql).await.unwrap().build().unwrap();
     let v = a.validate(&ctx).await.unwrap();
     assert!(v.violation.as_ref().is_some_and(|op| op.contains("determine")), "{:?}", v.violation);
     // Data keeping the key, every dependency holds.

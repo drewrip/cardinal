@@ -1,4 +1,4 @@
-//! Which columns determine a relation's rows: declared keys, followed through
+//! Which columns determine an op output's rows: declared keys, followed through
 //! the plan, and the functional dependencies they imply.
 
 use std::collections::BTreeSet;
@@ -8,9 +8,10 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::logical_plan::{Distinct, Join, LogicalPlan};
 
 use crate::analysis::{Analyzer, Dependency, Determines, ScanKind, address};
+use crate::rules::join::exact_pair;
 use crate::rules::{
-    child_column, column_index, determined, equalities, exact_index, key_column, output_indices, pinned, same_positions, scan_pinned,
-    strip_alias, with_equalities,
+    child_column, column_index, determined, equalities, exact_index, grouping_sets, key_column, output_indices, passed_rows, pinned, row_number,
+    same_positions, scan_pinned, strip_alias, with_equalities,
 };
 
 impl<'a> Analyzer<'a> {
@@ -119,14 +120,13 @@ impl<'a> Analyzer<'a> {
                     return false;
                 };
                 let n = w.input.schema().fields().len();
-                let numbered = ix.iter().filter(|&&i| i >= n).any(|&i| match strip_alias(&w.window_expr[i - n]) {
-                    Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
-                        f.params.partition_by.iter().all(|p| match strip_alias(p) {
+                let numbered = ix.iter().filter(|&&i| i >= n).any(|&i| {
+                    row_number(&w.window_expr[i - n]).is_some_and(|partition| {
+                        partition.iter().all(|p| match strip_alias(p) {
                             Expr::Column(c) => w.input.schema().index_of_column(c).is_ok_and(|j| ix.contains(&j)),
                             _ => false,
                         })
-                    }
-                    _ => false,
+                    })
                 });
                 let kept: Vec<Column> = ix
                     .iter()
@@ -134,15 +134,6 @@ impl<'a> Analyzer<'a> {
                     .map(|&i| Column::from(w.input.schema().qualified_field(i)))
                     .collect();
                 numbered || (!kept.is_empty() && self.covers_key(&w.input, &kept, nulls))
-            }
-            // Operators whose output rows are a subset of their input's, with the
-            // input's columns first and unchanged.
-            LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_) => {
-                let child = plan.inputs()[0];
-                same_positions(plan, child, cols).is_some_and(|cs| self.covers_key(child, &cs, nulls))
             }
             // DISTINCT's output is unique on all its columns, and is a subset of its
             // input's rows, so its input's keys stay unique too.
@@ -181,11 +172,7 @@ impl<'a> Analyzer<'a> {
             // one row, unique on anything. ROLLUP / CUBE / GROUPING SETS repeat keys
             // across grouping levels.
             LogicalPlan::Aggregate(agg) => {
-                if agg
-                    .group_expr
-                    .iter()
-                    .any(|e| matches!(e, Expr::GroupingSet(_)))
-                {
+                if grouping_sets(agg) {
                     return false;
                 }
                 if agg.group_expr.is_empty() {
@@ -293,6 +280,10 @@ impl<'a> Analyzer<'a> {
                     JoinType::Full => false,
                 }
             }
+            // Rows among the input's, its columns first and unchanged.
+            p if let Some((child, _)) = passed_rows(p) => {
+                same_positions(plan, child, cols).is_some_and(|cs| self.covers_key(child, &cs, nulls))
+            }
             // Unions, scans of non-tables and everything else: no key to rely on.
             _ => false,
         }
@@ -341,23 +332,15 @@ impl<'a> Analyzer<'a> {
                 }
                 out.extend(with_equalities(keys, &equalities(&f.predicate, &f.input), |k| self.fd_closure(&f.input, k)));
             }
-            LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Distinct(Distinct::All(_)) => out.extend(same(plan.inputs()[0])),
             // The window's own columns are not determined, but `row_number()`
             // and its partition columns pick out one row.
             LogicalPlan::Window(w) => {
                 out.extend(same(&w.input));
                 let n = w.input.schema().fields().len();
-                let numbered = w.window_expr.iter().enumerate().any(|(i, e)| match strip_alias(e) {
-                    Expr::WindowFunction(f) if f.fun.name() == "row_number" && f.params.filter.is_none() => {
-                        out.contains(&(n + i))
-                            && f.params.partition_by.iter().all(|p| determined(p, &w.input, &out))
-                    }
-                    _ => false,
+                let numbered = w.window_expr.iter().enumerate().any(|(i, e)| {
+                    row_number(e).is_some_and(|partition| {
+                        out.contains(&(n + i)) && partition.iter().all(|p| determined(p, &w.input, &out))
+                    })
                 });
                 if numbered {
                     out.extend(0..width);
@@ -390,7 +373,7 @@ impl<'a> Analyzer<'a> {
                         let pairs: Vec<(usize, usize)> = join
                             .on
                             .iter()
-                            .filter_map(|(a, b)| Some((exact_index(&join.left, a)?, nl + exact_index(&join.right, b)?)))
+                            .filter_map(|(a, b)| exact_pair(join, a, b).map(|(i, j)| (i, nl + j)))
                             .collect();
                         out.extend(with_equalities(keys.to_vec(), &pairs, |k| {
                             let mut closed = side(&join.left, k, 0);
@@ -436,7 +419,7 @@ impl<'a> Analyzer<'a> {
                     JoinType::Full => {}
                 }
             }
-            LogicalPlan::Aggregate(agg) if !agg.group_expr.iter().any(|e| matches!(e, Expr::GroupingSet(_))) => {
+            LogicalPlan::Aggregate(agg) if !grouping_sets(agg) => {
                 let groups = agg.group_expr.len();
                 let input: Vec<usize> = keys
                     .iter()
@@ -450,7 +433,12 @@ impl<'a> Analyzer<'a> {
                     out.extend(0..width);
                 }
             }
-            _ => {}
+            // Rows among the input's, its columns first and unchanged.
+            p => {
+                if let Some((input, _)) = passed_rows(p) {
+                    out.extend(same(input));
+                }
+            }
         }
         out
     }
@@ -478,12 +466,7 @@ impl<'a> Analyzer<'a> {
                 let input: Vec<usize> = keys.iter().filter_map(|&k| column_index(&p.input, &p.expr[k])).collect();
                 self.determines_key(&p.input, &input)
             }
-            LogicalPlan::Filter(_)
-            | LogicalPlan::Sort(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::SubqueryAlias(_) => {
-                let input = plan.inputs()[0];
+            p if let Some((input, _)) = passed_rows(p) => {
                 let n = input.schema().fields().len();
                 self.determines_key(input, &keys.iter().copied().filter(|&k| k < n).collect::<Vec<_>>())
             }
@@ -501,22 +484,8 @@ impl<'a> Analyzer<'a> {
 
     /// [`Self::determining_keys`] of the output positions `cols`, with
     /// `sizes` by position in `cols`. The kept positions are in `cols`' order.
+    /// Relies on the dependency of the dropped positions on the kept.
     pub(crate) fn determining(&self, plan: &LogicalPlan, cols: &[usize], sizes: &[Option<u128>]) -> Vec<usize> {
-        let (keys, dependency) = self.determining_with(plan, cols, sizes);
-        if let Some(d) = dependency {
-            self.rely(plan, d);
-        }
-        keys
-    }
-
-    /// [`Self::determining`], returning the dependency it relies on, if it
-    /// drops any position, for the caller to record.
-    pub(crate) fn determining_with(
-        &self,
-        plan: &LogicalPlan,
-        cols: &[usize],
-        sizes: &[Option<u128>],
-    ) -> (Vec<usize>, Option<Dependency>) {
         let mut order: Vec<usize> = (0..cols.len()).collect();
         order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().flatten().unwrap_or(u128::MAX)));
         let mut keys: Vec<usize> = cols.to_vec();
@@ -528,9 +497,10 @@ impl<'a> Analyzer<'a> {
                 keys = rest;
             }
         }
-        let dependency =
-            (keys.len() < cols.len()).then(|| Dependency { on: keys.clone(), determines: Determines::Columns(cols.to_vec()) });
-        (keys, dependency)
+        if keys.len() < cols.len() {
+            self.rely(plan, Dependency { on: keys.clone(), determines: Determines::Columns(cols.to_vec()) });
+        }
+        keys
     }
 
     /// Notes that a rule relied on `d` holding in `plan`'s rows.

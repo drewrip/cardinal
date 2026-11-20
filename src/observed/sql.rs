@@ -24,7 +24,7 @@ const AGGREGATES: &[&str] = &[
     "stddev_samp", "variance", "var_pop", "var_samp", "median", "mode", "string_agg", "list", "array_agg",
 ];
 
-/// Facts about a query's text.
+/// What a query's text says: its aliases.
 #[derive(Debug, Default)]
 pub struct QueryText {
     /// Row-level SELECT aliases, as their expressions with qualifiers dropped.

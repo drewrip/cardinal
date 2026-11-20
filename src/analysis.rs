@@ -1,13 +1,12 @@
 //! Building one plan's SMT system: a bottom-up walk over a DataFusion
 //! `LogicalPlan` by an [`Analyzer`].
 //!
-//! Every operator gets a [`Rel`]: an integer variable for its output
+//! Every operator gets an [`OpOutput`]: an integer variable for its output
 //! cardinality and, per output column, one bounding its number of distinct
 //! values (NDV, with NULL counted as one value), and for some its least and
 //! greatest value. The operator's rule ([`crate::rules`]) relates them to its
-//! inputs' and records the relation, and how its rows are its inputs', in
-//! the [`Analyzer`]'s ledger; once the walk is done, the
-//! [axioms](crate::axioms) pass asserts what holds of them.
+//! inputs', and records its node in the [`Analyzer`]; once every plan is
+//! walked, [link](crate::link) relates its select-project-join subtrees.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -19,14 +18,12 @@ use datafusion::common::Column;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::logical_plan::{LogicalPlan, TableScan};
-use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{BinaryExpr, Expr, TableProviderFilterPushDown};
-use z3::ast::{Bool, Int};
+use z3::ast::{Ast, Bool, Int};
 use z3::{Params, Solver};
 
 use crate::ForeignKey;
 use crate::domain::{self, Facts};
-use crate::origin::Origin;
 
 /// How a `TableScan` is treated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,13 +43,12 @@ pub(crate) struct TableVar {
     pub(crate) var: Int,
 }
 
-/// The abstract state of a relation: a variable for its cardinality and, per
-/// output column, one for its number of distinct values and, for some, its
-/// least and greatest value; and what is known of its rows whatever the data.
+/// An operator's output: variables for its rows, and what is known of them.
+/// A variable for its cardinality and, per output column, one for its
+/// number of distinct values and, for some, its least and greatest value;
+/// and what its rows satisfy whatever the data.
 #[derive(Clone)]
-pub struct Rel {
-    /// Its record in [`Analyzer::relations`].
-    pub(crate) id: RelId,
+pub struct OpOutput {
     pub(crate) card: Int,
     pub(crate) ndv: Vec<Int>,
     /// Per output column, the ends of an interval holding each of its
@@ -65,56 +61,25 @@ pub struct Rel {
     pub(crate) unit: Vec<Option<Unit>>,
     /// What every row's values satisfy, whatever the data.
     pub(crate) facts: Facts,
-    /// Facts that also hold for any subset of the rows.
-    pub(crate) rows: Rows,
-    /// The stored table this relation's rows are distinct rows of, if any.
-    pub(crate) origin: Option<Origin>,
+    /// Bounds that also hold of any subset of the rows.
+    pub(crate) subset_bounds: SubsetBounds,
 }
 
-/// A relation's index in [`Analyzer::relations`].
-pub(crate) type RelId = usize;
-
-/// A relation as the [axioms](crate::axioms) read it: its final state, the
-/// operator that made it, and where it came from.
-pub(crate) struct Relation {
-    /// The relation once its rule is done with it ([`Analyzer::finish`]).
-    pub(crate) rel: Rel,
-    pub(crate) plan: LogicalPlan,
-    /// For a stored table's scan, before pushed-down filters: the scan,
-    /// whose declared keys bound it.
-    pub(crate) scan: Option<TableScan>,
-    /// The frame of the node it was made for, for [`crate::trace`].
-    pub(crate) frame: Option<usize>,
-    /// The node it is the output of: none for a scan's raw rows.
-    pub(crate) node: Option<usize>,
+impl OpOutput {
+    /// Takes what is known of `l`'s rows, for an operator that keeps some of
+    /// them as they are, columns unchanged.
+    pub(crate) fn inherit(&mut self, l: &OpOutput) {
+        self.facts = l.facts.clone();
+        self.subset_bounds = l.subset_bounds.clone();
+    }
 }
 
-/// How a rule found one relation's rows are another's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LinkKind {
-    /// [`Analyzer::same_rows`].
-    SameRows,
-    /// [`Analyzer::subset`].
-    Subset,
-    /// [`Analyzer::wider`].
-    Wider,
-}
-
-/// That relation `o`'s rows are relation `l`'s, as `kind` says, with
-/// `columns` pairing a column of `o` with the column of `l` it holds.
-pub(crate) struct Link {
-    pub(crate) kind: LinkKind,
-    pub(crate) o: RelId,
-    pub(crate) l: RelId,
-    pub(crate) columns: Vec<(usize, usize)>,
-    /// The frame of the node whose rule found it.
-    pub(crate) frame: Option<usize>,
-}
-
-/// Facts about a relation's rows that also hold for any subset of them, so
-/// they survive operators that keep some rows as they are.
+/// Bounds on an output's rows that hold of any subset of them too, so they
+/// carry up through operators that keep some rows as they are. Each waits on
+/// a domain to apply: a column of counts summing to `b`, a unique key, a
+/// column NULL on at most `n` rows.
 #[derive(Clone, Default)]
-pub(crate) struct Rows {
+pub(crate) struct SubsetBounds {
     /// `(column, bound)`: the column holds non-negative integers summing to at
     /// most `bound` over all rows, like the counts of a GROUP BY.
     pub(crate) sums: Vec<(Expr, Int)>,
@@ -126,11 +91,11 @@ pub(crate) struct Rows {
     pub(crate) nulls: Vec<(Expr, Int, Int)>,
 }
 
-impl Rows {
-    /// The facts whose columns all map through `map`, over the new columns.
-    pub(crate) fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> Rows {
+impl SubsetBounds {
+    /// The bounds whose columns all map through `map`, over the new columns.
+    pub(crate) fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> SubsetBounds {
         let r = |c: &Expr| domain::rename(c, map);
-        Rows {
+        SubsetBounds {
             sums: self
                 .sums
                 .iter()
@@ -153,9 +118,9 @@ impl Rows {
 /// The state of one analysis: the Z3 solver and every variable and
 /// assertion so far. Its walk over a plan (`Analyzer::visit`) runs each
 /// operator's [rule](crate::rules), which asserts what the operator adds
-/// and records its relations and links; the [axioms](crate::axioms) pass
-/// then asserts what holds of them. Each rule and axiom is one of its
-/// methods. Made by [`Analysis`](crate::Analysis).
+/// and how its rows are its inputs', and records its node;
+/// [link](crate::link) then relates their select-project-join subtrees. Each
+/// rule is one of its methods. Made by [`Analysis`](crate::Analysis).
 pub struct Analyzer<'a> {
     pub(crate) solver: Solver,
     pub(crate) resolve: &'a dyn Fn(&TableScan) -> ScanKind,
@@ -169,13 +134,6 @@ pub struct Analyzer<'a> {
     /// Every plan node, children before parents, so a validator can evaluate
     /// them bottom-up.
     pub(crate) nodes: Vec<Node>,
-    /// Every relation the rules made, by [`RelId`], for the axioms.
-    pub(crate) relations: Vec<Relation>,
-    /// Every link the rules found between relations, for the axioms.
-    pub(crate) links: RefCell<Vec<Link>>,
-    /// Every count variable (rows, distinct values, a table's size), with
-    /// the frame it was made in, for the axioms: none is negative.
-    pub(crate) counts: Vec<(Int, Option<usize>)>,
     /// Ids of visited nodes not yet claimed by a parent.
     pub(crate) frontier: Vec<usize>,
     pub(crate) counter: usize,
@@ -200,18 +158,19 @@ pub struct Analyzer<'a> {
     /// The names of the columns that get min and max variables
     /// ([`ranged_columns`]).
     pub(crate) ranged: BTreeSet<String>,
-    /// The last base scan's raw min and max variables, for its node to take.
-    pub(crate) raw_ranges: (Vec<Option<String>>, Vec<Option<String>>),
+    /// Whether to assert [`referenced size`](Self::referenced_size) on each
+    /// scan, with reference plans ([`crate::joint`]).
+    pub(crate) referenced_sizes: bool,
 }
 
-/// One assertion: the frame of the node it was made for (none for
-/// partitions), and the line of the analyzer that made it.
+/// One assertion: the frame of the node it was made for (none for one
+/// over several nodes), and the line of the analyzer that made it.
 pub(crate) struct Logged {
     pub(crate) expr: Bool,
     pub(crate) frame: Option<usize>,
     pub(crate) at: &'static Location<'static>,
-    /// The axiom it is, for one asserted by name rather than by a function
-    /// of its own.
+    /// The property it is, for one asserted by name rather than by a
+    /// function of its own.
     pub(crate) rule: Option<&'static str>,
 }
 
@@ -225,19 +184,26 @@ pub(crate) struct Node {
     pub(crate) plan: LogicalPlan,
     /// Node ids of `plan.inputs()`, in order.
     pub(crate) inputs: Vec<usize>,
-    /// For a base scan with pushed-down filters: the raw scan's cardinality and
-    /// NDV variables, and the scan without filters or fetch.
-    pub(crate) raw_scan: Option<(String, Vec<String>, LogicalPlan)>,
+    /// For a base scan with pushed-down filters: the scan before them.
+    pub(crate) raw_scan: Option<RawScan>,
     /// The min and max variable of each output column that has them
-    /// ([`Rel::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
+    /// ([`OpOutput::min`]), `op{n}_{kind}_c{j}_min` and `_max`.
     pub(crate) min_vars: Vec<Option<String>>,
     pub(crate) max_vars: Vec<Option<String>>,
-    /// The raw scan's, for a base scan with pushed-down filters.
-    pub(crate) raw_min_vars: Vec<Option<String>>,
-    pub(crate) raw_max_vars: Vec<Option<String>>,
     /// The functional dependencies the rules relied on among the output
     /// columns, for [`crate::Analysis::validate`] to check.
     pub(crate) dependencies: Vec<Dependency>,
+}
+
+/// A base scan before its pushed-down filters and fetch: its cardinality,
+/// `ndv`, min and max variables, and the scan without them.
+#[derive(Debug, Clone)]
+pub struct RawScan {
+    pub(crate) var: String,
+    pub(crate) ndv_vars: Vec<String>,
+    pub(crate) min_vars: Vec<Option<String>>,
+    pub(crate) max_vars: Vec<Option<String>>,
+    pub(crate) plan: LogicalPlan,
 }
 
 /// Rows agreeing on `on` (output positions, NULLs equal) agree on these
@@ -268,23 +234,6 @@ pub(crate) fn inexact_filters(scan: &TableScan) -> bool {
             .is_ok_and(|s| s.iter().all(|s| *s == TableProviderFilterPushDown::Inexact))
 }
 
-/// For filter node `i` over a scan whose pushed filters are all inexact and
-/// each among its own conjuncts, that scan's node. The scan's rows are a
-/// subset of the table's and hold every row satisfying its filters, so the
-/// filter's rows are exactly the table's rows satisfying its predicate.
-pub(crate) fn rechecked_scan(nodes: &[Node], i: usize) -> Option<usize> {
-    let LogicalPlan::Filter(f) = &nodes[i].plan else {
-        return None;
-    };
-    let k = *nodes[i].inputs.first()?;
-    let LogicalPlan::TableScan(scan) = &nodes[k].plan else {
-        return None;
-    };
-    let conjuncts = split_conjunction(&f.predicate);
-    let rechecked = scan.filters.iter().all(|p| conjuncts.contains(&p));
-    (nodes[k].raw_scan.is_some() && scan.fetch.is_none() && inexact_filters(scan) && rechecked).then_some(k)
-}
-
 /// How long Z3 may spend on one check before answering unknown.
 pub(crate) const SOLVER_TIMEOUT_MS: u32 = 10_000;
 
@@ -298,6 +247,24 @@ pub(crate) fn solver_with_timeout(ms: u32) -> Solver {
     params.set_u32("timeout", ms);
     solver.set_params(&params);
     solver
+}
+
+/// A solver whose every check is limited to `rlimit` of Z3's resource
+/// count and `ms` milliseconds ([`set_limits`]).
+pub(crate) fn solver_with_limits(rlimit: u32, ms: u32) -> Solver {
+    let solver = Solver::new();
+    set_limits(&solver, rlimit, ms);
+    solver
+}
+
+/// Limits each of `solver`'s next checks to `rlimit` of Z3's resource
+/// count, counted from the check's start (not cumulative over checks),
+/// and `ms` milliseconds.
+pub(crate) fn set_limits(solver: &Solver, rlimit: u32, ms: u32) {
+    let mut params = Params::new();
+    params.set_u32("rlimit", rlimit);
+    params.set_u32("timeout", ms);
+    solver.set_params(&params);
 }
 
 /// Restricts a Z3 symbol to `[A-Za-z0-9_]` so it round-trips through SMT-LIB
@@ -351,9 +318,6 @@ impl<'a> Analyzer<'a> {
             nodes: Vec::new(),
             frontier: Vec::new(),
             counter: 0,
-            relations: Vec::new(),
-            links: RefCell::new(Vec::new()),
-            counts: Vec::new(),
             max_product,
             foreign_keys,
             trace,
@@ -364,7 +328,7 @@ impl<'a> Analyzer<'a> {
             node_at: HashMap::new(),
             relied: RefCell::new(Vec::new()),
             ranged: BTreeSet::new(),
-            raw_ranges: Default::default(),
+            referenced_sizes: false,
         }
     }
 
@@ -381,18 +345,19 @@ impl<'a> Analyzer<'a> {
         v
     }
 
-    /// A variable counting something: rows or distinct values.
+    /// A variable counting something, rows or distinct values: never
+    /// negative.
     pub(crate) fn new_var(&mut self, name: String) -> Int {
         let v = Int::new_const(name.as_str());
-        self.counts.push((v.clone(), self.owners.last().copied()));
+        self.non_negative(&v);
         self.vars.push((name, v.clone()));
         v
     }
 
-    /// Creates a fresh relation for `plan`'s output: a cardinality variable
-    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`, recorded in
-    /// [`Self::relations`] for the axioms.
-    pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> Rel {
+    /// Creates a fresh op output for `plan`: a cardinality variable
+    /// `op{n}_{kind}` and NDV variables `op{n}_{kind}_c{j}`. Asserts what
+    /// holds of any columns of any rows.
+    pub(crate) fn fresh(&mut self, kind: &str, plan: &LogicalPlan) -> OpOutput {
         let base = format!("op{}_{}", self.counter, symbol(kind));
         self.counter += 1;
         let card = self.new_var(base.clone());
@@ -402,7 +367,7 @@ impl<'a> Analyzer<'a> {
             .iter()
             .map(|f| f.data_type().clone())
             .collect();
-        let ndv = fields
+        let ndv: Vec<Int> = fields
             .iter()
             .enumerate()
             .map(|(j, _)| self.new_var(format!("{base}_c{j}")))
@@ -415,56 +380,44 @@ impl<'a> Analyzer<'a> {
             max.push(u.is_some().then(|| self.range_var(format!("{base}_c{j}_max"))));
             units.push(u);
         }
-        let rel = Rel {
-            id: self.relations.len(),
+        for (v, t) in ndv.iter().zip(&fields) {
+            self.ndv_within_rows(v, &card);
+            self.nonempty_ndv(v, &card);
+            if t == &DataType::Boolean {
+                self.boolean_ndv(v);
+            }
+        }
+        let out = OpOutput {
             card,
             ndv,
             min,
             max,
             unit: units,
             facts: Facts::default(),
-            rows: Rows::default(),
-            origin: None,
+            subset_bounds: SubsetBounds::default(),
         };
-        self.relations.push(Relation {
-            rel: rel.clone(),
-            plan: plan.clone(),
-            scan: None,
-            frame: self.owners.last().copied(),
-            node: None,
-        });
-        rel
+        out
     }
 
-    /// Records `rel` as its rule leaves it, with the facts found of its
-    /// rows, for the axioms; with `node` if it is that node's output.
-    pub(crate) fn finish(&mut self, rel: &Rel, node: Option<usize>) {
-        let r = &mut self.relations[rel.id];
-        r.rel = rel.clone();
-        r.node = node;
+    /// Asserts what follows of `out`, the output of `plan`, as its rule
+    /// leaves it ([`Self::on_op_output`]).
+    pub(crate) fn finish(&mut self, out: &OpOutput, plan: &LogicalPlan) {
+        self.on_op_output(out, plan);
     }
 
-    /// Records that `o`'s rows are `l`'s as `kind` says, with `columns`
-    /// pairing their columns: [`Self::same_rows`], [`Self::subset`] or
-    /// [`Self::wider`], asserted by the axioms.
-    pub(crate) fn link(&self, o: &Rel, kind: LinkKind, l: &Rel, columns: &[(usize, usize)]) {
-        let frame = self.owners.last().copied();
-        self.links.borrow_mut().push(Link { kind, o: o.id, l: l.id, columns: columns.to_vec(), frame });
-    }
-
-    /// The unquoted name of a variable created by `new_var`.
+    /// The name of a variable created by `new_var`.
     pub(crate) fn name_of(&self, v: &Int) -> String {
-        self.vars
-            .iter()
-            .find(|(_, x)| x == v)
-            .map(|(n, _)| n.clone())
-            .expect("variable was created by new_var")
+        let name = v.decl().name();
+        // Most often a recent variable: searched from the newest.
+        debug_assert!(self.vars.iter().rev().any(|(n, _)| *n == name), "variable was created by new_var");
+        name
     }
 
-    pub(crate) fn names_of(&self, rel: &Rel) -> Vec<String> {
-        rel.ndv.iter().map(|v| self.name_of(v)).collect()
+    pub(crate) fn names_of(&self, out: &OpOutput) -> Vec<String> {
+        out.ndv.iter().map(|v| self.name_of(v)).collect()
     }
 
+    /// Asserts `b`.
     #[track_caller]
     pub(crate) fn assert(&self, b: Bool) {
         if self.trace {
@@ -478,13 +431,24 @@ impl<'a> Analyzer<'a> {
         self.solver.assert(b);
     }
 
-    /// Asserts `b`, an instance of axiom `rule`, for no node in particular.
-    #[track_caller]
-    pub(crate) fn assert_axiom(&self, rule: &'static str, b: Bool) {
-        if self.trace {
-            self.log.borrow_mut().push(Logged { expr: b.clone(), frame: None, at: Location::caller(), rule: Some(rule) });
-        }
+    /// Asserts `b`, kept out of the trace's log: the caller traces it
+    /// itself.
+    pub(crate) fn assert_untraced(&self, b: Bool) {
         self.solver.assert(b);
+    }
+
+    /// Asserts each of `claims`, the [property](crate::properties) `name`,
+    /// for the node being visited, if any.
+    #[track_caller]
+    pub(crate) fn assert_property(&self, name: &'static str, claims: Vec<Bool>) {
+        let at = Location::caller();
+        for claim in claims {
+            if self.trace {
+                let frame = self.owners.last().copied();
+                self.log.borrow_mut().push(Logged { expr: claim.clone(), frame, at, rule: Some(name) });
+            }
+            self.solver.assert(claim);
+        }
     }
 
     pub(crate) fn table(&mut self, key: &str, display: &str) -> Int {
@@ -495,7 +459,7 @@ impl<'a> Analyzer<'a> {
         // with operator variables (which start with `op`).
         let symbol = format!("T{}_{}", self.tables.len(), symbol(display));
         let var = Int::new_const(symbol.as_str());
-        self.counts.push((var.clone(), self.owners.last().copied()));
+        self.non_negative(&var);
         self.tables.insert(
             key.to_string(),
             TableVar {
@@ -508,7 +472,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Returns the abstract state of `plan`'s output.
-    pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> Rel {
+    pub(crate) fn visit(&mut self, plan: &LogicalPlan) -> OpOutput {
         let frame = self.next_frame;
         self.next_frame += 1;
         // Subqueries left inside expressions (e.g. an uncorrelated scalar subquery
@@ -523,7 +487,6 @@ impl<'a> Analyzer<'a> {
         self.frontier.truncate(mark);
         self.owners.push(frame);
         let (out, raw_scan) = self.visit_node(plan);
-        let (raw_min_vars, raw_max_vars) = std::mem::take(&mut self.raw_ranges);
         let inputs = self.frontier.split_off(mark);
         debug_assert_eq!(inputs.len(), plan.inputs().len());
         let var = self.name_of(&out.card);
@@ -536,12 +499,10 @@ impl<'a> Analyzer<'a> {
             raw_scan,
             min_vars: range_names(&out.min),
             max_vars: range_names(&out.max),
-            raw_min_vars,
-            raw_max_vars,
             dependencies: vec![],
         });
         self.node_at.insert(address(plan), self.nodes.len() - 1);
-        self.finish(&out, Some(self.nodes.len() - 1));
+        self.finish(&out, plan);
         // Those of plans not yet visited wait for them; those of plans never
         // visited (rewritten copies) are dropped at the end.
         for (at, d) in std::mem::take(&mut *self.relied.borrow_mut()) {

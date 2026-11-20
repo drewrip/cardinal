@@ -1,4 +1,4 @@
-//! Value domains: which values an expression can take on the rows of a relation.
+//! Value domains: which values an expression can take on an op output's rows.
 //!
 //! Filters and join conditions only pass rows on which they evaluate to TRUE, so
 //! every row above them satisfies facts such as `x BETWEEN 1 AND 10` or
@@ -6,7 +6,7 @@
 //! finite set of values, plus whether NULL can occur. Domains flow up the plan
 //! with the columns they describe, and bound NDVs: a column whose values lie in
 //! a domain of `k` values has at most `k` distinct values. An empty domain means
-//! the relation has no rows at all.
+//! the op output has no rows at all.
 //!
 //! Only data-independent reasoning is used: a fact holds on every database.
 
@@ -299,7 +299,7 @@ impl Dom {
     }
 }
 
-/// Domains of expressions over one relation's output columns. An expression
+/// Domains of expressions over one op output's columns. An expression
 /// without a fact can still get a domain from its type or its structure; see
 /// [`Facts::dom`].
 #[derive(Debug, Clone, Default)]
@@ -388,7 +388,7 @@ impl Facts {
         }
     }
 
-    /// The facts whose columns all map to another relation's columns through
+    /// The facts whose columns all map to another op output's columns through
     /// `map`, rewritten over those columns.
     pub(crate) fn rename(&self, map: &dyn Fn(&Column) -> Option<Column>) -> Facts {
         Facts {
@@ -1157,18 +1157,23 @@ fn normalize(e: &Expr, schema: &DFSchema) -> Expr {
 /// Casts that keep every value, and its order, unchanged.
 fn widening(from: &DataType, to: &DataType) -> bool {
     use DataType::*;
-    from == to
-        || matches!((from, to), (Decimal128(p, s), Decimal128(q, t)) if s == t && q >= p)
-        || matches!(
-            (from, to),
-            (Int8, Int16 | Int32 | Int64)
-                | (Int16, Int32 | Int64)
-                | (Int32, Int64)
-                | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
-                | (UInt16, UInt32 | UInt64 | Int32 | Int64)
-                | (UInt32, UInt64 | Int64)
-                | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
-        )
+    from == to || matches!((from, to), (Decimal128(p, s), Decimal128(q, t)) if s == t && q >= p) || wider_type(from, to)
+}
+
+/// Casts from an integer type to one holding all its values, and between
+/// string types: each value, and its order, kept.
+pub(crate) fn wider_type(from: &DataType, to: &DataType) -> bool {
+    use DataType::*;
+    matches!(
+        (from, to),
+        (Int8, Int16 | Int32 | Int64)
+            | (Int16, Int32 | Int64)
+            | (Int32, Int64)
+            | (UInt8, UInt16 | UInt32 | UInt64 | Int16 | Int32 | Int64)
+            | (UInt16, UInt32 | UInt64 | Int32 | Int64)
+            | (UInt32, UInt64 | Int64)
+            | (Utf8 | LargeUtf8 | Utf8View, Utf8 | LargeUtf8 | Utf8View)
+    )
 }
 
 /// The proleptic Gregorian year of a day count since 1970-01-01.
