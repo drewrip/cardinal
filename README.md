@@ -21,6 +21,9 @@ let a = Analysis::sql(&ctx, sql).await?
     .with_cardinalities([("lineitem", 6001215), ("orders", 1500000)])
     .build()?;
 
+// Several queries alike, one result per query:
+let analyses = Analysis::sqls(&ctx, [q1, q2]).await?.options(options).build();
+
 // As DuckDB or PostgreSQL planned it, from EXPLAIN (FORMAT JSON) output:
 let a = Analysis::duckdb(&catalog, &explain_json, Some(sql))?.build()?;
 let a = Analysis::postgres(&catalog, &explain_json, Some(sql))?.build()?;

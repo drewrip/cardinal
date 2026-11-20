@@ -20,6 +20,9 @@
 //!     .build()?;
 //! ```
 //!
+//! A [`Batch`] analyzes several queries with the same options, plans and
+//! row counts ([`Analysis::sqls`], [`Analysis::batch`]).
+//!
 //! The constraints come from these passes, in order:
 //!
 //! 1. [`rules`]: a walk over the plan, and over the reference plans' parts
@@ -60,6 +63,7 @@
 
 pub mod analysis;
 pub mod link;
+mod batch;
 mod bounds;
 mod builder;
 mod domain;
@@ -72,6 +76,7 @@ pub mod rules;
 pub mod trace;
 mod validate;
 
+pub use batch::Batch;
 pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
 pub use builder::Builder;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};

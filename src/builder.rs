@@ -77,33 +77,8 @@ impl Analysis {
     /// `generate_series` are not counted as input. Reference plans are read
     /// against `ctx`'s tables.
     pub async fn sql(ctx: &SessionContext, sql: &str) -> Result<Builder<'static>> {
-        let state = ctx.state();
-        let plan = state.create_logical_plan(sql).await?;
-        let plan = state.optimize(&plan)?;
-        let catalog = state.config().options().catalog.clone();
-        let defaults = (catalog.default_catalog, catalog.default_schema);
-
-        let mut scans = Vec::new();
-        plan.apply_with_subqueries(|p| {
-            if let LogicalPlan::TableScan(scan) = p {
-                scans.push(scan.clone());
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
-        let mut base = HashMap::new();
-        for scan in scans {
-            let Ok(registered) = ctx.table_provider(scan.table_name.clone()).await else {
-                continue;
-            };
-            let Ok(scanned) = source_as_provider(&scan.source) else {
-                continue;
-            };
-            if provider_ptr(&registered) == provider_ptr(&scanned) {
-                base.insert(provider_ptr(&scanned), base_kind(&scan.table_name, &defaults.0, &defaults.1));
-            }
-        }
+        let query = plan_sql(ctx, sql).await?;
         let catalog = Catalog::from_context(ctx).await?;
-        let query = Query::DataFusion { plan, base: Some(base), defaults };
         Ok(Builder::new(query, Some(CatalogRef::Owned(Arc::new(catalog)))))
     }
 
@@ -141,7 +116,44 @@ impl Analysis {
     }
 }
 
+/// `sql` parsed and optimized with `ctx`, as [`Analysis::sql`] does: its
+/// base tables are the scans of `ctx`'s registered providers.
+async fn plan_sql(ctx: &SessionContext, sql: &str) -> Result<Query<'static>> {
+    let state = ctx.state();
+    let plan = state.create_logical_plan(sql).await?;
+    let plan = state.optimize(&plan)?;
+    let catalog = state.config().options().catalog.clone();
+    let defaults = (catalog.default_catalog, catalog.default_schema);
+
+    let mut scans = Vec::new();
+    plan.apply_with_subqueries(|p| {
+        if let LogicalPlan::TableScan(scan) = p {
+            scans.push(scan.clone());
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    let mut base = HashMap::new();
+    for scan in scans {
+        let Ok(registered) = ctx.table_provider(scan.table_name.clone()).await else {
+            continue;
+        };
+        let Ok(scanned) = source_as_provider(&scan.source) else {
+            continue;
+        };
+        if provider_ptr(&registered) == provider_ptr(&scanned) {
+            base.insert(provider_ptr(&scanned), base_kind(&scan.table_name, &defaults.0, &defaults.1));
+        }
+    }
+    Ok(Query::DataFusion { plan, base: Some(base), defaults })
+}
+
 impl<'c> Builder<'c> {
+    /// `sql`, planned with `ctx` as [`Analysis::sql`] plans it, reading
+    /// reference plans against `catalog`, `ctx`'s.
+    pub(crate) async fn sql(ctx: &SessionContext, sql: &str, catalog: Arc<Catalog>) -> Result<Builder<'static>> {
+        Ok(Builder::new(plan_sql(ctx, sql).await?, Some(CatalogRef::Owned(catalog))))
+    }
+
     fn new(query: Query<'c>, catalog: Option<CatalogRef<'c>>) -> Builder<'c> {
         Builder { query, catalog, options: Options::default(), plans: vec![], cardinalities: vec![] }
     }
