@@ -142,3 +142,24 @@ async fn link_assertions_are_traced() {
         assert!(linked.contains(&f), "no {f} in {linked:?}");
     }
 }
+
+#[tokio::test]
+async fn every_operators_bound_is_proven_from_its_own_subtree() {
+    let a = traced_sized("SELECT * FROM users WHERE age > 30").await;
+    let plan = a.plan_bounds().unwrap();
+    let proofs = a.explain_plan(&plan).unwrap();
+    assert_eq!(proofs.len(), plan.nodes.len());
+    let t = a.trace.as_ref().unwrap();
+    let filter = node_of(t, "Filter");
+    let upper = proofs[filter].iter().find(|p| p.name == format!("n{filter}.upper")).unwrap();
+    assert_eq!(upper.claim, format!("|#{filter}| <= 100"));
+    assert_eq!(upper.status, ProofStatus::Proven);
+    assert!(upper.minimal && uses_a_fact(t, upper), "{upper:?}");
+    // A node's bound needs nothing above it.
+    let above: Vec<usize> = (filter + 1..t.nodes.len()).collect();
+    assert!(upper.core.iter().all(|&c| t.constraints[c].node.is_none_or(|n| !above.contains(&n))), "{upper:?}");
+    // Nothing to prove, no proofs.
+    for (n, ps) in plan.nodes.iter().zip(&proofs) {
+        assert_eq!(ps.is_empty(), n.bounds.lower == 0 && n.bounds.upper.is_none());
+    }
+}

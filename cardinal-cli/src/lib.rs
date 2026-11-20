@@ -5,7 +5,8 @@
 //! constraint with the plan node and analyzer line it comes from), a
 //! [`Proof`] of each bound naming the constraints it needs; and, with
 //! reference plans or tables' row counts, the same again with them
-//! ([`InformedDump`]). [`ascii`] and [`html`] render one.
+//! ([`InformedDump`]). [`derivation`] orders a proof's constraints from its
+//! claim down to what it rests on. [`ascii`] and [`html`] render one.
 
 pub mod ascii;
 pub mod html;
@@ -36,6 +37,27 @@ pub struct Dump {
     pub plan_bounds: Option<PlanDump>,
 }
 
+impl Dump {
+    /// The proofs a view shows, the result's then every operator's, each with
+    /// a core into the view's trace. `informed`: those proven with the
+    /// reference plans and row counts (none if skipped). Plain: the informed
+    /// bounds proven without them if those were proven, else the plain
+    /// bounds' own.
+    pub fn proofs_of(&self, informed: bool) -> Vec<&Proof> {
+        let (root, plan) = match (&self.informed, informed) {
+            (Some(f), true) => (&f.proofs[..], f.plan_bounds.as_ref()),
+            (Some(f), false) if f.explained => (&f.base_proofs[..], self.plan_bounds.as_ref()),
+            _ => (&self.proofs[..], self.plan_bounds.as_ref()),
+        };
+        root.iter().chain(plan.iter().flat_map(|p| p.proofs.iter().flatten())).collect()
+    }
+
+    /// The proof named `name` of [`Dump::proofs_of`].
+    pub fn proof(&self, name: &str, informed: bool) -> Option<&Proof> {
+        self.proofs_of(informed).into_iter().find(|p| p.name == name)
+    }
+}
+
 /// Every operator's proven bounds, and their sum's
 /// ([`cardinal::Analysis::plan_bounds`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,12 +66,23 @@ pub struct PlanDump {
     pub nodes: Vec<String>,
     /// The sum of every node's output cardinality.
     pub total: String,
+    /// Each node's proofs of its bounds, by node id
+    /// ([`cardinal::Analysis::explain_plan`]); empty if not computed.
+    #[serde(default)]
+    pub proofs: Vec<Vec<Proof>>,
 }
 
 impl PlanDump {
-    fn of(a: &Analysis) -> Result<PlanDump, String> {
+    /// `a`'s operators' bounds, each with its proofs if `explain`.
+    fn of(a: &Analysis, explain: bool) -> Result<PlanDump, String> {
         let p = a.plan_bounds().map_err(|e| e.to_string())?;
-        Ok(PlanDump { nodes: p.nodes.iter().map(|n| n.bounds.to_string()).collect(), total: p.total.to_string() })
+        let proofs = if explain { a.explain_plan(&p).map_err(|e| e.to_string())? } else { vec![] };
+        Ok(PlanDump { nodes: p.nodes.iter().map(|n| n.bounds.to_string()).collect(), total: p.total.to_string(), proofs })
+    }
+
+    /// The proof named `name` (`n{id}.lower` or `n{id}.upper`).
+    pub fn proof(&self, name: &str) -> Option<&Proof> {
+        self.proofs.iter().flatten().find(|p| p.name == name)
     }
 }
 
@@ -158,6 +191,8 @@ pub struct Prove {
     pub bounds: bool,
     /// Every operator's ([`PlanDump`]).
     pub plan_bounds: bool,
+    /// A proof of every operator's bounds, too.
+    pub node_cores: bool,
 }
 
 /// Analyzes `source` against `ctx` with `options` (traced), proves the
@@ -188,7 +223,7 @@ pub async fn dump(
     let analysis = builder.clone().build().map_err(err)?;
     let proven = if prove.bounds { Some(analysis.bounds().map_err(err)?) } else { None };
     let proofs = explain(&analysis, proven.as_ref())?;
-    let plan_bounds = if prove.plan_bounds { Some(PlanDump::of(&analysis)?) } else { None };
+    let plan_bounds = if prove.plan_bounds { Some(PlanDump::of(&analysis, prove.node_cores)?) } else { None };
     let informed = match informed {
         Some(i) => Some(inform(&analysis, builder, i, prove)?),
         None => None,
@@ -211,7 +246,8 @@ fn inform(analysis: &Analysis, builder: Builder, input: &Informed, prove: Prove)
     let builder = builder.with_plans(&input.plans).with_cardinalities(input.cardinalities.iter().cloned());
     let informed = builder.build().map_err(err)?;
     let proven = if prove.bounds { Some(informed.bounds().map_err(err)?) } else { None };
-    let plan_bounds = if prove.plan_bounds { Some(PlanDump::of(&informed)?) } else { None };
+    let plan_bounds =
+        if prove.plan_bounds { Some(PlanDump::of(&informed, prove.node_cores && input.explain)?) } else { None };
     let (proofs, base_proofs) = if input.explain {
         (explain(&informed, proven.as_ref())?, explain(analysis, proven.as_ref())?)
     } else {
@@ -231,6 +267,63 @@ fn inform(analysis: &Analysis, builder: Builder, input: &Informed, prove: Prove)
 /// `a`'s proofs of `bounds`, none if they were not computed.
 fn explain(a: &Analysis, bounds: Option<&cardinal::Bounds>) -> Result<Vec<Proof>, String> {
     bounds.map_or(Ok(vec![]), |b| a.explain(b).map_err(|e| e.to_string()))
+}
+
+/// One constraint of a proof's core, in the order [`derivation`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Step {
+    /// The constraint's id.
+    pub constraint: usize,
+    /// How many steps it is from the claim: 0 for one over the claim's own
+    /// variable. Steps of one depth together explain the variables of the
+    /// steps before them.
+    pub depth: usize,
+    /// The variables it shares with the steps one depth up (with the claim,
+    /// at depth 0): why it is needed there.
+    pub via: Vec<String>,
+}
+
+/// `proof`'s core (over `trace`) as a chain from the claim down to what it
+/// rests on: first the constraints over the claim's variable, then those
+/// over the variables they bring in, and so on, ending at table sizes,
+/// pins and row counts. Within a depth, constraints of nodes nearer the root
+/// come first. Constraints sharing no variable with the chain come last, at
+/// depth 0.
+pub fn derivation(trace: &Trace, proof: &Proof) -> Vec<Step> {
+    use std::collections::HashSet;
+    let core: Vec<&cardinal::Constraint> = proof.core.iter().filter_map(|&i| trace.constraints.get(i)).collect();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut frontier: HashSet<&str> = proof
+        .smt
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter(|a| core.iter().any(|c| c.vars.iter().any(|v| v == a)))
+        .collect();
+    let mut used = vec![false; core.len()];
+    let mut steps = vec![];
+    let mut depth = 0;
+    while !frontier.is_empty() {
+        seen.extend(frontier.iter().copied());
+        let mut level: Vec<usize> = (0..core.len())
+            .filter(|&i| !used[i] && core[i].vars.iter().any(|v| frontier.contains(v.as_str())))
+            .collect();
+        level.sort_by_key(|&i| (std::cmp::Reverse(core[i].node), core[i].id));
+        let mut next = HashSet::new();
+        for &i in &level {
+            used[i] = true;
+            let c = core[i];
+            let via = c.vars.iter().filter(|v| frontier.contains(v.as_str())).cloned().collect();
+            next.extend(c.vars.iter().map(String::as_str).filter(|v| !seen.contains(v)));
+            steps.push(Step { constraint: c.id, depth, via });
+        }
+        frontier = next;
+        depth += 1;
+    }
+    for (i, c) in core.iter().enumerate() {
+        if !used[i] {
+            steps.push(Step { constraint: c.id, depth: 0, via: vec![] });
+        }
+    }
+    steps
 }
 
 /// `text` with each NDV variable named by its column, e.g. `op3_Filter_c1`

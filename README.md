@@ -29,11 +29,11 @@ let a = Analysis::duckdb(&catalog, &explain_json, Some(sql))?.build()?;
 let a = Analysis::postgres(&catalog, &explain_json, Some(sql))?.build()?;
 ```
 
-The `cardinal-debug` CLI shows the constraints behind a result:
+The `cardinal-cli` CLI shows the constraints behind a result:
 
 ```sh
-B="cargo run -p cardinal-debug --"
-$B analyze --schema cardinal-debug/tests/fixtures/tpch.sql --sql tests/tpch/q03.sql
+B="cargo run -p cardinal-cli --"
+$B analyze --schema cardinal-cli/tests/fixtures/tpch.sql --sql tests/tpch/q03.sql
 $B analyze ... --html q03.html  # plan tree beside its constraints
 $B analyze ... --profiles-dir tests/duckdb/tpch --except q03  # with other plans
 ```

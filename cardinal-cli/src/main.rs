@@ -1,11 +1,11 @@
-//! `cardinal-debug`: dump what cardinal tells Z3 about a query, and view it.
+//! `cardinal-cli`: dump what cardinal tells Z3 about a query, and view it.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cardinal::Options;
-use cardinal_debug::{Dump, Informed, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_plans};
+use cardinal_cli::{Dump, Informed, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_plans};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -78,6 +78,10 @@ struct Input {
     /// Skip proving every operator's bounds and their total.
     #[arg(long)]
     no_plan_bounds: bool,
+    /// Skip finding the constraints each operator's bounds need (the root's
+    /// are still found).
+    #[arg(long)]
+    no_node_cores: bool,
     #[command(flatten)]
     known: Known,
 }
@@ -125,7 +129,8 @@ struct Output {
     /// Write an HTML page here instead of printing text.
     #[arg(long)]
     html: Option<PathBuf>,
-    /// Only the constraints of this proof: `lower` or `upper`.
+    /// Only the constraints of this proof: `lower` or `upper` of the result,
+    /// `n{id}.lower` or `n{id}.upper` of plan node `id`.
     #[arg(long)]
     proof: Option<String>,
     /// Only this node's constraints, in full.
@@ -203,15 +208,20 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
     } else {
         None
     };
-    let prove = Prove { bounds: !input.no_bounds, plan_bounds: !input.no_bounds && !input.no_plan_bounds };
-    dump(&ctx, &source, options, prove, informed.as_ref()).await
+    let plan_bounds = !input.no_bounds && !input.no_plan_bounds;
+    let prove = Prove { bounds: !input.no_bounds, plan_bounds, node_cores: plan_bounds && !input.no_node_cores };
+    let start = std::time::Instant::now();
+    let d = dump(&ctx, &source, options, prove, informed.as_ref()).await?;
+    eprintln!("analyzed in {:.1}s", start.elapsed().as_secs_f64());
+    Ok(d)
 }
 
 fn show(d: &Dump, output: &Output) -> Result<(), String> {
     match &output.html {
         Some(path) => {
             if let Some(p) = &output.proof
-                && !d.proofs.iter().chain(d.informed.iter().flat_map(|f| &f.proofs)).any(|x| x.name == *p)
+                && d.proof(p, false).is_none()
+                && d.proof(p, true).is_none()
             {
                 return Err(format!("no proof {p:?}"));
             }

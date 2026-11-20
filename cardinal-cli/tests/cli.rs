@@ -1,22 +1,22 @@
-//! The `cardinal-debug` binary end to end, on TPC-H's schema.
+//! The `cardinal-cli` binary end to end, on TPC-H's schema.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use cardinal_debug::Dump;
+use cardinal_cli::Dump;
 
 const SCHEMA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tpch.sql");
 /// At most three orders, each with at most one customer.
 const QUERY: &str = "SELECT o_orderkey, c_name FROM orders JOIN customer ON o_custkey = c_custkey WHERE o_orderkey IN (1, 2, 3)";
 
 fn run(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_cardinal-debug")).args(args).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cardinal-cli")).args(args).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8(out.stdout).unwrap()
 }
 
 fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("cardinal-debug-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cardinal-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(name)
 }
@@ -62,7 +62,7 @@ fn reads_duckdb_plans() {
 
 #[test]
 fn unknown_proof_is_an_error() {
-    let out = Command::new(env!("CARGO_BIN_EXE_cardinal-debug"))
+    let out = Command::new(env!("CARGO_BIN_EXE_cardinal-cli"))
         .args(["analyze", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--no-plan-bounds", "--proof", "nope"])
         .output()
         .unwrap();
@@ -167,4 +167,66 @@ fn dumps_without_facts_still_load() {
     assert!(dump.informed.is_none() && dump.trace.constraints.iter().all(|c| c.fact.is_none()));
     let text = run(&["view", json.to_str().unwrap()]);
     assert!(!text.contains("Informed"), "{text}");
+}
+
+#[test]
+fn every_operator_bound_has_a_proof_and_a_derivation() {
+    let (json, html) = (temp("nodes.json"), temp("nodes.html"));
+    run(&["dump", "--schema", SCHEMA, "--query", QUERY, "-o", json.to_str().unwrap()]);
+    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let plan = dump.plan_bounds.as_ref().expect("plan bounds");
+    assert_eq!(plan.proofs.len(), plan.nodes.len());
+    let root = dump.trace.nodes.len() - 1;
+    let upper = plan.proof(&format!("n{root}.upper")).expect("the root node's upper proof");
+    assert_eq!(upper.status, cardinal::ProofStatus::Proven);
+    assert!(upper.minimal && upper.claim.starts_with(&format!("|#{root}| <= ")));
+
+    // The derivation starts at the claim's variable and holds each of the
+    // core's constraints once.
+    let steps = cardinal_cli::derivation(&dump.trace, upper);
+    let mut ids: Vec<usize> = steps.iter().map(|s| s.constraint).collect();
+    ids.sort();
+    assert_eq!(ids, upper.core);
+    let first = &dump.trace.constraints[steps[0].constraint];
+    assert!(steps[0].depth == 0 && first.vars.contains(&dump.trace.root), "{first:?}");
+
+    let text = run(&["view", json.to_str().unwrap(), "--proof", &upper.name]);
+    assert!(text.contains(&format!("Proof {}", upper.name)) && text.contains("<- c"), "{text}");
+    run(&["view", json.to_str().unwrap(), "--html", html.to_str().unwrap(), "--proof", &upper.name]);
+    let page = std::fs::read_to_string(&html).unwrap();
+    assert!(page.contains(&format!("\"name\":\"{}\"", upper.name)) && page.contains("\"steps\":"));
+}
+
+#[test]
+fn operator_proofs_with_reference_plans_name_pins() {
+    let json = temp("q04-nodes.json");
+    let profile = format!("{PROFILES}/q04.json");
+    let mut args = vec!["dump", "--schema", SCHEMA, "--sql", Q04, "--profile-duckdb", &profile];
+    for fk in &Q04_FKS {
+        args.extend(["--fk", fk]);
+    }
+    args.extend(["-o", json.to_str().unwrap()]);
+    run(&args);
+    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let informed = dump.informed.expect("an informed section");
+    let t = &informed.trace;
+    let plan = informed.plan_bounds.expect("informed plan bounds");
+    let pinned = plan.proofs.iter().flatten().any(|p| p.core.iter().any(|&c| t.constraints[c].fact.is_some()));
+    assert!(pinned, "no operator's proof uses a pin");
+}
+
+#[test]
+fn dumps_without_node_proofs_still_load() {
+    let json = temp("old-nodes.json");
+    run(&["dump", "--schema", SCHEMA, "--query", QUERY, "-o", json.to_str().unwrap()]);
+    // A dump from before node proofs: no `proofs` on its plan bounds, and no
+    // `minimal` on its proofs.
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    v["plan_bounds"].as_object_mut().unwrap().remove("proofs");
+    for p in v["proofs"].as_array_mut().unwrap() {
+        p.as_object_mut().unwrap().remove("minimal");
+    }
+    std::fs::write(&json, v.to_string()).unwrap();
+    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert!(dump.plan_bounds.unwrap().proofs.is_empty() && dump.proofs.iter().all(|p| p.minimal));
 }

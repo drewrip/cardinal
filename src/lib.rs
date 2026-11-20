@@ -265,7 +265,25 @@ impl Analysis {
         let Some(trace) = &self.trace else {
             return Err(Error::Internal("explain needs Options::trace".into()));
         };
-        trace.explain(&trace::claims(&self.root, bounds))
+        trace.explain(&trace::claims(&self.root, "", "X", bounds))
+    }
+
+    /// [`Analysis::explain`] for every operator's bounds: each node's proofs,
+    /// by node id, named `n{id}.lower` and `n{id}.upper`. A node with nothing
+    /// to prove has none. Every claim is proven with one solver, so this costs
+    /// far less than as many calls of [`Analysis::explain`].
+    pub fn explain_plan(&self, plan: &PlanBounds) -> Result<Vec<Vec<Proof>>> {
+        let Some(trace) = &self.trace else {
+            return Err(Error::Internal("explain_plan needs Options::trace".into()));
+        };
+        let per: Vec<Vec<(String, String, String)>> = plan
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, n)| trace::claims(&n.var, &format!("n{id}."), &format!("|#{id}|"), &n.bounds))
+            .collect();
+        let mut proofs = trace.explain(&per.concat())?.into_iter();
+        Ok(per.iter().map(|c| proofs.by_ref().take(c.len()).collect()).collect())
     }
 }
 

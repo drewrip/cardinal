@@ -1,18 +1,20 @@
 //! A dump as text: the plan tree with each node's constraints under it (and
 //! the reference plans' beside it), then each proof and the constraints it
-//! needs, and with reference plans or row counts which of them were used.
+//! needs, and with reference plans or row counts which of them were used. One
+//! proof (`--proof`) is shown as its [`derivation`] before the tree.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use cardinal::{Constraint, Proof, ProofStatus, Trace};
 
-use crate::{Dump, InformedDump, PlanDump, readable, roots};
+use crate::{Dump, InformedDump, PlanDump, derivation, readable, roots};
 
 /// What to show.
 #[derive(Debug, Clone, Default)]
 pub struct View {
-    /// Only the constraints of this proof, by name, with its nodes marked.
+    /// Only the constraints of this proof, by name (`upper`, `n4.upper`, …),
+    /// with its nodes marked.
     pub proof: Option<String>,
     /// Only this node's constraints, in full.
     pub node: Option<usize>,
@@ -26,10 +28,7 @@ pub struct View {
 pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     let facts = dump.informed.as_ref().filter(|_| !view.plain);
     let t = facts.map_or(&dump.trace, |f| &f.trace);
-    let proofs: &[Proof] = match facts {
-        Some(f) if f.explained => &f.proofs,
-        _ => &dump.proofs,
-    };
+    let proofs: Vec<&Proof> = dump.proofs_of(facts.is_some());
     let mut out = String::new();
     let w = &mut out;
     let _ = writeln!(w, "Query:   {}", dump.query.trim());
@@ -70,7 +69,7 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     }
 
     let proof = match &view.proof {
-        Some(name) => Some(proofs.iter().find(|p| p.name == *name).ok_or_else(|| {
+        Some(name) => Some(*proofs.iter().find(|p| p.name == *name).ok_or_else(|| {
             let names: Vec<&str> = proofs.iter().map(|p| p.name.as_str()).collect();
             format!("no proof {name:?}; there are: {}", names.join(", "))
         })?),
@@ -85,7 +84,14 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
     let shown = |c: &Constraint| core.as_ref().is_none_or(|k| k.contains(&c.id));
 
     if let Some(p) = proof {
-        let _ = writeln!(w, "\nProof {}: {}  [{}]  {} constraints", p.name, p.claim, status(&p.status), p.core.len());
+        let minimal = if p.minimal { "" } else { "  (not minimized)" };
+        let _ = writeln!(w, "\nProof {}: {}  [{}]  {} constraints{minimal}", p.name, p.claim, status(&p.status), p.core.len());
+        for s in derivation(t, p) {
+            let c = &t.constraints[s.constraint];
+            let node = c.node.map_or("partition".to_string(), |n| format!("[{n}]"));
+            let mark = if c.fact.is_some() { "◆ " } else { "" };
+            let _ = writeln!(w, "  {}<- {mark}c{:<5} {:<48} {} {node}", "  ".repeat(s.depth.min(8)), c.id, readable(t, &c.infix), c.function);
+        }
     }
     let _ = writeln!(w, "\nPlan and constraints:");
     for (of, rs) in roots(t) {
@@ -140,6 +146,9 @@ pub fn render(dump: &Dump, view: &View) -> Result<String, String> {
             );
         }
         let _ = writeln!(w, "  (--proof NAME shows one proof's constraints)");
+    }
+    if proof.is_none() && plan.is_some_and(|p| !p.proofs.is_empty()) {
+        let _ = writeln!(w, "  (each operator's bounds have proofs too: --proof n{{id}}.upper)");
     }
     if facts.is_some() {
         facts_sections(w, t);

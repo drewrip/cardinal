@@ -1,4 +1,4 @@
--- TPC-H tables with their primary keys, for cardinal-debug.
+-- TPC-H tables with their primary keys, for cardinal-cli.
 CREATE TABLE customer (
   c_custkey BIGINT NOT NULL,
   c_name VARCHAR NOT NULL,

@@ -5,7 +5,8 @@
 //! line of the analyzer that made it. [`Trace::explain`] proves claims about
 //! the output from the constraints and names a minimal set of them each proof
 //! needs (an unsat core), so a bound can be traced back to the operators and
-//! rules that give it.
+//! rules that give it; [`crate::Analysis::explain_plan`] does the same for
+//! every operator's bounds.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -122,16 +123,26 @@ pub(crate) struct FactClaim {
 /// The outcome of proving one claim from the constraints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
-    /// A short key for the claim: `lower` or `upper`.
+    /// A short key for the claim: `lower` or `upper` of the root, `n{id}.lower`
+    /// or `n{id}.upper` of plan node `id`.
     pub name: String,
     /// The claim, e.g. `X <= 25`.
     pub claim: String,
     /// The claim in SMT-LIB.
     pub smt: String,
     pub status: ProofStatus,
-    /// If proven, the ids of a minimal set of constraints the proof needs:
-    /// dropping any one of them leaves the claim unproven.
+    /// If proven, the ids of the constraints the proof needs. If
+    /// [`Proof::minimal`], the set is irreducible: dropping any one of them
+    /// leaves the claim unproven (a smaller such set may still exist).
     pub core: Vec<usize>,
+    /// Whether `core` was shrunk to an irreducible set. False when it was too
+    /// large to shrink, or a check while shrinking timed out.
+    #[serde(default = "yes")]
+    pub minimal: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,17 +307,18 @@ impl Trace {
             let formula = self.parse(&[smt.as_str()])?.remove(0);
             solver.push();
             solver.assert(formula.not());
-            let (status, core) = match solver.check_assumptions(&trackers) {
+            let (status, core, minimal) = match solver.check_assumptions(&trackers) {
                 SatResult::Unsat => {
-                    let core = shrink(&solver, solver.get_unsat_core());
+                    let (core, minimal) = shrink(&solver, solver.get_unsat_core());
                     let mut ids: Vec<usize> = core.iter().filter_map(|t| index.get(&t.to_string()).copied()).collect();
                     ids.sort();
-                    (ProofStatus::Proven, ids)
+                    (ProofStatus::Proven, ids, minimal)
                 }
-                SatResult::Sat => (ProofStatus::Refuted, vec![]),
+                SatResult::Sat => (ProofStatus::Refuted, vec![], true),
                 SatResult::Unknown => (
                     ProofStatus::Unknown(solver.get_reason_unknown().unwrap_or_else(|| "unknown".into())),
                     vec![],
+                    true,
                 ),
             };
             solver.pop(1);
@@ -316,6 +328,7 @@ impl Trace {
                 smt: smt.clone(),
                 status,
                 core,
+                minimal,
             });
         }
         Ok(proofs)
@@ -341,16 +354,21 @@ impl Trace {
     }
 }
 
-/// The claims [`crate::Analysis::explain`] proves, as (key, display text,
-/// formula): each side of `bounds`, for root variable `root`.
-pub(crate) fn claims(root: &str, bounds: &Bounds) -> Vec<(String, String, String)> {
-    let x = Int::new_const(root);
+/// The claims to prove each side of `bounds` on variable `var`, as (key,
+/// display text, formula): keyed `{prefix}lower` and `{prefix}upper`, shown
+/// as `{shown} >= n` and `{shown} <= n`.
+pub(crate) fn claims(var: &str, prefix: &str, shown: &str, bounds: &Bounds) -> Vec<(String, String, String)> {
+    let x = Int::new_const(var);
     let mut claims = vec![];
     if bounds.lower > 0 {
-        claims.push(("lower".into(), format!("X >= {}", bounds.lower), x.ge(Int::from_u64(bounds.lower)).to_string()));
+        claims.push((
+            format!("{prefix}lower"),
+            format!("{shown} >= {}", bounds.lower),
+            x.ge(Int::from_u64(bounds.lower)).to_string(),
+        ));
     }
     if let Some(n) = bounds.upper {
-        claims.push(("upper".into(), format!("X <= {n}"), x.le(Int::from_u64(n)).to_string()));
+        claims.push((format!("{prefix}upper"), format!("{shown} <= {n}"), x.le(Int::from_u64(n)).to_string()));
     }
     claims
 }
@@ -372,32 +390,39 @@ fn vars(smt: &str, declared: &HashSet<&str>) -> Vec<String> {
 }
 
 /// `core` with each tracker dropped that the proof does not need, so that
-/// dropping any one left leaves the claim unproven.
-pub(crate) fn shrink(solver: &Solver, core: Vec<Bool>) -> Vec<Bool> {
+/// dropping any one left leaves the claim unproven; and whether that holds:
+/// false if `core` was too large to shrink or a check timed out.
+pub(crate) fn shrink(solver: &Solver, core: Vec<Bool>) -> (Vec<Bool>, bool) {
     if core.len() > SHRINK_MAX {
-        return core;
+        return (core, false);
     }
     let mut params = Params::new();
     params.set_u32("timeout", SHRINK_MS);
     solver.set_params(&params);
     let mut kept = core;
+    let mut minimal = true;
     let mut i = 0;
     while i < kept.len() {
         let mut without = kept.clone();
         without.remove(i);
-        if solver.check_assumptions(&without) == SatResult::Unsat {
-            // Z3's core of the smaller set may drop more.
-            let smaller = solver.get_unsat_core();
-            kept = if smaller.len() < without.len() { smaller } else { without };
-            i = 0;
-        } else {
-            i += 1;
+        match solver.check_assumptions(&without) {
+            SatResult::Unsat => {
+                // Z3's core of the smaller set may drop more.
+                let smaller = solver.get_unsat_core();
+                kept = if smaller.len() < without.len() { smaller } else { without };
+                i = 0;
+            }
+            SatResult::Sat => i += 1,
+            SatResult::Unknown => {
+                minimal = false;
+                i += 1;
+            }
         }
     }
     let mut params = Params::new();
     params.set_u32("timeout", CHECK_MS);
     solver.set_params(&params);
-    kept
+    (kept, minimal)
 }
 
 fn node(id: usize, n: &Node) -> TraceNode {
