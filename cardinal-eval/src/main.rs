@@ -15,6 +15,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Eval {
+    /// How a query's Q-error falls as more of the workload's plans are given.
+    Holdout(cardinal_eval::holdout::HoldoutArgs),
     /// Summarize a prebaked benchmark: its queries, profiles and query sets.
     Info {
         #[arg(long)]
@@ -28,6 +30,7 @@ enum Eval {
 async fn main() -> Result<()> {
     match Cli::parse().eval {
         Eval::Info { bench, data } => info(&Benchmark::load(&data, &bench).await?),
+        Eval::Holdout(args) => cardinal_eval::holdout::holdout(args).await,
     }
 }
 

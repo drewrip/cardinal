@@ -249,12 +249,18 @@ impl Run {
             m.extend(e);
         }
         std::fs::write(self.dir.join("meta.json"), serde_json::to_string_pretty(&meta)? + "\n")?;
-        let mut records = read_records(&self.dir)?;
-        records.sort_by_key(Record::key);
+        let records = latest(read_records(&self.dir)?);
         let run = json!({"meta": meta, "records": records});
         std::fs::write(self.dir.join("run.json"), serde_json::to_string(&run)? + "\n")?;
         Ok(records)
     }
+}
+
+/// The last record of each key (a job run again replaces its records),
+/// sorted by key.
+pub fn latest(records: Vec<Record>) -> Vec<Record> {
+    let by_key: std::collections::BTreeMap<String, Record> = records.into_iter().map(|r| (r.key(), r)).collect();
+    by_key.into_values().collect()
 }
 
 /// The records of run `dir`'s JSONL. A last line cut short (the run was
