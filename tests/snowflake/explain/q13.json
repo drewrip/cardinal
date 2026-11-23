@@ -1,0 +1,116 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 2,
+  "partitionsAssigned": 2,
+  "bytesAssigned": 576512
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "COUNT(ORDERS.O_ORDERKEY)",
+     "COUNT(*)"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "COUNT(*) DESC NULLS FIRST",
+     "COUNT(ORDERS.O_ORDERKEY) DESC NULLS FIRST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [COUNT(ORDERS.O_ORDERKEY)]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(ORDERS.O_ORDERKEY)]",
+     "groupKeys: [CUSTOMER.C_CUSTKEY]"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "LeftOuterJoin",
+    "expressions": [
+     "joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.CUSTOMER"
+    ],
+    "expressions": [
+     "C_CUSTKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 109568,
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Filter",
+    "expressions": [
+     "(ORDERS.O_CUSTKEY IS NOT NULL) AND (NOT(ORDERS.O_COMMENT LIKE '%special%requests%'))"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_CUSTKEY",
+     "O_COMMENT"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     7
+    ]
+   }
+  ]
+ ]
+}

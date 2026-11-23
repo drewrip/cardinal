@@ -1,0 +1,332 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 8,
+  "partitionsAssigned": 8,
+  "bytesAssigned": 2423296
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "EXTRACT(year from ORDERS.O_ORDERDATE)",
+     "SCALED_ROUND_INT_DIVIDE(SUM(CASE_FLATTENED(N2.N_NAME = 'BRAZIL', LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT), 0)), SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "EXTRACT(year from ORDERS.O_ORDERDATE) ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(CASE_FLATTENED(N2.N_NAME = 'BRAZIL', LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT), 0)), SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]",
+     "groupKeys: [EXTRACT(year from ORDERS.O_ORDERDATE)]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (N2.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "alias": "N2",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (LINEITEM.L_SUPPKEY = SUPPLIER.S_SUPPKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (REGION.R_REGIONKEY = N1.N_REGIONKEY)"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "Filter",
+    "expressions": [
+     "REGION.R_NAME = 'AMERICA'"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.REGION"
+    ],
+    "expressions": [
+     "R_REGIONKEY",
+     "R_NAME"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1536,
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (N1.N_NATIONKEY = CUSTOMER.C_NATIONKEY)"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (REGION.R_REGIONKEY = N1.N_REGIONKEY)"
+    ],
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_REGIONKEY"
+    ],
+    "alias": "N1",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     10
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (ORDERS.O_CUSTKEY = CUSTOMER.C_CUSTKEY)"
+    ],
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 13,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (LINEITEM.L_ORDERKEY = ORDERS.O_ORDERKEY)"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 14,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)"
+    ],
+    "parentOperators": [
+     13
+    ]
+   },
+   {
+    "id": 15,
+    "operation": "Filter",
+    "expressions": [
+     "PART.P_TYPE = 'ECONOMY ANODIZED STEEL'"
+    ],
+    "parentOperators": [
+     14
+    ]
+   },
+   {
+    "id": 16,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PART"
+    ],
+    "expressions": [
+     "P_PARTKEY",
+     "P_TYPE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 72192,
+    "parentOperators": [
+     15
+    ]
+   },
+   {
+    "id": 17,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)"
+    ],
+    "parentOperators": [
+     14
+    ]
+   },
+   {
+    "id": 18,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_PARTKEY",
+     "L_SUPPKEY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     17
+    ]
+   },
+   {
+    "id": 19,
+    "operation": "Filter",
+    "expressions": [
+     "(ORDERS.O_ORDERDATE >= '1995-01-01') AND (ORDERS.O_ORDERDATE <= '1996-12-31')"
+    ],
+    "parentOperators": [
+     13
+    ]
+   },
+   {
+    "id": 20,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (LINEITEM.L_ORDERKEY = ORDERS.O_ORDERKEY)"
+    ],
+    "parentOperators": [
+     19
+    ]
+   },
+   {
+    "id": 21,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_CUSTKEY",
+     "O_ORDERDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     20
+    ]
+   },
+   {
+    "id": 22,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (N1.N_NATIONKEY = CUSTOMER.C_NATIONKEY)"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 23,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.CUSTOMER"
+    ],
+    "expressions": [
+     "C_CUSTKEY",
+     "C_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 109568,
+    "parentOperators": [
+     22
+    ]
+   },
+   {
+    "id": 24,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (N2.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 25,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     24
+    ]
+   }
+  ]
+ ]
+}

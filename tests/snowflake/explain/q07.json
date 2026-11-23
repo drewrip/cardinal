@@ -1,0 +1,328 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 6,
+  "partitionsAssigned": 6,
+  "bytesAssigned": 2349568
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "N1.N_NAME",
+     "N2.N_NAME",
+     "EXTRACT(year from LINEITEM.L_SHIPDATE)",
+     "SUM(SUM(SUM(SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*)))))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "N1.N_NAME ASC NULLS LAST",
+     "N2.N_NAME ASC NULLS LAST",
+     "EXTRACT(year from LINEITEM.L_SHIPDATE) ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM(SUM(SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*)))))]",
+     "groupKeys: [N1.N_NAME, N2.N_NAME, EXTRACT(year from LINEITEM.L_SHIPDATE)]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM(SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*))))]",
+     "groupKeys: [N1.N_NAME, N2.N_NAME, EXTRACT(year from LINEITEM.L_SHIPDATE)]"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (N1.N_NATIONKEY = SUPPLIER.S_NATIONKEY)",
+     "joinFilter: ((N1.N_NAME = 'FRANCE') AND (N2.N_NAME = 'GERMANY')) OR ((N1.N_NAME = 'GERMANY') AND (N2.N_NAME = 'FRANCE'))"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "Filter",
+    "expressions": [
+     "N1.N_NAME IN 'FRANCE' IN 'GERMANY'"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "alias": "N1",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*)))]",
+     "groupKeys: [N2.N_NAME, EXTRACT(year from LINEITEM.L_SHIPDATE), SUPPLIER.S_NATIONKEY]"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = LINEITEM.L_SUPPKEY)"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (N1.N_NATIONKEY = SUPPLIER.S_NATIONKEY)",
+     "joinFilter: ((N1.N_NAME = 'FRANCE') AND (N2.N_NAME = 'GERMANY')) OR ((N1.N_NAME = 'GERMANY') AND (N2.N_NAME = 'FRANCE'))"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*))]",
+     "groupKeys: [N2.N_NAME, EXTRACT(year from LINEITEM.L_SHIPDATE), LINEITEM.L_SUPPKEY]"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)"
+    ],
+    "parentOperators": [
+     11
+    ]
+   },
+   {
+    "id": 13,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [N2.N_NAME, ORDERS.O_ORDERKEY]"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 14,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"
+    ],
+    "parentOperators": [
+     13
+    ]
+   },
+   {
+    "id": 15,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (N2.N_NATIONKEY = CUSTOMER.C_NATIONKEY)"
+    ],
+    "parentOperators": [
+     14
+    ]
+   },
+   {
+    "id": 16,
+    "operation": "Filter",
+    "expressions": [
+     "N2.N_NAME IN 'GERMANY' IN 'FRANCE'"
+    ],
+    "parentOperators": [
+     15
+    ]
+   },
+   {
+    "id": 17,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "alias": "N2",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     16
+    ]
+   },
+   {
+    "id": 18,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (N2.N_NATIONKEY = CUSTOMER.C_NATIONKEY)"
+    ],
+    "parentOperators": [
+     15
+    ]
+   },
+   {
+    "id": 19,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.CUSTOMER"
+    ],
+    "expressions": [
+     "C_CUSTKEY",
+     "C_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 109568,
+    "parentOperators": [
+     18
+    ]
+   },
+   {
+    "id": 20,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"
+    ],
+    "parentOperators": [
+     14
+    ]
+   },
+   {
+    "id": 21,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_CUSTKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     20
+    ]
+   },
+   {
+    "id": 22,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]",
+     "groupKeys: [EXTRACT(year from LINEITEM.L_SHIPDATE), LINEITEM.L_SUPPKEY, LINEITEM.L_ORDERKEY]"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 23,
+    "operation": "Filter",
+    "expressions": [
+     "(LINEITEM.L_SHIPDATE >= '1995-01-01') AND (LINEITEM.L_SHIPDATE <= '1996-12-31')"
+    ],
+    "parentOperators": [
+     22
+    ]
+   },
+   {
+    "id": 24,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = LINEITEM.L_SUPPKEY)"
+    ],
+    "parentOperators": [
+     23
+    ]
+   },
+   {
+    "id": 25,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_SUPPKEY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT",
+     "L_SHIPDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     24
+    ]
+   }
+  ]
+ ]
+}

@@ -1,0 +1,94 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 2,
+  "partitionsAssigned": 2,
+  "bytesAssigned": 1832448
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "SCALED_ROUND_INT_DIVIDE(100 * (SUM(CASE_FLATTENED(STARTSWITH(PART.P_TYPE, 'PROMO'), LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT), 0))), SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(CASE_FLATTENED(STARTSWITH(PART.P_TYPE, 'PROMO'), LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT), 0)), SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (LINEITEM.L_PARTKEY = PART.P_PARTKEY)"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Filter",
+    "expressions": [
+     "(LINEITEM.L_SHIPDATE >= '1995-09-01') AND (LINEITEM.L_SHIPDATE < '1995-10-01')"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_PARTKEY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT",
+     "L_SHIPDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (LINEITEM.L_PARTKEY = PART.P_PARTKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PART"
+    ],
+    "expressions": [
+     "P_PARTKEY",
+     "P_TYPE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 72192,
+    "parentOperators": [
+     5
+    ]
+   }
+  ]
+ ]
+}

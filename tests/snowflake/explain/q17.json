@@ -1,0 +1,154 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 3,
+  "partitionsAssigned": 3,
+  "bytesAssigned": 3592704
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "(SUM(LINEITEM.L_EXTENDEDPRICE)) / 7"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_EXTENDEDPRICE)]"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+     "joinFilter: (LINEITEM.L_QUANTITY) < (0.2 * ((SUM(LINEITEM.L_QUANTITY)) / (NVL(COUNT(LINEITEM.L_QUANTITY), 0))))"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Filter",
+    "expressions": [
+     "(PART.P_BRAND = 'Brand#23') AND (PART.P_CONTAINER = 'MED BOX')"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PART"
+    ],
+    "expressions": [
+     "P_PARTKEY",
+     "P_BRAND",
+     "P_CONTAINER"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 72192,
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Filter",
+    "expressions": [
+     "(SUM(LINEITEM.L_QUANTITY) IS NOT NULL) AND (COUNT(LINEITEM.L_QUANTITY) IS NOT NULL)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_QUANTITY), COUNT(LINEITEM.L_QUANTITY)]",
+     "groupKeys: [LINEITEM.L_PARTKEY]"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_PARTKEY",
+     "L_QUANTITY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+     "joinFilter: (LINEITEM.L_QUANTITY) < (0.2 * ((SUM(LINEITEM.L_QUANTITY)) / (NVL(COUNT(LINEITEM.L_QUANTITY), 0))))"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_PARTKEY",
+     "L_QUANTITY",
+     "L_EXTENDEDPRICE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     10
+    ]
+   }
+  ]
+ ]
+}

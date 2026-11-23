@@ -1,0 +1,295 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 6,
+  "partitionsAssigned": 6,
+  "bytesAssigned": 5758464
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "SUPPLIER.S_NAME",
+     "COUNT(*)"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "SortWithLimit",
+    "expressions": [
+     "sortKey: [COUNT(*) DESC NULLS FIRST, SUPPLIER.S_NAME ASC NULLS LAST]",
+     "rowCount: 100"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [SUPPLIER.S_NAME]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "SemiJoin",
+    "expressions": [
+     "joinKey: (L1.L_ORDERKEY = L2.L_ORDERKEY)",
+     "joinFilter: L2.L_SUPPKEY <> L1.L_SUPPKEY"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (L1.L_ORDERKEY = ORDERS.O_ORDERKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "AntiJoin",
+    "expressions": [
+     "joinKey: (L1.L_ORDERKEY = L3.L_ORDERKEY)",
+     "joinFilter: L3.L_SUPPKEY <> L1.L_SUPPKEY"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = L1.L_SUPPKEY)"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "Filter",
+    "expressions": [
+     "NATION.N_NAME = 'SAUDI ARABIA'"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_NAME",
+     "S_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     10
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "Filter",
+    "expressions": [
+     "L1.L_RECEIPTDATE > L1.L_COMMITDATE"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 13,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = L1.L_SUPPKEY)"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 14,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_SUPPKEY",
+     "L_COMMITDATE",
+     "L_RECEIPTDATE"
+    ],
+    "alias": "L1",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     13
+    ]
+   },
+   {
+    "id": 15,
+    "operation": "Filter",
+    "expressions": [
+     "L3.L_RECEIPTDATE > L3.L_COMMITDATE"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 16,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (L1.L_ORDERKEY = L3.L_ORDERKEY)",
+     "joinFilter: L3.L_SUPPKEY <> L1.L_SUPPKEY"
+    ],
+    "parentOperators": [
+     15
+    ]
+   },
+   {
+    "id": 17,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_SUPPKEY",
+     "L_COMMITDATE",
+     "L_RECEIPTDATE"
+    ],
+    "alias": "L3",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     16
+    ]
+   },
+   {
+    "id": 18,
+    "operation": "Filter",
+    "expressions": [
+     "ORDERS.O_ORDERSTATUS = 'F'"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 19,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (L1.L_ORDERKEY = ORDERS.O_ORDERKEY)"
+    ],
+    "parentOperators": [
+     18
+    ]
+   },
+   {
+    "id": 20,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_ORDERSTATUS"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     19
+    ]
+   },
+   {
+    "id": 21,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (L1.L_ORDERKEY = L2.L_ORDERKEY)",
+     "joinFilter: L2.L_SUPPKEY <> L1.L_SUPPKEY"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 22,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_SUPPKEY"
+    ],
+    "alias": "L2",
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     21
+    ]
+   }
+  ]
+ ]
+}

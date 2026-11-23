@@ -1,0 +1,180 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 3,
+  "partitionsAssigned": 3,
+  "bytesAssigned": 3529216
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "MAX(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [MAX(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)))]"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]",
+     "groupKeys: [LINEITEM.L_SUPPKEY]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Filter",
+    "expressions": [
+     "(LINEITEM.L_SHIPDATE >= '1996-01-01') AND (LINEITEM.L_SHIPDATE < '1996-04-01')"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_SUPPKEY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT",
+     "L_SHIPDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     3
+    ]
+   }
+  ],
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "SUPPLIER.S_SUPPKEY",
+     "SUPPLIER.S_NAME",
+     "SUPPLIER.S_ADDRESS",
+     "SUPPLIER.S_PHONE",
+     "SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "SUPPLIER.S_SUPPKEY ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (LINEITEM.L_SUPPKEY = SUPPLIER.S_SUPPKEY)"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Filter",
+    "expressions": [
+     "(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))) = Subquery(Step1)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]",
+     "groupKeys: [LINEITEM.L_SUPPKEY]"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "Filter",
+    "expressions": [
+     "(LINEITEM.L_SHIPDATE >= '1996-01-01') AND (LINEITEM.L_SHIPDATE < '1996-04-01')"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_SUPPKEY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT",
+     "L_SHIPDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (LINEITEM.L_SUPPKEY = SUPPLIER.S_SUPPKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_NAME",
+     "S_ADDRESS",
+     "S_PHONE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     7
+    ]
+   }
+  ]
+ ]
+}

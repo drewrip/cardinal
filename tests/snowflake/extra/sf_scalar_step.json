@@ -1,0 +1,143 @@
+[
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "(SUM(ORDERS.O_TOTALPRICE)) / 15000"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 15000,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(ORDERS.O_TOTALPRICE)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 57344,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 15000,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_TOTALPRICE"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.ORDERS"
+  }
+ },
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 3
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "ORDERS.O_ORDERSTATUS",
+    "COUNT(*)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7131,
+   "output_rows": 3
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "ORDERS.O_ORDERSTATUS"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7131,
+   "output_rows": 7131
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(ORDERS.O_TOTALPRICE) > Subquery(Step1)"
+  }
+ },
+ {
+  "QUERY_ID": "sf_scalar_step",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 69632,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 7131,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_ORDERSTATUS",
+    "O_TOTALPRICE"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.ORDERS"
+  }
+ }
+]

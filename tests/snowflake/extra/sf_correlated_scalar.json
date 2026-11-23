@@ -1,0 +1,162 @@
+[
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "N.N_NAME",
+    "(SELECT COUNT(*) AS \"COUNT(*)\" FROM SUPPLIER AS S WHERE S.S_NATIONKEY = CORRELATION(N.N_NATIONKEY))"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 10,
+   "output_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "equality_join_condition": "(N.N_NATIONKEY = S.S_NATIONKEY)",
+   "join_type": "LEFT OUTER"
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5,
+   "output_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "N.N_REGIONKEY = 1"
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 2048,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 5,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "N_NATIONKEY",
+    "N_NAME",
+    "N_REGIONKEY"
+   ],
+   "table_alias": "N",
+   "table_name": "CMU.CARDINAL_TPCH.NATION"
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5,
+   "output_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "COUNT(*) IS NOT NULL"
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 20,
+   "output_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "S.S_NATIONKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   5
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 20,
+   "output_rows": 20
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "1"
+  }
+ },
+ {
+  "QUERY_ID": "sf_correlated_scalar",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 4096,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 20,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "S_NATIONKEY"
+   ],
+   "table_alias": "S",
+   "table_name": "CMU.CARDINAL_TPCH.SUPPLIER"
+  }
+ }
+]

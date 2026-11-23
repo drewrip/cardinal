@@ -1,0 +1,203 @@
+[
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "SUM(SUM(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))))"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(SUM(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))))"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)))"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 37,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "additional_join_condition": "((PART.P_BRAND = 'Brand#12') AND (PART.P_CONTAINER IN 'SM CASE' IN 'SM BOX' IN 'SM PACK' IN 'SM PKG') AND (LINEITEM.L_QUANTITY <= 11) AND (PART.P_SIZE <= 5)) OR ((PART.P_BRAND = 'Brand#23') AND (PART.P_CONTAINER IN 'MED BAG' IN 'MED BOX' IN 'MED PKG' IN 'MED PACK') AND (LINEITEM.L_QUANTITY >= 10) AND (LINEITEM.L_QUANTITY <= 20) AND (PART.P_SIZE <= 10)) OR ((PART.P_BRAND = 'Brand#34') AND (PART.P_CONTAINER IN 'LG CASE' IN 'LG BOX' IN 'LG PACK' IN 'LG PKG') AND (LINEITEM.L_QUANTITY >= 20) AND (LINEITEM.L_QUANTITY <= 30) AND (PART.P_SIZE <= 15))",
+   "equality_join_condition": "(PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+   "join_type": "INNER"
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 16,
+   "output_rows": 16
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(PART.P_BRAND IN 'Brand#12' IN 'Brand#23' IN 'Brand#34') AND ((PART.P_CONTAINER IN 'SM CASE' IN 'SM BOX' IN 'SM PACK' IN 'SM PKG') OR (PART.P_CONTAINER IN 'MED BAG' IN 'MED BOX' IN 'MED PKG' IN 'MED PACK') OR (PART.P_CONTAINER IN 'LG CASE' IN 'LG BOX' IN 'LG PACK' IN 'LG PKG')) AND ((PART.P_SIZE <= 5) OR (PART.P_SIZE <= 10) OR (PART.P_SIZE <= 15))"
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 24576,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 16,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "P_PARTKEY",
+    "P_BRAND",
+    "P_SIZE",
+    "P_CONTAINER"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.PART"
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 21,
+   "output_rows": 21
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_PARTKEY",
+    "LINEITEM.L_QUANTITY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 21,
+   "output_rows": 21
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(LINEITEM.L_SHIPMODE IN 'AIR' IN 'AIR REG') AND (LINEITEM.L_SHIPINSTRUCT = 'DELIVER IN PERSON') AND ((LINEITEM.L_QUANTITY <= 11) OR (LINEITEM.L_QUANTITY >= 10) OR (LINEITEM.L_QUANTITY <= 20) OR (LINEITEM.L_QUANTITY >= 20) OR (LINEITEM.L_QUANTITY <= 30))"
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 8,
+  "PARENT_OPERATORS": [
+   7
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 21,
+   "output_rows": 21
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "3"
+  }
+ },
+ {
+  "QUERY_ID": "q19",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 9,
+  "PARENT_OPERATORS": [
+   8
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 630784,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 21,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_PARTKEY",
+    "L_QUANTITY",
+    "L_EXTENDEDPRICE",
+    "L_DISCOUNT",
+    "L_SHIPINSTRUCT",
+    "L_SHIPMODE"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.LINEITEM"
+  }
+ }
+]

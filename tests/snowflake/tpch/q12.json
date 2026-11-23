@@ -1,0 +1,233 @@
+[
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 2
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "LINEITEM.L_SHIPMODE",
+    "SUM(SUM_INTERNAL(SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), COUNT(*)))",
+    "SUM(SUM_INTERNAL(SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0)), COUNT(*)))"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Sort",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 2,
+   "output_rows": 2
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "sort_keys": [
+    "LINEITEM.L_SHIPMODE ASC NULLS LAST"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 2,
+   "output_rows": 2
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(SUM_INTERNAL(SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), COUNT(*)))",
+    "SUM(SUM_INTERNAL(SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0)), COUNT(*)))"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_SHIPMODE"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 306,
+   "output_rows": 2
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM_INTERNAL(SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), COUNT(*))",
+    "SUM_INTERNAL(SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0)), COUNT(*))"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_SHIPMODE"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 596,
+   "output_rows": 306
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "equality_join_condition": "(LINEITEM.L_ORDERKEY = ORDERS.O_ORDERKEY)",
+   "join_type": "INNER"
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 307,
+   "output_rows": 306
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_SHIPMODE",
+    "LINEITEM.L_ORDERKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   5
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 307,
+   "output_rows": 307
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(LINEITEM.L_SHIPMODE IN 'MAIL' IN 'SHIP') AND (LINEITEM.L_COMMITDATE < LINEITEM.L_RECEIPTDATE) AND (LINEITEM.L_SHIPDATE < LINEITEM.L_COMMITDATE) AND (LINEITEM.L_RECEIPTDATE >= '1994-01-01') AND (LINEITEM.L_RECEIPTDATE < '1995-01-01')"
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 512000,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 307,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_ORDERKEY",
+    "L_SHIPDATE",
+    "L_COMMITDATE",
+    "L_RECEIPTDATE",
+    "L_SHIPMODE"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.LINEITEM"
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 8,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 290,
+   "output_rows": 290
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0))",
+    "SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0))"
+   ],
+   "grouping_keys": [
+    "ORDERS.O_ORDERKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 9,
+  "PARENT_OPERATORS": [
+   8
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 290,
+   "output_rows": 290
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "4"
+  }
+ },
+ {
+  "QUERY_ID": "q12",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 10,
+  "PARENT_OPERATORS": [
+   9
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 77824,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 290,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_ORDERKEY",
+    "O_ORDERPRIORITY"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.ORDERS"
+  }
+ }
+]

@@ -1,0 +1,87 @@
+[
+ {
+  "QUERY_ID": "sf_grouping_sets",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "LINEITEM.L_RETURNFLAG",
+    "LINEITEM.L_LINESTATUS",
+    "SUM(LINEITEM.L_QUANTITY)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_grouping_sets",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "GroupingSets",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 17151,
+   "output_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(LINEITEM.L_QUANTITY)"
+   ],
+   "key_sets": [
+    "(LINEITEM.L_RETURNFLAG)",
+    "(LINEITEM.L_RETURNFLAG, LINEITEM.L_LINESTATUS)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_grouping_sets",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 17151,
+   "output_rows": 17151
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "LINEITEM.L_SHIPMODE IN 'MAIL' IN 'SHIP'"
+  }
+ },
+ {
+  "QUERY_ID": "sf_grouping_sets",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 204800,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 17151,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_QUANTITY",
+    "L_RETURNFLAG",
+    "L_LINESTATUS",
+    "L_SHIPMODE"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.LINEITEM"
+  }
+ }
+]

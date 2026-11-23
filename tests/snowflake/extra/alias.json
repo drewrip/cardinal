@@ -1,0 +1,83 @@
+[
+ {
+  "QUERY_ID": "alias",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "EXTRACT(year from ORDERS.O_ORDERDATE)",
+    "COUNT(*)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "alias",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 9681,
+   "output_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "EXTRACT(year from ORDERS.O_ORDERDATE)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "alias",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 9681,
+   "output_rows": 9681
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "ORDERS.O_TOTALPRICE > 100000"
+  }
+ },
+ {
+  "QUERY_ID": "alias",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 86016,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 9681,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_TOTALPRICE",
+    "O_ORDERDATE"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.ORDERS"
+  }
+ }
+]
