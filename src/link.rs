@@ -1,45 +1,93 @@
-//! Link: properties between select-project-join subtrees, whatever the
-//! plan's shape.
+//! Link: properties between the rows of operators, whatever the plans'
+//! shapes, through an e-graph of every plan the analyzer visited.
 //!
 //! The [rules](crate::rules) apply [properties](crate::properties) where
 //! the plan's shape makes the relationship plain: an operator and its
-//! input, one op output. Link relates the rest, in every plan the analyzer
-//! visited.
+//! input, one op output. Link relates the rest.
 //!
-//! An `SpjNode` is a select-project-join subtree: scans, inner joins,
-//! filters, projections, aliases, repartitions and sorts. Its rows are
-//! those of its scans' cross product on which every predicate is TRUE,
-//! some columns projected. Predicates and columns are over base columns,
-//! `i{k}.name` for the scan `k`. A subtree is none if a predicate is
-//! volatile or opaque (`rules::opaque`), or a scan applies its filters
-//! inexactly or has a `fetch`: its rows are then not its predicates'.
+//! # E-nodes
 //!
-//! [`link_all`] partitions the nodes by their tables (a multiset). Within
-//! one, nodes compare under each mapping of one's instances onto the
-//! other's, by their sets of conjuncts (interned once per node) or, where
-//! those don't nest, by a solver of link's own deciding from the
-//! predicates `P1` and `P2`, encoded in three-valued logic
-//! (`predicates`), whether `¬(P1 ∧ P2)`, `P1 ⇒ P2` or `P2 ⇒ P1` is valid.
-//! The predicates' variables never reach the analysis's solver.
+//! Each analyzer node gets at most one [`ENode`], over the classes of the
+//! e-nodes below it. Only e-nodes of one kind share a class.
 //!
-//! - **Same rows**: nodes with equal conjuncts, then representatives
-//!   whose predicates imply each other, are unioned into classes. Each
-//!   class of several nodes gets synthetic variables (card, and ndv, min,
-//!   max per base column) that its members equal (`eq link`).
-//! - **Subset**: a superset of conjuncts, or `P1 ⇒ P2`, between classes'
-//!   representatives is an edge of a graph. Only its transitive reduction
-//!   is asserted (`subset link`): an edge is left out if a path implies
-//!   all its claims, Z3 deriving them.
-//! - **Disjoint**: each pair of classes whose representatives' conjuncts
-//!   don't nest, with `¬(P1 ∧ P2)` valid, on the classes' cards
-//!   (`disjoint link`). The members' follow by their `eq link`s.
+//! - **`Spj`**: a select-project-join subtree (scans, inner joins, filters,
+//!   projections, aliases, repartitions, sorts without fetch), flattened
+//!   down to its [`Input`]s: tables, or the classes of the nearest other
+//!   e-nodes below. Its rows are those of its inputs' cross product on
+//!   which every predicate is TRUE, some columns projected. Predicates and
+//!   columns are over base columns, `i{k}.name` for input `k`. There is
+//!   none if a predicate is volatile or opaque (`rules::opaque`), a scan
+//!   applies its filters inexactly or has a `fetch`, or an input is a
+//!   count-only class.
+//! - **`Agg`**: `GROUP BY` or `DISTINCT` (every column a key), without
+//!   grouping sets.
+//! - **`Join`**: semi, anti and outer joins, `Right*` swapped to `Left*`.
+//! - **`Limit`**: `LIMIT`, or a sort with fetch: count-only, as which rows
+//!   it keeps hangs on order and ties.
+//!
+//! An `Agg`'s or `Join`'s expressions are over its inputs' classes' base
+//! columns, as an `Spj`'s predicates: projections below are absorbed, so a
+//! `GROUP BY extract(year …)` groups by that expression of a scan's column.
+//! A `Join`'s right side reads past its left's inputs.
+//!
+//! # Classes
+//!
+//! A class's columns are its base columns: an `Spj` class's are its root's
+//! inputs', any other's are named by the canonical text of their
+//! expression, `i0.l_returnflag` or `sum(i0.l_quantity)`. An `Spj` reading
+//! such a class as input `k` reads its column `e` as `i{k}."e"`.
+//!
+//! # Worklist
+//!
+//! [`link_all`] keeps one union-find over every analyzer node, each `Spj`
+//! with the mapping of its inputs onto its root's. Each node, children
+//! first, is placed:
+//!
+//! - an `Spj` in the partition of its sorted inputs (a multiset), where it
+//!   is compared with one member of each other class under each mapping of
+//!   its like inputs onto the other's: by their sets of conjuncts (interned
+//!   once per node) or, where those don't nest, by a solver of link's own
+//!   deciding from the predicates `P1` and `P2`, encoded in three-valued
+//!   logic (`predicates`), whether `¬(P1 ∧ P2)`, `P1 ⇒ P2` or `P2 ⇒ P1` is
+//!   valid. Equivalent predicates are a union; nested ones a subset edge,
+//!   disjoint ones a disjoint pair, both related once classes are final.
+//!   The predicates' variables never reach the analysis's solver.
+//! - any other e-node by its key over its inputs' current roots
+//!   (hash-consing): an equal key is a union.
+//!
+//! A union changes its classes' roots, so the e-nodes above them: these
+//! are rebuilt at once, bottom-up, and any that changed is placed again.
+//! A node in a partition thus always reads its inputs' current classes and
+//! column names, and two nodes are compared only over the same ones. It
+//! ends as classes only merge.
+//!
+//! # Relations
+//!
+//! Once classes are final, in one pass (so relations never merge classes):
+//!
+//! | kind | relation | premise | claims | label |
+//! |---|---|---|---|---|
+//! | any | same rows | one class | card, each column's ndv, min, max equal; count-only: card | `eq link` |
+//! | `Spj` | subset | `P1 ⇒ P2` | card, each base column's within | `subset link` |
+//! | `Spj` | disjoint | `¬(P1 ∧ P2)` | cards' sum within the inputs' product | `disjoint link` |
+//! | `Agg` | fewer keys | same input, `∅ ≠ K ⊊ K'` | card `≤`; `K`'s columns equal | `fewer link` |
+//! | `Agg` | subset input | input `⊆` (σ), `∅ ≠ σ(K) ⊆ K'` | card `≤`; `K`'s columns within | `fewer link` |
+//! | semi | subset | left `⊆` (σ), right `⊆` (ρ), `on` equal under σ, ρ | card, the left's columns within | `subset link` |
+//! | anti | subset | left `⊆` (σ), right `⊇` (ρ), `on` equal under σ, ρ | as semi | `subset link` |
+//! | semi, anti | split | same left, right, `on`; anti not null-aware | `\|semi\| + \|anti\| = \|left\|` | `split link` |
+//!
+//! `⊆` includes the same class. Without keys an aggregate has a row even
+//! over none, so relates to nothing. Only the transitive reduction of the
+//! subset edges is asserted: an edge is left out if a path implies all its
+//! claims, Z3 deriving them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Column, DFSchema, DataFusionError, NullEquality, TableReference};
-use datafusion::logical_expr::logical_plan::{JoinType, LogicalPlan};
+use datafusion::logical_expr::logical_plan::{Distinct, FetchType, JoinType, LogicalPlan, SkipType};
 use datafusion::logical_expr::utils::split_conjunction_owned;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator, binary_expr};
 use z3::ast::{Bool, Int};
@@ -48,17 +96,24 @@ use z3::{SatResult, Solver};
 use crate::analysis::{Analyzer, inexact_filters, product, solver_with_limits};
 use crate::predicates::Encoder;
 use crate::properties::{self, Pair};
-use crate::rules::opaque;
+use crate::rules::{grouping_sets, opaque};
 
-/// A select-project-join subtree: the rows of its scans' cross product
+/// What an e-node reads: a table (by its display name), or the class of
+/// another e-node (by its root).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Input {
+    Table(String),
+    Class(usize),
+}
+
+/// A select-project-join subtree: the rows of its inputs' cross product
 /// that satisfy every predicate, with some columns projected.
-#[derive(Clone)]
-pub(crate) struct SpjNode {
-    /// The analyzer node (`Analyzer::nodes`) at the subtree's root.
-    node: usize,
-    /// Each scan: its table (display name) and the table's schema.
-    /// Base columns name scan `k` by the relation `i{k}`.
-    scans: Vec<(String, SchemaRef)>,
+#[derive(Clone, PartialEq)]
+struct SpjNode {
+    /// Each input, in the subtree's order, and its schema: the table's, or
+    /// the columns of the class it reads. Base columns name input `k` by
+    /// the relation `i{k}`.
+    scans: Vec<(Input, SchemaRef)>,
     /// The conjuncts, over base columns, canonical: sorted, deduplicated.
     preds: Vec<Expr>,
     /// Each root output column as an expression over base columns,
@@ -66,40 +121,100 @@ pub(crate) struct SpjNode {
     columns: Vec<Option<Expr>>,
 }
 
-/// A mapping of a partition's scans onto themselves, within each table:
-/// scan `k` becomes `σ[k]`.
+/// The rows an analyzer node outputs, over its inputs' classes.
+#[derive(Clone, PartialEq)]
+enum ENode {
+    Spj(SpjNode),
+    /// One row per distinct value of `keys` (in output order) over the
+    /// rows of class `input`, and an aggregate per `aggs` (`None` if
+    /// opaque).
+    Agg { input: usize, keys: Vec<Expr>, aggs: Vec<Option<Expr>> },
+    /// `left`'s rows kept by (semi), without (anti) or padded with (outer)
+    /// a partner in `right` on `on`. `columns` are its output's.
+    Join { kind: JoinType, null_aware: bool, left: usize, right: usize, on: Vec<Expr>, columns: Vec<Option<Expr>> },
+    /// The rows of class `input` after skipping `skip`, at most `fetch`.
+    Limit { input: usize, skip: usize, fetch: Option<usize> },
+}
+
+/// What an e-node other than `Spj` is equal by: its rows'.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Key {
+    /// Its input and keys, sorted.
+    Agg(usize, Vec<Expr>),
+    Join(JoinType, bool, usize, usize, Vec<Expr>),
+    Limit(usize, usize, Option<usize>),
+}
+
+impl ENode {
+    fn key(&self) -> Option<Key> {
+        Some(match self {
+            ENode::Spj(_) => return None,
+            ENode::Agg { input, keys, .. } => Key::Agg(*input, sorted(keys.clone())),
+            ENode::Join { kind, null_aware, left, right, on, .. } => Key::Join(*kind, *null_aware, *left, *right, on.clone()),
+            ENode::Limit { input, skip, fetch } => Key::Limit(*input, *skip, *fetch),
+        })
+    }
+
+    /// Its output columns' expressions: an `Spj`'s over its base columns,
+    /// any other's over its inputs' (none for a count-only `Limit`).
+    fn columns(&self) -> Vec<Option<Expr>> {
+        match self {
+            ENode::Spj(c) => c.columns.clone(),
+            ENode::Agg { keys, aggs, .. } => keys.iter().cloned().map(Some).chain(aggs.iter().cloned()).collect(),
+            ENode::Join { columns, .. } => columns.clone(),
+            ENode::Limit { .. } => vec![],
+        }
+    }
+
+    /// The classes it reads.
+    fn inputs(&self) -> Vec<usize> {
+        match self {
+            ENode::Spj(c) => c.scans.iter().filter_map(|(t, _)| if let Input::Class(c) = t { Some(*c) } else { None }).collect(),
+            ENode::Agg { input, .. } | ENode::Limit { input, .. } => vec![*input],
+            ENode::Join { left, right, .. } => vec![*left, *right],
+        }
+    }
+}
+
+/// A mapping of an `Spj`'s inputs onto another's like inputs: input `k`
+/// becomes `σ[k]`.
 type Mapping = Vec<usize>;
 
 /// Asserts every property link finds between the rows of `a`'s operators,
 /// once its rules have visited every plan.
 pub fn link_all(a: &Analyzer) {
-    let mut partitions: HashMap<Vec<String>, Vec<SpjNode>> = HashMap::new();
-    for c in spj_nodes(a).into_iter().flatten() {
-        let c = c.sorted();
-        partitions.entry(c.scans.iter().map(|(t, _)| t.clone()).collect()).or_default().push(c);
-    }
-    let mut partitions: Vec<Vec<SpjNode>> = partitions.into_values().collect();
-    partitions.sort_by_key(|p| p[0].node);
-    let mut link = Link { a, decide: Decide::new(), interned: HashMap::new(), classes: 0 };
-    for (id, nodes) in partitions.into_iter().enumerate() {
-        link.partition(id, nodes);
-    }
+    let mut link = Link::new(a);
+    link.run();
+    link.relate();
 }
 
-/// A node of a partition, with what is computed of it once: its variants
-/// under each of the partition's mappings, and their conjuncts' keys.
-struct Linked {
-    /// Under each mapping, the first the identity.
+/// Where an `Spj` is placed: its partition, and what is computed of it
+/// once there.
+struct Placed {
+    /// Its inputs, sorted: the partition's key.
+    inputs: Vec<Input>,
+    /// Its input `k` is the sorted `π[k]`.
+    pi: Mapping,
+    /// Sorted, under each of the partition's mappings, the identity first.
     variants: Vec<SpjNode>,
     /// The interned conjuncts of each variant, sorted.
     keys: Vec<Vec<u32>>,
 }
 
-/// An equality class's quantities: its card, and per base column (named
-/// as in its root) ndv, min and max.
+/// The `Spj`s over one multiset of inputs.
+struct Partition {
+    /// Each mapping of the sorted inputs onto themselves, within like ones.
+    mappings: Vec<Mapping>,
+    members: Vec<usize>,
+}
+
+/// A class's quantities: its card, and per column ndv, min and max.
 struct Class {
     card: Int,
     columns: BTreeMap<Column, Column3>,
+    /// For a class other than `Spj`'s: each column's expression over its
+    /// inputs, which a mapping of its inputs relabels.
+    exprs: HashMap<Column, Expr>,
 }
 
 struct Column3 {
@@ -108,8 +223,18 @@ struct Column3 {
     max: Option<Int>,
 }
 
-/// A subset edge between classes: `sub`'s rows are among `sup`'s, `sub`'s
-/// scan `k` mapped to `sup`'s `σ[k]`.
+impl Class {
+    /// Column `c` of this class, its inputs mapped by `sigma`.
+    fn image(&self, c: &Column, sigma: &[usize]) -> Column {
+        match self.exprs.get(c) {
+            Some(e) => base_column(0, &relabel(e, sigma).to_string()),
+            None => relabeled(c, sigma),
+        }
+    }
+}
+
+/// A subset edge between nodes, or classes: `sub`'s rows are among
+/// `sup`'s, `sub`'s input `k` mapped to `sup`'s `σ[k]`.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Edge {
     sub: usize,
@@ -117,111 +242,202 @@ struct Edge {
     sigma: Mapping,
 }
 
-/// The state of [`link_all`] across partitions.
+/// The state of [`link_all`].
 struct Link<'a, 'b> {
     a: &'a Analyzer<'b>,
     decide: Decide,
     /// Each conjunct seen, by id.
     interned: HashMap<Expr, u32>,
     /// Classes given synthetic variables so far.
-    classes: usize,
+    synthetic: usize,
+    uf: UnionFind,
+    /// Each node's e-node over the current roots, once built.
+    enodes: Vec<Option<ENode>>,
+    built: Vec<bool>,
+    /// Each node's parents: the nodes whose e-nodes read it.
+    users: Vec<Vec<usize>>,
+    /// Each root's class's members.
+    members: Vec<Vec<usize>>,
+    partitions: HashMap<Vec<Input>, Partition>,
+    placed: Vec<Option<Placed>>,
+    /// Each key of an e-node other than `Spj` seen, and a node of it. A
+    /// key over roots names the same rows while they are roots, and none
+    /// once one is not: an entry is never wrong.
+    memo: HashMap<Key, usize>,
+    /// Subset edges and disjoint pairs between `Spj` nodes.
+    edges: Vec<Edge>,
+    disjoint: Vec<(usize, usize)>,
+    /// Nodes to place, children first.
+    work: BTreeSet<usize>,
 }
 
-impl Link<'_, '_> {
-    /// Links the nodes of one partition, all over the same sorted scans.
-    fn partition(&mut self, id: usize, nodes: Vec<SpjNode>) {
-        // Tries every mapping of a table's instances, factorial in them;
-        // revisit.
-        let mappings = mappings(&nodes[0].scans);
-        let linked: Vec<Linked> = nodes
-            .iter()
-            .map(|c| {
-                let variants: Vec<SpjNode> = mappings.iter().map(|s| c.mapped(s, &c.scans)).collect();
-                let keys = variants.iter().map(|v| self.key(&v.preds)).collect();
-                Linked { variants, keys }
-            })
-            .collect();
-        let mut uf = UnionFind::new(linked.len(), nodes[0].scans.len());
+impl<'a, 'b> Link<'a, 'b> {
+    fn new(a: &'a Analyzer<'b>) -> Self {
+        Link::with_decide(a, Decide::new())
+    }
 
-        // Same conjuncts, up to a mapping.
-        let mut by_key: HashMap<&[u32], usize> = HashMap::new();
-        for (x, l) in linked.iter().enumerate() {
-            match l.keys.iter().enumerate().find_map(|(v, k)| Some((v, *by_key.get(&k[..])?))) {
-                Some((v, y)) => uf.union(x, y, &mappings[v]),
-                None => {
-                    by_key.insert(&l.keys[0], x);
+    fn with_decide(a: &'a Analyzer<'b>, decide: Decide) -> Self {
+        let n = a.nodes.len();
+        let mut users = vec![vec![]; n];
+        for (i, node) in a.nodes.iter().enumerate() {
+            for &c in &node.inputs {
+                users[c].push(i);
+            }
+        }
+        Link {
+            a,
+            decide,
+            interned: HashMap::new(),
+            synthetic: 0,
+            uf: UnionFind::new(n),
+            enodes: vec![None; n],
+            built: vec![false; n],
+            users,
+            members: (0..n).map(|i| vec![i]).collect(),
+            partitions: HashMap::new(),
+            placed: (0..n).map(|_| None).collect(),
+            memo: HashMap::new(),
+            edges: vec![],
+            disjoint: vec![],
+            work: (0..n).collect(),
+        }
+    }
+
+    /// Places every node, until no union changes one.
+    fn run(&mut self) {
+        while let Some(i) = self.work.pop_first() {
+            if !self.built[i] {
+                self.built[i] = true;
+                self.enodes[i] = self.enode(i);
+                if let Some(ENode::Spj(c)) = &self.enodes[i] {
+                    self.uf.to_parent[i] = (0..c.scans.len()).collect();
+                }
+            }
+            match &self.enodes[i] {
+                None => {}
+                Some(ENode::Spj(_)) => self.place(i),
+                Some(e) => {
+                    let key = e.key().expect("not an Spj");
+                    match self.memo.get(&key) {
+                        Some(&j) => self.union(i, j, &[]),
+                        None => {
+                            self.memo.insert(key, i);
+                        }
+                    }
                 }
             }
         }
+    }
 
-        // Between representatives: equivalent predicates join a class,
-        // nested ones give an edge, disjoint ones a disjoint pair.
-        let reps: Vec<usize> = (0..linked.len()).filter(|&x| uf.find(x).0 == x).collect();
-        let mut edges: Vec<Edge> = vec![];
-        let mut disjoint: Vec<(usize, usize)> = vec![];
-        for (i, &r1) in reps.iter().enumerate() {
-            for &r2 in &reps[i + 1..] {
-                let (l1, l2) = (&linked[r1], &linked[r2]);
+    /// Unions the classes of `x` and `y`, `x`'s input `k` being `y`'s
+    /// `σ[k]`, and rebuilds what reads them.
+    fn union(&mut self, x: usize, y: usize, sigma: &[usize]) {
+        let Some((from, to)) = self.uf.union(x, y, sigma) else { return };
+        let moved = std::mem::take(&mut self.members[from]);
+        self.members[to].extend(moved);
+        let mut queue: BTreeSet<usize> = self.members[to].iter().flat_map(|&m| self.users[m].iter().copied()).collect();
+        while let Some(u) = queue.pop_first() {
+            if !self.built[u] {
+                continue;
+            }
+            let e = self.enode(u);
+            if e == self.enodes[u] {
+                continue;
+            }
+            self.unplace(u);
+            self.enodes[u] = e;
+            self.work.insert(u);
+            queue.extend(self.users[u].iter().copied());
+        }
+    }
+
+    fn unplace(&mut self, i: usize) {
+        if let Some(p) = self.placed[i].take() {
+            self.partitions.get_mut(&p.inputs).expect("placed in it").members.retain(|&m| m != i);
+        }
+    }
+
+    /// Places `Spj` node `i` in its partition: equal conjuncts under a
+    /// mapping are a union; else, against one member of each other class,
+    /// equivalent predicates are a union, nested ones an edge, disjoint
+    /// ones a disjoint pair.
+    fn place(&mut self, i: usize) {
+        let Some(ENode::Spj(c)) = &self.enodes[i] else { unreachable!("an Spj") };
+        let mut order: Vec<usize> = (0..c.scans.len()).collect();
+        order.sort_by(|&x, &y| c.scans[x].0.cmp(&c.scans[y].0));
+        let mut pi = vec![0; order.len()];
+        for (p, &k) in order.iter().enumerate() {
+            pi[k] = p;
+        }
+        let scans: Vec<_> = order.iter().map(|&k| c.scans[k].clone()).collect();
+        let node = c.mapped(&pi, &scans);
+        let inputs: Vec<Input> = scans.iter().map(|(t, _)| t.clone()).collect();
+        let part = self
+            .partitions
+            .entry(inputs.clone())
+            .or_insert_with(|| Partition { mappings: mappings(&inputs), members: vec![] });
+        let variants: Vec<SpjNode> = part.mappings.iter().map(|m| node.mapped(m, &[])).collect();
+        let others = part.members.clone();
+        let mappings = part.mappings.clone();
+        let keys: Vec<Vec<u32>> = variants.iter().map(|v| self.key(&v.preds)).collect();
+        let x = Placed { inputs: inputs.clone(), pi, variants, keys };
+
+        // `y`'s sorted `σ`: from `x`'s inputs to `y`'s, in their own orders.
+        let natural = |x: &Placed, y: &Placed, m: &[usize]| -> Mapping {
+            let y_inv = inverse(&y.pi);
+            x.pi.iter().map(|&p| y_inv[m[p]]).collect()
+        };
+        // Same conjuncts, up to a mapping: the same class, and what it is
+        // related to is known.
+        let same = others.iter().find_map(|&y| {
+            let py = self.placed[y].as_ref()?;
+            let v = x.keys.iter().position(|k| *k == py.keys[0])?;
+            Some((y, natural(&x, py, &mappings[v])))
+        });
+        if let Some((y, sigma)) = same {
+            self.union(i, y, &sigma);
+        } else {
+            let mut seen = HashSet::new();
+            for y in others {
+                let root = self.uf.find(y).0;
+                if root == self.uf.find(i).0 || !seen.insert(root) {
+                    continue;
+                }
+                let Some(py) = self.placed[y].as_ref() else { continue };
                 let quick = (0..mappings.len()).find_map(|v| {
-                    let (k1, k2) = (&l1.keys[v], &l2.keys[0]);
+                    let (k1, k2) = (&x.keys[v], &py.keys[0]);
                     match (subset(k2, k1), subset(k1, k2)) {
-                        (true, true) => Some((v, true, true, false)),
-                        (true, false) => Some((v, true, false, false)),
-                        (false, true) => Some((v, false, true, false)),
                         (false, false) => None,
+                        (sub, sup) => Some((v, sub, sup, false)),
                     }
                 });
                 let relations: Vec<(usize, bool, bool, bool)> = match quick {
                     Some(q) => vec![q],
                     None => (0..mappings.len())
                         .filter_map(|v| {
-                            let r = self.decide.relation((id, l1.keys[v].clone(), l2.keys[0].clone()), &l1.variants[v], &l2.variants[0])?;
+                            let key = (inputs.clone(), x.keys[v].clone(), py.keys[0].clone());
+                            let r = self.decide.relation(key, &x.variants[v], &py.variants[0])?;
                             Some((v, r.sub, r.sup, r.disjoint))
                         })
                         .collect(),
                 };
-                for (v, sub, sup, apart) in relations {
-                    let sigma = &mappings[v];
+                let found: Vec<(Mapping, bool, bool, bool)> =
+                    relations.into_iter().map(|(v, sub, sup, apart)| (natural(&x, py, &mappings[v]), sub, sup, apart)).collect();
+                for (sigma, sub, sup, apart) in found {
                     if apart {
-                        disjoint.push((r1, r2));
+                        self.disjoint.push((i, y));
                     }
                     match (sub, sup) {
-                        (true, true) => uf.union(r1, r2, sigma),
-                        (true, false) => edges.push(Edge { sub: r1, sup: r2, sigma: sigma.clone() }),
-                        (false, true) => edges.push(Edge { sub: r2, sup: r1, sigma: inverse(sigma) }),
+                        (true, true) => self.union(i, y, &sigma),
+                        (true, false) => self.edges.push(Edge { sub: i, sup: y, sigma }),
+                        (false, true) => self.edges.push(Edge { sub: y, sup: i, sigma: inverse(&sigma) }),
                         (false, false) => {}
                     }
                 }
             }
         }
-
-        let classes = self.eq_links(&nodes, &mut uf);
-        let mut seen = HashSet::new();
-        let edges: Vec<Edge> = edges
-            .into_iter()
-            .filter_map(|e| {
-                let ((sub, ts), (sup, tp)) = (uf.find(e.sub), uf.find(e.sup));
-                let ts_inv = inverse(&ts);
-                let sigma = (0..e.sigma.len()).map(|k| tp[e.sigma[ts_inv[k]]]).collect();
-                let e = Edge { sub, sup, sigma };
-                (sub != sup && seen.insert(e.clone())).then_some(e)
-            })
-            .collect();
-        for e in reduced(&edges, &classes) {
-            self.a.assert_property("subset link", subset_link(&classes[&e.sub], &classes[&e.sup], &e.sigma));
-        }
-
-        // A disjoint pair's claim reads only cards: one per pair of classes.
-        let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for (x, y) in disjoint {
-            let (x, y) = (uf.find(x).0, uf.find(y).0);
-            if x != y {
-                pairs.insert((x.min(y), x.max(y)));
-            }
-        }
-        for (x, y) in pairs {
-            self.a.assert_property("disjoint link", disjoint_link(self.a, &classes[&x], &classes[&y], &nodes[0].scans));
-        }
+        self.partitions.get_mut(&inputs).expect("made above").members.push(i);
+        self.placed[i] = Some(x);
     }
 
     /// The sorted ids of `preds`.
@@ -238,49 +454,424 @@ impl Link<'_, '_> {
         k
     }
 
-    /// Each class's quantities, by its root. A class of several nodes gets
-    /// synthetic variables, and each member's are asserted equal to them;
-    /// a single node's are its own.
-    fn eq_links(&mut self, nodes: &[SpjNode], uf: &mut UnionFind) -> HashMap<usize, Class> {
-        let mut members: HashMap<usize, Vec<(usize, Mapping)>> = HashMap::new();
-        for x in 0..nodes.len() {
-            let (root, tau) = uf.find(x);
-            members.entry(root).or_default().push((x, tau));
+    /// Node `i`'s e-node over its inputs' current roots, given its
+    /// children's.
+    fn enode(&mut self, i: usize) -> Option<ENode> {
+        let a = self.a;
+        let node = &a.nodes[i];
+        let e = match &node.plan {
+            LogicalPlan::TableScan(_)
+            | LogicalPlan::Filter(_)
+            | LogicalPlan::Projection(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Repartition(_) => ENode::Spj(self.spj(i)?),
+            LogicalPlan::Join(j) if j.join_type == JoinType::Inner => ENode::Spj(self.spj(i)?),
+            LogicalPlan::Sort(s) if s.fetch.is_none() => ENode::Spj(self.spj(i)?),
+            _ if !OTHER_KINDS => return None,
+            LogicalPlan::Aggregate(agg) if !grouping_sets(agg) => {
+                let (input, _, columns) = self.rows(node.inputs[0])?;
+                let over = |e: &Expr| substitute(e, agg.input.schema(), &columns).map(ordered);
+                let keys = agg.group_expr.iter().map(over).collect::<Option<Vec<Expr>>>()?;
+                ENode::Agg { input, keys, aggs: agg.aggr_expr.iter().map(over).collect() }
+            }
+            LogicalPlan::Distinct(Distinct::All(_)) => {
+                let (input, _, columns) = self.rows(node.inputs[0])?;
+                ENode::Agg { input, keys: columns.into_iter().collect::<Option<_>>()?, aggs: vec![] }
+            }
+            LogicalPlan::Join(j) => self.join(i, j)?,
+            LogicalPlan::Sort(s) => ENode::Limit { input: self.class(node.inputs[0])?, skip: 0, fetch: s.fetch },
+            LogicalPlan::Limit(l) => {
+                let (Ok(SkipType::Literal(skip)), Ok(FetchType::Literal(fetch))) = (l.get_skip_type(), l.get_fetch_type()) else {
+                    return None;
+                };
+                ENode::Limit { input: self.class(node.inputs[0])?, skip, fetch }
+            }
+            _ => return None,
+        };
+        let width = match &e {
+            ENode::Limit { .. } => node.ndv_vars.len(),
+            e => e.columns().len(),
+        };
+        (width == node.ndv_vars.len()).then_some(e)
+    }
+
+    /// Node `c`'s class, if it has an e-node.
+    fn class(&mut self, c: usize) -> Option<usize> {
+        self.enodes[c].as_ref()?;
+        Some(self.uf.find(c).0)
+    }
+
+    /// Node `c`'s rows as an input: its class, the class's width (its
+    /// base columns' inputs), and `c`'s output columns over them. None for
+    /// a count-only class.
+    fn rows(&mut self, c: usize) -> Option<(usize, usize, Vec<Option<Expr>>)> {
+        let (root, tau) = self.uf.find(c);
+        match self.enodes[c].as_ref()? {
+            ENode::Spj(s) => Some((root, s.scans.len(), s.columns.iter().map(|e| e.as_ref().map(|e| relabel(e, &tau))).collect())),
+            ENode::Limit { .. } => None,
+            e => Some((root, 1, e.columns().iter().map(|e| e.as_ref().map(|e| Expr::Column(base_column(0, &e.to_string())))).collect())),
         }
-        let mut roots: Vec<usize> = members.keys().copied().collect();
-        roots.sort();
-        let mut out = HashMap::new();
-        for root in roots {
-            let ms = &members[&root];
-            let class = match &ms[..] {
-                [(x, _)] => own(self.a, &nodes[*x]),
+    }
+
+    /// The [`SpjNode`] of node `i`, given its children's e-nodes: a child
+    /// of another kind is an input, its class.
+    fn spj(&mut self, i: usize) -> Option<SpjNode> {
+        let a = self.a;
+        let node = &a.nodes[i];
+        let mut out = match &node.plan {
+            LogicalPlan::TableScan(scan) => {
+                if scan.fetch.is_some() || inexact_filters(scan) {
+                    return None;
+                }
+                let var = node.raw_scan.as_ref().map_or(&node.var, |r| &r.var);
+                let (_, display, _) = a.scans.iter().find(|(s, _, _)| s == var)?;
+                let base = |e: &Expr| -> Option<Expr> {
+                    if opaque(e) {
+                        return None;
+                    }
+                    let e = e.clone().transform_up(|x| match x {
+                        Expr::Column(c) => Ok(Transformed::yes(Expr::Column(base_column(0, &c.name)))),
+                        x => Ok(Transformed::no(x)),
+                    });
+                    Some(e.ok()?.data)
+                };
+                SpjNode {
+                    scans: vec![(Input::Table(display.clone()), scan.source.schema())],
+                    preds: scan.filters.iter().map(base).collect::<Option<_>>()?,
+                    columns: scan
+                        .projected_schema
+                        .fields()
+                        .iter()
+                        .map(|f| Some(Expr::Column(base_column(0, f.name()))))
+                        .collect(),
+                }
+            }
+            LogicalPlan::Filter(f) => {
+                let mut c = self.spj_input(node.inputs[0])?;
+                c.preds.push(substitute(&f.predicate, f.input.schema(), &c.columns)?);
+                c
+            }
+            LogicalPlan::Projection(p) => {
+                let mut c = self.spj_input(node.inputs[0])?;
+                c.columns = p.expr.iter().map(|e| substitute(e, p.input.schema(), &c.columns)).collect();
+                c
+            }
+            LogicalPlan::Join(j) => {
+                let (mut l, r) = (self.spj_input(node.inputs[0])?, self.spj_input(node.inputs[1])?);
+                let r = r.mapped(&shift(r.scans.len(), l.scans.len()), &[]);
+                let op = key_op(j.null_equality);
+                for (le, re) in &j.on {
+                    let le = substitute(le, j.left.schema(), &l.columns)?;
+                    let re = substitute(re, j.right.schema(), &r.columns)?;
+                    l.preds.push(binary_expr(le, op, re));
+                }
+                l.scans.extend(r.scans);
+                l.preds.extend(r.preds);
+                l.columns.extend(r.columns);
+                if let Some(f) = &j.filter {
+                    l.preds.push(substitute(f, &j.schema, &l.columns)?);
+                }
+                l
+            }
+            _ => self.spj_input(node.inputs[0])?,
+        };
+        out.preds = canonical(out.preds);
+        (out.columns.len() == node.ndv_vars.len()).then_some(out)
+    }
+
+    /// Node `c`'s rows as an `Spj`'s: its own, or one input reading its
+    /// class.
+    fn spj_input(&mut self, c: usize) -> Option<SpjNode> {
+        match self.enodes[c].as_ref()? {
+            ENode::Spj(s) => Some(s.clone()),
+            ENode::Limit { .. } => None,
+            e => {
+                let columns = e.columns();
+                let types = self.a.nodes[c].plan.schema();
+                let mut fields: Vec<Field> = vec![];
+                for (j, e) in columns.iter().enumerate() {
+                    let Some(e) = e else { continue };
+                    let name = e.to_string();
+                    if !fields.iter().any(|f| *f.name() == name) {
+                        fields.push(Field::new(name, types.field(j).data_type().clone(), true));
+                    }
+                }
+                let schema = Arc::new(Schema::new(fields));
+                Some(SpjNode {
+                    scans: vec![(Input::Class(self.uf.find(c).0), schema)],
+                    preds: vec![],
+                    columns: columns.iter().map(|e| e.as_ref().map(|e| Expr::Column(base_column(0, &e.to_string())))).collect(),
+                })
+            }
+        }
+    }
+
+    /// The e-node of join `j`, node `i`, other than inner or mark: its
+    /// sides' columns over the left's base columns, then the right's past
+    /// them.
+    fn join(&mut self, i: usize, j: &datafusion::logical_expr::Join) -> Option<ENode> {
+        use JoinType::*;
+        let (kind, swap) = match j.join_type {
+            Left => (Left, false),
+            Right => (Left, true),
+            Full => (Full, false),
+            LeftSemi => (LeftSemi, false),
+            RightSemi => (LeftSemi, true),
+            LeftAnti => (LeftAnti, false),
+            RightAnti => (LeftAnti, true),
+            Inner | LeftMark | RightMark => return None,
+        };
+        let a = self.a;
+        let inputs = &a.nodes[i].inputs;
+        let (l, r) = (self.rows(inputs[0])?, self.rows(inputs[1])?);
+        // A full join's sides are unordered: the lesser class first.
+        let swap = swap || (kind == Full && r.0 < l.0);
+        let (first, second) = if swap { (r, l) } else { (l, r) };
+        let past = shift(second.1, first.1);
+        let second_columns: Vec<Option<Expr>> = second.2.iter().map(|e| e.as_ref().map(|e| relabel(e, &past))).collect();
+        let (lc, rc) = if swap { (second_columns, first.2) } else { (first.2, second_columns) };
+        let op = key_op(j.null_equality);
+        let mut on = vec![];
+        for (le, re) in &j.on {
+            on.push(binary_expr(substitute(le, j.left.schema(), &lc)?, op, substitute(re, j.right.schema(), &rc)?));
+        }
+        let both: Vec<Option<Expr>> = lc.iter().chain(&rc).cloned().collect();
+        if let Some(f) = &j.filter {
+            on.push(substitute(f, &j.left.schema().join(j.right.schema()).ok()?, &both)?);
+        }
+        let columns = match j.join_type {
+            LeftSemi | LeftAnti => lc,
+            RightSemi | RightAnti => rc,
+            _ => both,
+        };
+        Some(ENode::Join { kind, null_aware: j.null_aware, left: first.0, right: second.0, on: canonical(on), columns })
+    }
+
+    /// Asserts each class's `eq link`s, then what relates the classes.
+    fn relate(&mut self) {
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in 0..self.enodes.len() {
+            if self.enodes[i].is_some() {
+                let root = self.uf.find(i).0;
+                groups.entry(root).or_default().push(i);
+            }
+        }
+        let mut classes: HashMap<usize, Class> = HashMap::new();
+        for (&root, ms) in &groups {
+            let ms: Vec<(usize, Vec<Option<Column>>)> = ms.iter().map(|&x| (x, self.columns_of(x))).collect();
+            let mut class = match &ms[..] {
+                [(x, columns)] => own(self.a, *x, columns),
                 _ => {
-                    let class = self.synthetic(nodes, ms);
-                    for (x, tau) in ms {
-                        self.a.assert_property("eq link", eq_link(self.a, &nodes[*x], tau, &class));
+                    let class = self.synthetic(&ms);
+                    for (x, columns) in &ms {
+                        self.a.assert_property("eq link", eq_link(self.a, *x, columns, &class));
                     }
                     class
                 }
             };
-            out.insert(root, class);
+            if !matches!(self.enodes[root], Some(ENode::Spj(_))) {
+                for (x, _) in &ms {
+                    for e in self.enodes[*x].as_ref().expect("a member").columns().into_iter().flatten() {
+                        class.exprs.insert(base_column(0, &e.to_string()), e);
+                    }
+                }
+            }
+            classes.insert(root, class);
+        }
+
+        // `Spj` edges between classes, and the mappings under which each
+        // pair nests: pairwise in a partition, so closed.
+        let mut seen = HashSet::new();
+        let mut edges: Vec<Edge> = vec![];
+        for e in std::mem::take(&mut self.edges) {
+            let ((sub, ts), (sup, tp)) = (self.uf.find(e.sub), self.uf.find(e.sup));
+            let ts_inv = inverse(&ts);
+            let sigma = (0..e.sigma.len()).map(|k| tp[e.sigma[ts_inv[k]]]).collect();
+            let e = Edge { sub, sup, sigma };
+            if sub != sup && seen.insert(e.clone()) {
+                edges.push(e);
+            }
+        }
+        let mut subsets: HashMap<(usize, usize), Vec<Mapping>> = HashMap::new();
+        for e in &edges {
+            subsets.entry((e.sub, e.sup)).or_default().push(e.sigma.clone());
+        }
+
+        // A disjoint pair's claim reads only cards: one per pair of classes.
+        let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for (x, y) in std::mem::take(&mut self.disjoint) {
+            let (x, y) = (self.uf.find(x).0, self.uf.find(y).0);
+            if x != y {
+                pairs.insert((x.min(y), x.max(y)));
+            }
+        }
+        for (x, y) in pairs {
+            let Some(ENode::Spj(c)) = &self.enodes[x] else { unreachable!("an Spj") };
+            let claims = disjoint_link(self.a, &classes, &classes[&x], &classes[&y], &c.scans);
+            self.a.assert_property("disjoint link", claims);
+        }
+
+        let roots: Vec<usize> = groups.keys().copied().collect();
+        edges.extend(self.joins(&roots, &classes, &mut subsets));
+        self.aggregates(&roots, &classes, &subsets);
+        for e in reduced(&edges, &classes) {
+            self.a.assert_property("subset link", subset_link(&classes[&e.sub], &classes[&e.sup], &e.sigma));
+        }
+    }
+
+    /// Node `x`'s output columns, over its class's columns.
+    fn columns_of(&mut self, x: usize) -> Vec<Option<Column>> {
+        let tau = self.uf.find(x).1;
+        match self.enodes[x].as_ref().expect("a member") {
+            ENode::Spj(c) => c.keyed(&tau),
+            ENode::Limit { .. } => vec![None; self.a.nodes[x].ndv_vars.len()],
+            e => e.columns().iter().map(|e| e.as_ref().map(|e| base_column(0, &e.to_string()))).collect(),
+        }
+    }
+
+    /// The subset edges between semi joins, and between anti joins, of
+    /// nested inputs, bottom-up, each pair's mappings added to `subsets`;
+    /// and asserts each `split link`.
+    fn joins(&self, roots: &[usize], classes: &HashMap<usize, Class>, subsets: &mut HashMap<(usize, usize), Vec<Mapping>>) -> Vec<Edge> {
+        use JoinType::*;
+        let mut joins: Vec<(usize, &ENode)> = roots
+            .iter()
+            .filter_map(|&r| match &self.enodes[r] {
+                Some(e @ ENode::Join { kind: LeftSemi | LeftAnti, .. }) => Some((r, e)),
+                _ => None,
+            })
+            .collect();
+        let mut rank = HashMap::new();
+        joins.sort_by_key(|(r, _)| (self.rank(*r, &mut rank), *r));
+
+        let mut out = vec![];
+        for (n, &(x, ex)) in joins.iter().enumerate() {
+            let ENode::Join { kind, null_aware, left, right, on, .. } = ex else { unreachable!("a join") };
+            for &(y, ey) in &joins[..n] {
+                let ENode::Join { kind: k2, null_aware: n2, left: l2, right: r2, on: on2, .. } = ey else { unreachable!("a join") };
+                if (kind, null_aware) != (k2, n2) {
+                    continue;
+                }
+                // Mappings under which `a`'s rows are among `b`'s, a join's
+                // as its left's.
+                for (a, b, (la, ra, oa), (lb, rb, ob)) in [(x, y, (left, right, on), (l2, r2, on2)), (y, x, (l2, r2, on2), (left, right, on))] {
+                    let rights = match kind {
+                        LeftAnti => self.maps(*rb, *ra, subsets).into_iter().map(|s| inverse(&s)).collect(),
+                        _ => self.maps(*ra, *rb, subsets),
+                    };
+                    let width = self.width(*la);
+                    'found: for sl in self.maps(*la, *lb, subsets) {
+                        for sr in &rights {
+                            let both: Mapping = sl.iter().copied().chain(sr.iter().map(|&k| k + width)).collect();
+                            if canonical(oa.iter().map(|e| relabel(e, &both)).collect()) == *ob {
+                                subsets.entry((a, b)).or_default().push(sl.clone());
+                                out.push(Edge { sub: a, sup: b, sigma: sl });
+                                break 'found;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Each row of the left has a partner or none.
+        let semis: HashMap<(usize, usize, &Vec<Expr>), usize> = joins
+            .iter()
+            .filter_map(|(r, e)| match e {
+                ENode::Join { kind: LeftSemi, left, right, on, .. } => Some(((*left, *right, on), *r)),
+                _ => None,
+            })
+            .collect();
+        for (r, e) in &joins {
+            let ENode::Join { kind: LeftAnti, null_aware: false, left, right, on, .. } = e else { continue };
+            if let Some(s) = semis.get(&(*left, *right, on)) {
+                let claims = properties::split(&classes[s].card, &classes[r].card, &classes[left].card);
+                self.a.assert_property("split link", claims);
+            }
         }
         out
     }
 
+    /// Asserts each `fewer link` between `GROUP BY`s: of fewer keys over the
+    /// same rows, or of the same keys or fewer over fewer rows.
+    fn aggregates(&self, roots: &[usize], classes: &HashMap<usize, Class>, subsets: &HashMap<(usize, usize), Vec<Mapping>>) {
+        let aggs: Vec<(usize, usize, Vec<Expr>)> = roots
+            .iter()
+            .filter_map(|&r| match &self.enodes[r] {
+                Some(ENode::Agg { input, keys, .. }) => Some((r, *input, sorted(keys.clone()))),
+                _ => None,
+            })
+            .collect();
+        for (x, ix, kx) in &aggs {
+            if kx.is_empty() {
+                continue;
+            }
+            for (y, iy, ky) in &aggs {
+                if x == y {
+                    continue;
+                }
+                let ky: HashSet<String> = ky.iter().map(|k| k.to_string()).collect();
+                let found = self.maps(*ix, *iy, subsets).into_iter().find_map(|sigma| {
+                    let pairs: Vec<(String, String)> = kx.iter().map(|k| (k.to_string(), relabel(k, &sigma).to_string())).collect();
+                    let within = pairs.iter().all(|(_, m)| ky.contains(m));
+                    // The same keys over the same rows are one class.
+                    (within && (ix != iy || pairs.len() < ky.len())).then_some(pairs)
+                });
+                let Some(pairs) = found else { continue };
+                let (cx, cy) = (&classes[x], &classes[y]);
+                let mut claims = properties::fewer(&cx.card, &cy.card);
+                for (k, m) in pairs {
+                    let (Some(p), Some(q)) = (cx.columns.get(&base_column(0, &k)), cy.columns.get(&base_column(0, &m))) else { continue };
+                    let pairs = column3_pairs(p, q);
+                    claims.extend(if ix == iy { properties::same(&pairs) } else { properties::within(&pairs) });
+                }
+                self.a.assert_property("fewer link", claims);
+            }
+        }
+    }
+
+    /// The mappings under which class `x`'s rows are among class `y`'s:
+    /// the identity for one class.
+    fn maps(&self, x: usize, y: usize, subsets: &HashMap<(usize, usize), Vec<Mapping>>) -> Vec<Mapping> {
+        match x == y {
+            true => vec![(0..self.width(x)).collect()],
+            false => subsets.get(&(x, y)).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// How many inputs class `root`'s base columns are over.
+    fn width(&self, root: usize) -> usize {
+        match &self.enodes[root] {
+            Some(ENode::Spj(c)) => c.scans.len(),
+            _ => 1,
+        }
+    }
+
+    /// Class `root`'s height above tables.
+    fn rank(&self, root: usize, known: &mut HashMap<usize, usize>) -> usize {
+        if let Some(&r) = known.get(&root) {
+            return r;
+        }
+        known.insert(root, 0);
+        let inputs = self.enodes[root].as_ref().map(|e| e.inputs()).unwrap_or_default();
+        let r = 1 + inputs.iter().map(|&c| self.rank(c, known)).max().unwrap_or(0);
+        known.insert(root, r);
+        r
+    }
+
     /// Synthetic variables for the class of `members` (each with its
-    /// mapping onto the root): card, and per base column any member
-    /// projects, ndv, and min and max if any member has them.
-    fn synthetic(&mut self, nodes: &[SpjNode], members: &[(usize, Mapping)]) -> Class {
-        let base = format!("eq{}", self.classes);
-        self.classes += 1;
+    /// columns over the class's): card, and per column any member has,
+    /// ndv, and min and max if any member has them.
+    fn synthetic(&mut self, members: &[(usize, Vec<Option<Column>>)]) -> Class {
+        let base = format!("eq{}", self.synthetic);
+        self.synthetic += 1;
         let mut columns: BTreeMap<Column, Column3> = BTreeMap::new();
-        for (x, tau) in members {
-            let q = Quantities::of(self.a, &nodes[*x]);
-            for (j, c) in nodes[*x].columns.iter().enumerate() {
-                let Some(Expr::Column(c)) = c else { continue };
-                let c = relabeled(c, tau);
+        for (x, cols) in members {
+            let q = Quantities::of(self.a, *x);
+            for (j, c) in cols.iter().enumerate() {
+                let Some(c) = c else { continue };
                 let n = columns.len();
-                let q3 = columns.entry(c).or_insert_with(|| Column3 { ndv: Int::new_const(format!("{base}_c{n}")), min: None, max: None });
+                let q3 = columns.entry(c.clone()).or_insert_with(|| Column3 { ndv: Int::new_const(format!("{base}_c{n}")), min: None, max: None });
                 let name = q3.ndv.to_string();
                 if q.min[j].is_some() && q3.min.is_none() {
                     q3.min = Some(Int::new_const(format!("{name}_min")));
@@ -290,23 +881,28 @@ impl Link<'_, '_> {
                 }
             }
         }
-        Class { card: Int::new_const(base.as_str()), columns }
+        Class { card: Int::new_const(base.as_str()), columns, exprs: HashMap::new() }
     }
 }
 
-/// A union-find over a partition's nodes, each with the mapping of its
-/// scans onto its parent's.
+/// Whether [`Link::enode`] builds e-nodes other than `Spj`.
+const OTHER_KINDS: bool = false;
+
+/// A union-find over every analyzer node, each `Spj` with the mapping of
+/// its inputs onto its parent's (none for other kinds).
 struct UnionFind {
     parent: Vec<usize>,
     to_parent: Vec<Mapping>,
 }
 
 impl UnionFind {
-    fn new(n: usize, scans: usize) -> UnionFind {
-        UnionFind { parent: (0..n).collect(), to_parent: vec![(0..scans).collect(); n] }
+    /// `n` nodes, each its own class. A node's mapping is set to the
+    /// identity once its width is known.
+    fn new(n: usize) -> UnionFind {
+        UnionFind { parent: (0..n).collect(), to_parent: vec![vec![]; n] }
     }
 
-    /// `x`'s root, and the mapping of `x`'s scans onto the root's.
+    /// `x`'s root, and the mapping of `x`'s inputs onto the root's.
     fn find(&mut self, x: usize) -> (usize, Mapping) {
         let p = self.parent[x];
         if p == x {
@@ -319,16 +915,18 @@ impl UnionFind {
         (root, tau)
     }
 
-    /// Unions `x` and `y`, `x`'s scan `k` being `y`'s `σ[k]`.
-    fn union(&mut self, x: usize, y: usize, sigma: &[usize]) {
+    /// Unions `x` and `y`, `x`'s input `k` being `y`'s `σ[k]`: the root
+    /// that moved and the one it moved under, if they were apart.
+    fn union(&mut self, x: usize, y: usize, sigma: &[usize]) -> Option<(usize, usize)> {
         let ((rx, tx), (ry, ty)) = (self.find(x), self.find(y));
         if rx == ry {
-            return;
+            return None;
         }
         // rx's k is x's tx⁻¹[k], y's σ[…], ry's ty[…].
         let tx_inv = inverse(&tx);
         self.to_parent[rx] = (0..tx.len()).map(|k| ty[sigma[tx_inv[k]]]).collect();
         self.parent[rx] = ry;
+        Some((rx, ry))
     }
 }
 
@@ -341,13 +939,18 @@ fn inverse(s: &[usize]) -> Mapping {
     out
 }
 
+/// The mapping of `n` inputs past `by` others.
+fn shift(n: usize, by: usize) -> Mapping {
+    (0..n).map(|k| k + by).collect()
+}
+
 /// True if sorted `a` is a subset of sorted `b`.
 fn subset(a: &[u32], b: &[u32]) -> bool {
     let mut b = b.iter();
     a.iter().all(|x| b.any(|y| y == x))
 }
 
-/// Base column `c` with its scan mapped by `sigma`.
+/// Base column `c` with its input mapped by `sigma`.
 fn relabeled(c: &Column, sigma: &[usize]) -> Column {
     match instance(c) {
         Some(k) => base_column(sigma[k], &c.name),
@@ -356,7 +959,7 @@ fn relabeled(c: &Column, sigma: &[usize]) -> Column {
 }
 
 /// The edges of `edges` whose claims no path of other remaining edges
-/// implies: a path implies an edge's claims if it maps the scans as the
+/// implies: a path implies an edge's claims if it maps the inputs as the
 /// edge does, and each class on it has each column the edge pairs, with
 /// min and max where the edge pairs them.
 fn reduced(edges: &[Edge], classes: &HashMap<usize, Class>) -> Vec<Edge> {
@@ -370,13 +973,13 @@ fn reduced(edges: &[Edge], classes: &HashMap<usize, Class>) -> Vec<Edge> {
             .columns
             .iter()
             .filter_map(|(c, q)| {
-                let p = sup.columns.get(&relabeled(c, &e.sigma))?;
+                let p = sup.columns.get(&sub.image(c, &e.sigma))?;
                 Some((c, q.min.is_some() && p.min.is_some(), q.max.is_some() && p.max.is_some()))
             })
             .collect();
         let carries = |x: &Class, mu: &[usize]| {
             needed.iter().all(|(c, min, max)| {
-                x.columns.get(&relabeled(c, mu)).is_some_and(|q| (!min || q.min.is_some()) && (!max || q.max.is_some()))
+                x.columns.get(&sub.image(c, mu)).is_some_and(|q| (!min || q.min.is_some()) && (!max || q.max.is_some()))
             })
         };
         let identity: Mapping = (0..e.sigma.len()).collect();
@@ -403,7 +1006,7 @@ fn reduced(edges: &[Edge], classes: &HashMap<usize, Class>) -> Vec<Edge> {
     edges.iter().zip(alive).filter(|(_, a)| *a).map(|(e, _)| e.clone()).collect()
 }
 
-/// How the predicates `P1` and `P2` of two nodes over the same scans
+/// How the predicates `P1` and `P2` of two nodes over the same inputs
 /// relate, each valid for every row.
 #[derive(Clone, Copy)]
 struct Relation {
@@ -423,7 +1026,7 @@ struct Decide {
     solver: Solver,
     encoders: usize,
     /// By partition and the two nodes' conjuncts' keys.
-    known: HashMap<(usize, Vec<u32>, Vec<u32>), Option<Relation>>,
+    known: HashMap<(Vec<Input>, Vec<u32>, Vec<u32>), Option<Relation>>,
 }
 
 impl Decide {
@@ -435,13 +1038,14 @@ impl Decide {
         Decide { solver: solver_with_limits(rlimit, DECIDE_TIMEOUT_MS), encoders: 0, known: HashMap::new() }
     }
 
-    /// How `c1`'s predicates relate to `c2`'s, both over `c2`'s scans,
-    /// `key` naming the pair. None if the scans' columns don't type.
-    fn relation(&mut self, key: (usize, Vec<u32>, Vec<u32>), c1: &SpjNode, c2: &SpjNode) -> Option<Relation> {
+    /// How `c1`'s predicates relate to `c2`'s, both over the same sorted
+    /// inputs, `key` naming the pair. None if the inputs' columns don't
+    /// type.
+    fn relation(&mut self, key: (Vec<Input>, Vec<u32>, Vec<u32>), c1: &SpjNode, c2: &SpjNode) -> Option<Relation> {
         if let Some(r) = self.known.get(&key) {
             return *r;
         }
-        let r = base_schema(&c2.scans).map(|schema| {
+        let r = base_schema(&[c1, c2]).map(|schema| {
             let mut e = Encoder::new(&format!("pred{}", self.encoders), &schema);
             self.encoders += 1;
             let (p1, p2) = (e.holds(&c1.preds), e.holds(&c2.preds));
@@ -477,54 +1081,52 @@ const DECIDE_RLIMIT: u32 = 1_000_000;
 /// its resources: far beyond what its resource limit takes.
 const DECIDE_TIMEOUT_MS: u32 = 10_000;
 
-/// `c`, a member of `class` mapped onto its root by `tau`, is the class's
-/// rows: its card and each base column's quantities equal the class's
-/// ([`properties::same`]).
-fn eq_link(a: &Analyzer, c: &SpjNode, tau: &[usize], class: &Class) -> Vec<Bool> {
-    let q = Quantities::of(a, c);
+/// Node `x`, a member of `class` with `columns` over the class's, is the
+/// class's rows: its card and each column's quantities equal the class's
+/// ([`properties::same`]). A column of one name is one expression of the
+/// same rows, so of one type and unit.
+fn eq_link(a: &Analyzer, x: usize, columns: &[Option<Column>], class: &Class) -> Vec<Bool> {
+    let q = Quantities::of(a, x);
     let mut pairs = vec![Pair::Card(&q.card, &class.card)];
-    for (j, col) in c.columns.iter().enumerate() {
-        let Some(Expr::Column(col)) = col else { continue };
-        let Some(q3) = class.columns.get(&relabeled(col, tau)) else { continue };
+    for (j, col) in columns.iter().enumerate() {
+        let Some(q3) = col.as_ref().and_then(|c| class.columns.get(c)) else { continue };
         pairs.extend(column_pairs(&q, j, q3));
     }
     properties::same(&pairs)
 }
 
-/// `sub`'s rows are among `sup`'s, `sub`'s scan `k` being `sup`'s
-/// `σ[k]`: `|sub| ≤ |sup|`, and each base column's values within
+/// `sub`'s rows are among `sup`'s, `sub`'s input `k` being `sup`'s
+/// `σ[k]`: `|sub| ≤ |sup|`, and each column's values within
 /// ([`properties::within`]).
 fn subset_link(sub: &Class, sup: &Class, sigma: &[usize]) -> Vec<Bool> {
-    let mut pairs = vec![Pair::Card(&sub.card, &sup.card)];
+    let mut claims = properties::within(&[Pair::Card(&sub.card, &sup.card)]);
     for (c, q) in &sub.columns {
-        let Some(p) = sup.columns.get(&relabeled(c, sigma)) else { continue };
-        pairs.push(Pair::Ndv(&q.ndv, &p.ndv));
-        if let (Some(a), Some(b)) = (&q.min, &p.min) {
-            pairs.push(Pair::Min(a, b));
-        }
-        if let (Some(a), Some(b)) = (&q.max, &p.max) {
-            pairs.push(Pair::Max(a, b));
-        }
+        let Some(p) = sup.columns.get(&sub.image(c, sigma)) else { continue };
+        claims.extend(properties::within(&column3_pairs(q, p)));
     }
-    properties::within(&pairs)
+    claims
 }
 
-/// No row of the cross product of `scans`' tables is both `c1`'s and
-/// `c2`'s: `|c1| + |c2| ≤ Π |T_i|` ([`properties::disjoint`]). None if the
-/// product has more than `max_product` factors.
-fn disjoint_link(a: &Analyzer, c1: &Class, c2: &Class, scans: &[(String, SchemaRef)]) -> Vec<Bool> {
-    let tables: Option<Vec<Int>> = scans
+/// No row of the cross product of `scans` is both `c1`'s and `c2`'s:
+/// `|c1| + |c2| ≤ Π` of the inputs' rows, a table's or a class's
+/// ([`properties::disjoint`]). None if the product has more than
+/// `max_product` factors.
+fn disjoint_link(a: &Analyzer, classes: &HashMap<usize, Class>, c1: &Class, c2: &Class, scans: &[(Input, SchemaRef)]) -> Vec<Bool> {
+    let inputs: Option<Vec<Int>> = scans
         .iter()
-        .map(|(t, _)| {
-            let mut vars = a.tables.values().filter(|v| v.display == *t);
-            match (vars.next(), vars.next()) {
-                (Some(v), None) => Some(v.var.clone()),
-                _ => None,
+        .map(|(t, _)| match t {
+            Input::Table(t) => {
+                let mut vars = a.tables.values().filter(|v| v.display == *t);
+                match (vars.next(), vars.next()) {
+                    (Some(v), None) => Some(v.var.clone()),
+                    _ => None,
+                }
             }
+            Input::Class(c) => Some(classes[c].card.clone()),
         })
         .collect();
-    let Some(tables) = tables else { return vec![] };
-    let Some(whole) = product(&tables.iter().collect::<Vec<_>>(), a.max_product) else { return vec![] };
+    let Some(inputs) = inputs else { return vec![] };
+    let Some(whole) = product(&inputs.iter().collect::<Vec<_>>(), a.max_product) else { return vec![] };
     properties::disjoint(&[&c1.card, &c2.card], &whole)
 }
 
@@ -537,8 +1139,8 @@ struct Quantities {
 }
 
 impl Quantities {
-    fn of(a: &Analyzer, c: &SpjNode) -> Quantities {
-        let n = &a.nodes[c.node];
+    fn of(a: &Analyzer, x: usize) -> Quantities {
+        let n = &a.nodes[x];
         let int = |v: &String| Int::new_const(v.as_str());
         Quantities {
             card: int(&n.var),
@@ -550,8 +1152,7 @@ impl Quantities {
 }
 
 /// Column `j` of `q` paired with `p`: `Ndv`, and `Min` and `Max` where
-/// both have them. Both are one base column, so they share a type and
-/// unit.
+/// both have them.
 fn column_pairs<'q>(q: &'q Quantities, j: usize, p: &'q Column3) -> Vec<Pair<'q>> {
     let mut out = vec![Pair::Ndv(&q.ndv[j], &p.ndv)];
     if let (Some(a), Some(b)) = (&q.min[j], &p.min) {
@@ -563,148 +1164,85 @@ fn column_pairs<'q>(q: &'q Quantities, j: usize, p: &'q Column3) -> Vec<Pair<'q>
     out
 }
 
-/// A single node's quantities, as a class: per base column, those of the
-/// first column projecting it.
-fn own(a: &Analyzer, c: &SpjNode) -> Class {
-    let q = Quantities::of(a, c);
-    let mut columns = BTreeMap::new();
-    for (j, col) in c.columns.iter().enumerate() {
-        if let Some(Expr::Column(col)) = col {
-            columns.entry(col.clone()).or_insert_with(|| Column3 { ndv: q.ndv[j].clone(), min: q.min[j].clone(), max: q.max[j].clone() });
-        }
+/// Two classes' columns paired: `Ndv`, and `Min` and `Max` where both have
+/// them.
+fn column3_pairs<'q>(q: &'q Column3, p: &'q Column3) -> Vec<Pair<'q>> {
+    let mut out = vec![Pair::Ndv(&q.ndv, &p.ndv)];
+    if let (Some(a), Some(b)) = (&q.min, &p.min) {
+        out.push(Pair::Min(a, b));
     }
-    Class { card: q.card, columns }
-}
-
-/// The [`SpjNode`] of each of `a`'s nodes, if it is one.
-fn spj_nodes(a: &Analyzer) -> Vec<Option<SpjNode>> {
-    let mut out: Vec<Option<SpjNode>> = Vec::with_capacity(a.nodes.len());
-    for i in 0..a.nodes.len() {
-        let c = spj_node(a, i, &out);
-        out.push(c.filter(|c| c.columns.len() == a.nodes[i].ndv_vars.len()));
+    if let (Some(a), Some(b)) = (&q.max, &p.max) {
+        out.push(Pair::Max(a, b));
     }
     out
 }
 
-/// The [`SpjNode`] of `a`'s node `i`, given its inputs' in `built`.
-fn spj_node(a: &Analyzer, i: usize, built: &[Option<SpjNode>]) -> Option<SpjNode> {
-    let node = &a.nodes[i];
-    let input = |k: usize| built.get(*node.inputs.get(k)?)?.clone();
-    let mut out = match &node.plan {
-        LogicalPlan::TableScan(scan) => {
-            if scan.fetch.is_some() || inexact_filters(scan) {
-                return None;
-            }
-            let var = node.raw_scan.as_ref().map_or(&node.var, |r| &r.var);
-            let (_, display, _) = a.scans.iter().find(|(s, _, _)| s == var)?;
-            let base = |e: &Expr| -> Option<Expr> {
-                if opaque(e) {
-                    return None;
-                }
-                let e = e.clone().transform_up(|x| match x {
-                    Expr::Column(c) => Ok(Transformed::yes(Expr::Column(base_column(0, &c.name)))),
-                    x => Ok(Transformed::no(x)),
-                });
-                Some(e.ok()?.data)
-            };
-            SpjNode {
-                node: i,
-                scans: vec![(display.clone(), scan.source.schema())],
-                preds: scan.filters.iter().map(base).collect::<Option<_>>()?,
-                columns: scan
-                    .projected_schema
-                    .fields()
-                    .iter()
-                    .map(|f| Some(Expr::Column(base_column(0, f.name()))))
-                    .collect(),
-            }
+/// A single node's quantities, as a class: per column, those of the first
+/// of its `columns` that is it.
+fn own(a: &Analyzer, x: usize, columns: &[Option<Column>]) -> Class {
+    let q = Quantities::of(a, x);
+    let mut out = BTreeMap::new();
+    for (j, col) in columns.iter().enumerate() {
+        if let Some(col) = col {
+            out.entry(col.clone()).or_insert_with(|| Column3 { ndv: q.ndv[j].clone(), min: q.min[j].clone(), max: q.max[j].clone() });
         }
-        LogicalPlan::Filter(f) => {
-            let mut c = input(0)?;
-            c.preds.push(substitute(&f.predicate, f.input.schema(), &c.columns)?);
-            c
-        }
-        LogicalPlan::Projection(p) => {
-            let mut c = input(0)?;
-            c.columns = p.expr.iter().map(|e| substitute(e, p.input.schema(), &c.columns)).collect();
-            c
-        }
-        LogicalPlan::Join(j) if j.join_type == JoinType::Inner => {
-            let (mut l, r) = (input(0)?, input(1)?);
-            let shift = l.scans.len();
-            let r = r.mapped(&(0..r.scans.len()).map(|k| k + shift).collect::<Vec<_>>(), &[]);
-            let op = match j.null_equality {
-                NullEquality::NullEqualsNull => Operator::IsNotDistinctFrom,
-                NullEquality::NullEqualsNothing => Operator::Eq,
-            };
-            for (le, re) in &j.on {
-                let le = substitute(le, j.left.schema(), &l.columns)?;
-                let re = substitute(re, j.right.schema(), &r.columns)?;
-                l.preds.push(binary_expr(le, op, re));
-            }
-            l.scans.extend(r.scans);
-            l.preds.extend(r.preds);
-            l.columns.extend(r.columns);
-            if let Some(f) = &j.filter {
-                l.preds.push(substitute(f, &j.schema, &l.columns)?);
-            }
-            l
-        }
-        LogicalPlan::SubqueryAlias(_) | LogicalPlan::Repartition(_) => input(0)?,
-        LogicalPlan::Sort(s) if s.fetch.is_none() => input(0)?,
-        _ => return None,
-    };
-    out.node = i;
-    out.preds = canonical(out.preds);
-    Some(out)
+    }
+    Class { card: q.card, columns: out, exprs: HashMap::new() }
 }
 
 impl SpjNode {
-    /// This node with its scans sorted by table, so that nodes over the
-    /// same tables have the same scans.
-    fn sorted(&self) -> SpjNode {
-        let mut order: Vec<usize> = (0..self.scans.len()).collect();
-        order.sort_by(|&x, &y| self.scans[x].0.cmp(&self.scans[y].0));
-        let mut sigma = vec![0; order.len()];
-        for (p, &k) in order.iter().enumerate() {
-            sigma[k] = p;
+    /// This node with each input `k` renamed `sigma[k]`, over `scans` (its
+    /// own if empty), its predicates canonical again.
+    fn mapped(&self, sigma: &[usize], scans: &[(Input, SchemaRef)]) -> SpjNode {
+        SpjNode {
+            scans: if scans.is_empty() { self.scans.clone() } else { scans.to_vec() },
+            preds: canonical(self.preds.iter().map(|e| relabel(e, sigma)).collect()),
+            columns: self.columns.iter().map(|c| c.as_ref().map(|e| relabel(e, sigma))).collect(),
         }
-        let scans: Vec<_> = order.iter().map(|&k| self.scans[k].clone()).collect();
-        self.mapped(&sigma, &scans)
     }
 
-    /// This node with each scan `k` renamed `sigma[k]`, over `scans` (its
-    /// own if empty), its predicates canonical again.
-    fn mapped(&self, sigma: &[usize], scans: &[(String, SchemaRef)]) -> SpjNode {
-        let rename = |e: &Expr| -> Expr {
-            e.clone()
-                .transform_up(|x| match x {
-                    Expr::Column(c) => match instance(&c) {
-                        Some(k) => Ok(Transformed::yes(Expr::Column(base_column(sigma[k], &c.name)))),
-                        None => Ok(Transformed::no(Expr::Column(c))),
-                    },
-                    x => Ok(Transformed::no(x)),
-                })
-                .map(|t| t.data)
-                .unwrap_or_else(|_| e.clone())
-        };
-        SpjNode {
-            node: self.node,
-            scans: if scans.is_empty() { self.scans.clone() } else { scans.to_vec() },
-            preds: canonical(self.preds.iter().map(rename).collect()),
-            columns: self.columns.iter().map(|c| c.as_ref().map(rename)).collect(),
-        }
+    /// Each output column that is a base column, mapped by `tau`.
+    fn keyed(&self, tau: &[usize]) -> Vec<Option<Column>> {
+        self.columns
+            .iter()
+            .map(|c| match c {
+                Some(Expr::Column(c)) => Some(relabeled(c, tau)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
-/// Base column `name` of scan `k`.
+/// `e` with each base column's input `k` renamed `sigma[k]`.
+fn relabel(e: &Expr, sigma: &[usize]) -> Expr {
+    e.clone()
+        .transform_up(|x| match x {
+            Expr::Column(c) => match instance(&c) {
+                Some(k) => Ok(Transformed::yes(Expr::Column(base_column(sigma[k], &c.name)))),
+                None => Ok(Transformed::no(Expr::Column(c))),
+            },
+            x => Ok(Transformed::no(x)),
+        })
+        .map(|t| t.data)
+        .unwrap_or_else(|_| e.clone())
+}
+
+/// Base column `name` of input `k`.
 fn base_column(k: usize, name: &str) -> Column {
     Column::new(Some(TableReference::bare(format!("i{k}"))), name)
 }
 
-/// The scan a base column names.
+/// The input a base column names.
 fn instance(c: &Column) -> Option<usize> {
     c.relation.as_ref()?.table().strip_prefix('i')?.parse().ok()
+}
+
+/// How a join's keys compare.
+fn key_op(n: NullEquality) -> Operator {
+    match n {
+        NullEquality::NullEqualsNull => Operator::IsNotDistinctFrom,
+        NullEquality::NullEqualsNothing => Operator::Eq,
+    }
 }
 
 /// `e`, over the columns of `schema`, rewritten over base columns:
@@ -733,12 +1271,17 @@ fn substitute(e: &Expr, schema: &DFSchema, columns: &[Option<Expr>]) -> Option<E
 /// The conjuncts of `preds`, without aliases, each comparison's operands
 /// in `Display` order, sorted by `Display` and deduplicated.
 fn canonical(preds: Vec<Expr>) -> Vec<Expr> {
-    let mut out: Vec<Expr> =
+    let out: Vec<Expr> =
         preds.into_iter().flat_map(split_conjunction_owned).map(|e| ordered(e.unalias_nested().data)).collect();
-    out.sort_by_cached_key(|e| e.to_string());
+    sorted(out)
+}
+
+/// `es` sorted by `Display`, deduplicated.
+fn sorted(mut es: Vec<Expr>) -> Vec<Expr> {
+    es.sort_by_cached_key(|e| e.to_string());
     let mut seen = HashSet::new();
-    out.retain(|e| seen.insert(e.clone()));
-    out
+    es.retain(|e| seen.insert(e.clone()));
+    es
 }
 
 /// `e` with each comparison's operands in `Display` order.
@@ -756,22 +1299,33 @@ fn ordered(e: Expr) -> Expr {
     .expect("reordering cannot fail")
 }
 
-/// The base columns of `scans`, each scan `k` qualified `i{k}`.
-fn base_schema(scans: &[(String, SchemaRef)]) -> Option<DFSchema> {
+/// The base columns of `nodes`, all over the same inputs, each input `k`
+/// qualified `i{k}`: a table's columns, or every column any node reads of
+/// a class.
+fn base_schema(nodes: &[&SpjNode]) -> Option<DFSchema> {
     let mut out = DFSchema::empty();
-    for (k, (_, schema)) in scans.iter().enumerate() {
-        out = out.join(&DFSchema::try_from_qualified_schema(format!("i{k}"), schema).ok()?).ok()?;
+    for k in 0..nodes[0].scans.len() {
+        let mut fields: Vec<Arc<Field>> = vec![];
+        for n in nodes {
+            for f in n.scans[k].1.fields() {
+                if !fields.iter().any(|g| g.name() == f.name()) {
+                    fields.push(f.clone());
+                }
+            }
+        }
+        let schema = Schema::new(fields);
+        out = out.join(&DFSchema::try_from_qualified_schema(format!("i{k}"), &schema).ok()?).ok()?;
     }
     Some(out)
 }
 
-/// Each mapping of `scans` onto themselves, within each table, the
+/// Each mapping of `inputs` onto themselves, within like ones, the
 /// identity first.
-fn mappings(scans: &[(String, SchemaRef)]) -> Vec<Mapping> {
-    let mut out = vec![(0..scans.len()).collect::<Mapping>()];
-    let tables: BTreeSet<&String> = scans.iter().map(|(t, _)| t).collect();
-    for t in tables {
-        let of: Vec<usize> = scans.iter().enumerate().filter(|(_, (u, _))| u == t).map(|(k, _)| k).collect();
+fn mappings(inputs: &[Input]) -> Vec<Mapping> {
+    let mut out = vec![(0..inputs.len()).collect::<Mapping>()];
+    let distinct: BTreeSet<&Input> = inputs.iter().collect();
+    for t in distinct {
+        let of: Vec<usize> = inputs.iter().enumerate().filter(|(_, u)| *u == t).map(|(k, _)| k).collect();
         let mut next = vec![];
         for perm in permutations(&of) {
             for s in &out {
@@ -851,8 +1405,9 @@ mod tests {
 
     #[test]
     fn union_find_composes_mappings() {
-        // x's scans 0, 1 are y's 1, 0; y's are z's 1, 0: x's are z's.
-        let mut uf = UnionFind::new(3, 2);
+        // x's inputs 0, 1 are y's 1, 0; y's are z's 1, 0: x's are z's.
+        let mut uf = UnionFind::new(3);
+        uf.to_parent = vec![vec![0, 1]; 3];
         uf.union(0, 1, &[1, 0]);
         uf.union(1, 2, &[1, 0]);
         assert_eq!(uf.find(0), (2, vec![0, 1]));
@@ -860,10 +1415,11 @@ mod tests {
     }
 
     #[test]
-    fn mappings_permute_within_tables() {
-        let s = || std::sync::Arc::new(datafusion::arrow::datatypes::Schema::empty());
-        let scans = vec![("a".to_string(), s()), ("a".to_string(), s()), ("b".to_string(), s())];
-        assert_eq!(mappings(&scans), vec![vec![0, 1, 2], vec![1, 0, 2]]);
+    fn mappings_permute_within_like_inputs() {
+        let t = |s: &str| Input::Table(s.to_string());
+        assert_eq!(mappings(&[t("a"), t("a"), t("b")]), vec![vec![0, 1, 2], vec![1, 0, 2]]);
+        let c = Input::Class;
+        assert_eq!(mappings(&[t("a"), c(3), c(3)]), vec![vec![0, 1, 2], vec![0, 2, 1]]);
     }
 
     #[test]
@@ -875,6 +1431,7 @@ mod tests {
                 .iter()
                 .map(|c| (col(c), Column3 { ndv: Int::new_const(format!("{name}_{c}")), min: None, max: None }))
                 .collect(),
+            exprs: HashMap::new(),
         };
         let edge = |sub, sup| Edge { sub, sup, sigma: vec![0] };
         // 0 ⊆ 1 ⊆ 2 and 0 ⊆ 2: the path implies the direct edge only if
