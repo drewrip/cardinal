@@ -381,6 +381,15 @@ pub(crate) fn in_own_context<R: Send + Sync>(f: impl FnOnce() -> R + Send + Sync
     z3::with_z3_config(&z3::Config::new(), f)
 }
 
+/// A new Z3 context, to run work in apart from the thread's with
+/// [`z3::with_z3_context`]. Unlike [`in_own_context`], it outlives one
+/// call.
+pub(crate) fn new_context() -> z3::Context {
+    thread_local!(static MADE: std::cell::RefCell<Option<z3::Context>> = const { std::cell::RefCell::new(None) });
+    z3::with_z3_config(&z3::Config::new(), || MADE.with(|m| *m.borrow_mut() = Some(z3::Context::thread_local())));
+    MADE.with(|m| m.borrow_mut().take()).expect("made above")
+}
+
 /// A foreign key: each row of `table` has `columns` never NULL and equal to
 /// `referenced` of exactly one row of `references`. Tables are named as the
 /// analysis shows them (bare in the default schema). Declared keys are

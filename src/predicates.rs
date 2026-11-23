@@ -45,15 +45,25 @@ pub(crate) struct Encoder<'a> {
     /// The base columns' types and nullability.
     schema: &'a DFSchema,
     next: usize,
-    columns: HashMap<Column, Value>,
-    unknowns: HashMap<Expr, Option<Value>>,
+    /// Each column's and unknown's value, by its index in `values`: the
+    /// values drop in the order they were made, so Z3 reuses the ids of
+    /// their terms in an order that does not depend on hashing.
+    columns: HashMap<Column, usize>,
+    unknowns: HashMap<Expr, usize>,
+    values: Vec<Option<Value>>,
 }
 
 impl<'a> Encoder<'a> {
     /// An encoder whose variables are named `{prefix}_{n}`: `prefix` must be
     /// unique to it. `schema` types the base columns.
     pub(crate) fn new(prefix: &str, schema: &'a DFSchema) -> Self {
-        Encoder { prefix: symbol(prefix), schema, next: 0, columns: HashMap::new(), unknowns: HashMap::new() }
+        Encoder { prefix: symbol(prefix), schema, next: 0, columns: HashMap::new(), unknowns: HashMap::new(), values: vec![] }
+    }
+
+    /// Stores `v`, returning its index.
+    fn keep(&mut self, v: Option<Value>) -> usize {
+        self.values.push(v);
+        self.values.len() - 1
     }
 
     /// The rows the conjuncts all hold TRUE on, as a Z3 formula.
@@ -111,8 +121,8 @@ impl<'a> Encoder<'a> {
 
     /// The variables of base column `c`, if it is an integer or boolean.
     fn column(&mut self, c: &Column) -> Option<Value> {
-        if let Some(v) = self.columns.get(c) {
-            return Some(v.clone());
+        if let Some(&i) = self.columns.get(c) {
+            return self.values[i].clone();
         }
         let field = self.schema.field_with_qualified_name(c.relation.as_ref()?, &c.name).ok()?;
         let null = match field.is_nullable() {
@@ -127,31 +137,36 @@ impl<'a> Encoder<'a> {
             }
             _ => return None,
         };
-        self.columns.insert(c.clone(), v.clone());
+        let i = self.keep(Some(v.clone()));
+        self.columns.insert(c.clone(), i);
         Some(v)
     }
 
     /// A fresh unknown of `e`'s type, the same for equal expressions.
     fn unknown(&mut self, e: &Expr) -> Option<Value> {
-        if let Some(v) = self.unknowns.get(e) {
-            return v.clone();
+        if let Some(&i) = self.unknowns.get(e) {
+            return self.values[i].clone();
         }
         let v = match e.get_type(self.schema) {
             Ok(t) if t.is_integer() => Some(Value::Int(Int::new_const(self.name()), self.fresh_bool())),
             Ok(DataType::Boolean) => Some(self.new_bool_unknown()),
             _ => None,
         };
-        self.unknowns.insert(e.clone(), v.clone());
+        let i = self.keep(v.clone());
+        self.unknowns.insert(e.clone(), i);
         v
     }
 
     /// A boolean unknown standing for `e`, whatever its type.
     fn bool_unknown(&mut self, e: &Expr) -> (Bool, Bool) {
-        if let Some(Some(Value::Bool(t, f))) = self.unknowns.get(e) {
+        if let Some(&i) = self.unknowns.get(e)
+            && let Some(Value::Bool(t, f)) = &self.values[i]
+        {
             return (t.clone(), f.clone());
         }
         let v = self.new_bool_unknown();
-        self.unknowns.insert(e.clone(), Some(v.clone()));
+        let i = self.keep(Some(v.clone()));
+        self.unknowns.insert(e.clone(), i);
         let Value::Bool(t, f) = v else { unreachable!() };
         (t, f)
     }

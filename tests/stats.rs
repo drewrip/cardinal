@@ -104,3 +104,20 @@ async fn irrelevant_plans_add_nothing() {
     assert_eq!(a.constraints(), b.constraints());
     assert_eq!(b.stats().plans_selected, used.len());
 }
+
+/// Building the same analysis twice does the same work: link's checks
+/// spend the same `rlimit`, whatever terms were made and dropped before.
+#[tokio::test]
+async fn link_work_is_reproducible() {
+    let ctx = context();
+    let plans: Vec<ObservedPlan> = plans("tpch").await.into_iter().filter(|p| p.name != "q07").collect();
+    let sql = query("tpch", "q07");
+    let build = || async { Analysis::sql(&ctx, &sql).await.unwrap().options(options()).with_plans(&plans).build().unwrap() };
+    let (a, b) = (build().await, build().await);
+    assert!(a.stats().link_checks.checks() > 0);
+    let work = |a: &Analysis| {
+        let c = a.stats().link_checks;
+        (c.sat, c.unsat, c.limited, c.rlimit)
+    };
+    assert_eq!(work(&a), work(&b));
+}

@@ -1095,22 +1095,25 @@ struct Relation {
     sup: bool,
 }
 
-/// Decides [`Relation`]s with a solver of its own, once per pair of
-/// predicates. Each check is limited by Z3's resource count
-/// ([`Limits::link`](crate::Limits::link)), not by time, so the links found do not depend on
-/// the machine's load.
+/// Decides [`Relation`]s, once per pair of predicates, in a Z3 context of
+/// its own, apart from the analysis's: its checks do the same work
+/// whatever terms the analysis made, which can number them otherwise
+/// (see [`in_own_context`](crate::in_own_context)). Each
+/// check is limited by Z3's resource count
+/// ([`Limits::link`](crate::Limits::link)), not by time, so the links
+/// found do not depend on the machine's load.
 struct Decide {
-    solver: Solver,
+    context: z3::Context,
     rlimit: u32,
+    ms: Option<u32>,
     stats: CheckStats,
-    encoders: usize,
     /// By partition and the two nodes' conjuncts' keys.
     known: HashMap<(Vec<Input>, Vec<u32>, Vec<u32>), Option<Relation>>,
 }
 
 impl Decide {
     fn with_rlimit(rlimit: u32, ms: Option<u32>) -> Decide {
-        Decide { solver: solver_with_limits(rlimit, ms), rlimit, stats: CheckStats::default(), encoders: 0, known: HashMap::new() }
+        Decide { context: crate::new_context(), rlimit, ms, stats: CheckStats::default(), known: HashMap::new() }
     }
 
     /// How `c1`'s predicates relate to `c2`'s, both over the same sorted
@@ -1120,18 +1123,39 @@ impl Decide {
         if let Some(r) = self.known.get(&key) {
             return *r;
         }
-        let r = base_schema(&[c1, c2]).map(|schema| {
-            let mut e = Encoder::new(&format!("pred{}", self.encoders), &schema);
-            self.encoders += 1;
-            let (p1, p2) = (e.holds(&c1.preds), e.holds(&c2.preds));
-            Relation {
-                disjoint: self.valid(&Bool::and(&[p1.clone(), p2.clone()]).not()),
-                sub: self.valid(&p1.implies(&p2)),
-                sup: self.valid(&p2.implies(&p1)),
-            }
+        let (rlimit, ms) = (self.rlimit, self.ms);
+        let decided = base_schema(&[c1, c2]).map(|schema| {
+            z3::with_z3_context(&self.context, || {
+                let mut check = Check::new(rlimit, ms);
+                let mut e = Encoder::new("pred", &schema);
+                let (p1, p2) = (e.holds(&c1.preds), e.holds(&c2.preds));
+                let r = Relation {
+                    disjoint: check.valid(&Bool::and(&[p1.clone(), p2.clone()]).not()),
+                    sub: check.valid(&p1.implies(&p2)),
+                    sup: check.valid(&p2.implies(&p1)),
+                };
+                (r, check.stats)
+            })
+        });
+        let r = decided.map(|(r, stats)| {
+            self.stats += stats;
+            r
         });
         self.known.insert(key, r);
         r
+    }
+}
+
+/// A solver deciding validity, counting its checks.
+struct Check {
+    solver: Solver,
+    rlimit: u32,
+    stats: CheckStats,
+}
+
+impl Check {
+    fn new(rlimit: u32, ms: Option<u32>) -> Check {
+        Check { solver: solver_with_limits(rlimit, ms), rlimit, stats: CheckStats::default() }
     }
 
     /// True if `f` holds whatever its variables, as far as the solver
@@ -1631,7 +1655,7 @@ mod tests {
         Bool::and(&[x.lt(5), x.ge(5)]).not()
     }
 
-    fn spent(d: &Decide) -> u64 {
+    fn spent(d: &Check) -> u64 {
         match d.solver.get_statistics().value("rlimit count") {
             Some(z3::StatisticsValue::UInt(n)) => n.into(),
             v => panic!("rlimit count: {v:?}"),
@@ -1643,7 +1667,7 @@ mod tests {
     #[test]
     fn decide_limit_is_per_check() {
         let limit = crate::Limits::default().link;
-        let mut d = Decide::with_rlimit(limit, None);
+        let mut d = Check::new(limit, None);
         while spent(&d) <= u64::from(limit) {
             assert!(!d.valid(&hard()));
         }
@@ -1654,7 +1678,7 @@ mod tests {
     /// a small limit.
     #[test]
     fn decide_first_check_is_limited() {
-        let mut d = Decide::with_rlimit(1_000, None);
+        let mut d = Check::new(1_000, None);
         assert!(!d.valid(&hard()));
         assert!(spent(&d) < 100_000, "{}", spent(&d));
         assert!(d.valid(&easy()));
