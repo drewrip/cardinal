@@ -7,12 +7,12 @@
 //!
 //! # E-nodes
 //!
-//! Each analyzer node gets at most one [`ENode`], over the classes of the
+//! Each analyzer node gets at most one `ENode`, over the classes of the
 //! e-nodes below it. Only e-nodes of one kind share a class.
 //!
 //! - **`Spj`**: a select-project-join subtree (scans, inner joins, filters,
 //!   projections, aliases, repartitions, sorts without fetch), flattened
-//!   down to its [`Input`]s: tables, or the classes of the nearest other
+//!   down to its `Input`s: tables, or the classes of the nearest other
 //!   e-nodes below. Its rows are those of its inputs' cross product on
 //!   which every predicate is TRUE, some columns projected. Predicates and
 //!   columns are over base columns, `i{k}.name` for input `k`. There is
@@ -22,13 +22,17 @@
 //! - **`Agg`**: `GROUP BY` or `DISTINCT` (every column a key), without
 //!   grouping sets.
 //! - **`Join`**: semi, anti and outer joins, `Right*` swapped to `Left*`.
+//!   An anti join is NULL-aware only if a key may be NULL.
 //! - **`Limit`**: `LIMIT`, or a sort with fetch: count-only, as which rows
-//!   it keeps hangs on order and ties.
+//!   it keeps hangs on order and ties. It reads only its input's count:
+//!   over an `Spj` without predicates of one class, that class's.
 //!
 //! An `Agg`'s or `Join`'s expressions are over its inputs' classes' base
 //! columns, as an `Spj`'s predicates: projections below are absorbed, so a
 //! `GROUP BY extract(year …)` groups by that expression of a scan's column.
-//! A `Join`'s right side reads past its left's inputs.
+//! A `Join`'s right side reads past its left's inputs. Expressions are
+//! canonical: conjuncts sorted, comparisons and `IN` lists in one order,
+//! `LIKE` as observed plans read it.
 //!
 //! # Classes
 //!
@@ -75,9 +79,11 @@
 //! | semi | subset | left `⊆` (σ), right `⊆` (ρ), `on` equal under σ, ρ | card, the left's columns within | `subset link` |
 //! | anti | subset | left `⊆` (σ), right `⊇` (ρ), `on` equal under σ, ρ | as semi | `subset link` |
 //! | semi, anti | split | same left, right, `on`; anti not null-aware | `\|semi\| + \|anti\| = \|left\|` | `split link` |
+//! | `Agg` | regroup | over an `Agg` of input `I`, `∅ ≠ K` some of its keys; an `Agg` of `I` by `K` | card, `K`'s columns equal | `regroup link` |
 //!
 //! `⊆` includes the same class. Without keys an aggregate has a row even
-//! over none, so relates to nothing. Only the transitive reduction of the
+//! over none, so relates to nothing. A regrouped `Agg` keeps its class: its
+//! aggregates, over groups, are not those of the `Agg` of `I`. Only the transitive reduction of the
 //! subset edges is asserted: an edge is left out if a path implies all its
 //! claims, Z3 deriving them.
 

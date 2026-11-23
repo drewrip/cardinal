@@ -30,8 +30,10 @@
 //!    asserting what the operator adds. Where the plan's shape relates rows
 //!    (an operator and its input, one op output), the
 //!    rules apply [`properties`] of rows.
-//! 2. [`link`]: the same properties, and disjointness, between
-//!    select-project-join subtrees whose predicates Z3 relates.
+//! 2. [`link`]: the same properties, and disjointness, between operators
+//!    off one path, through an e-graph of every plan: select-project-join
+//!    subtrees whose predicates Z3 relates, and other operators (GROUP BY,
+//!    semi, anti and outer joins, limits) over the same or nested inputs.
 //! 3. [`joint`]: each operator of a reference plan pinned to the rows it
 //!    was counted with, and each table given a row count held to it; the
 //!    plans' own variables then substituted away.
@@ -49,7 +51,9 @@
 //! └─────────────────────────────────────────────┬────────────┘  │
 //!                            op outputs, nodes  │               │
 //! ┌─ 2. link: link::link_all ───────────────────▼────────────┐  │
-//! │ SPJ subtrees: same rows, subset, disjoint, by predicates │  ├─▶ Z3
+//! │ e-graph, bottom-up: SPJ subtrees by predicates, other    │  ├─▶ Z3
+//! │ operators by inputs and keys; same rows, subset,         │  │
+//! │ disjoint, fewer, split                                   │  │
 //! └─────────────────────────────────────────────┬────────────┘  │
 //! ┌─ 3. pins: joint, Builder::with_cardinalities▼────────────┐  │
 //! │ a counted operator X = rows (≥ where a runtime filter    │  │

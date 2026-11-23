@@ -4,8 +4,8 @@
 //!
 //! No rules read anything else off the plans or match them to the query's
 //! operators: the plans' operators get the constraints any operator does,
-//! [link](crate::link) relates their select-project-join subtrees to the
-//! query's, and Z3 finds what follows.
+//! [link](crate::link) relates their operators to the query's, and Z3
+//! finds what follows.
 //!
 //! ```text
 //!  query ──────────┐

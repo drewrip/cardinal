@@ -16,9 +16,11 @@
 //! | same rows | [`same`] | `Card` and each column's |
 //! | subset | [`within`] | `Card` and each column's |
 //! | wider | [`within`] | each column's, no `Card` |
-//! | equal SPJ subtrees ([link](crate::link)) | [`same`] | `Card` and each base column's |
-//! | SPJ subset | [`within`] | `Card` and each base column's |
-//! | disjoint SPJ subtrees | [`disjoint`] | both `Card`s, within the tables' product |
+//! | one class ([link](crate::link)) | [`same`] | `Card` and each column's |
+//! | SPJ subtrees, semi or anti joins, nested ([link](crate::link)) | [`within`] | `Card` and each column's |
+//! | disjoint SPJ subtrees ([link](crate::link)) | [`disjoint`] | both `Card`s, within the inputs' product |
+//! | GROUP BYs of fewer keys or rows ([link](crate::link)) | [`fewer`], [`same`], [`within`] | both `Card`s; each key column's |
+//! | a semi and an anti join of one left ([link](crate::link)) | [`split`] | the three `Card`s |
 
 use z3::ast::{Bool, Int};
 
