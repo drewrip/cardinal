@@ -123,9 +123,22 @@ pub struct Profile {
     /// Its name, e.g. its file's stem.
     pub name: String,
     pub json: String,
-    /// PostgreSQL's `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)`, else DuckDB's
-    /// `EXPLAIN (ANALYZE, FORMAT JSON)`.
-    pub postgres: bool,
+    pub engine: Engine,
+    /// The query it ran, if known: it reads what the profile does not print
+    /// (`LIMIT` counts, and for Snowflake whether an anti join is `NOT IN`).
+    pub sql: Option<String>,
+}
+
+/// The engine a profile is of, and its format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Engine {
+    /// DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)`.
+    Duckdb,
+    /// PostgreSQL's `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)`.
+    Postgres,
+    /// Snowflake's `GET_QUERY_OPERATOR_STATS` rows, or a `QueryPlan` of
+    /// snowflake-explain's.
+    Snowflake,
 }
 
 /// Each of `profiles`, read against the tables of `ctx`.
@@ -137,12 +150,12 @@ pub async fn read_plans(ctx: &SessionContext, profiles: &[Profile]) -> Result<Ve
     profiles
         .iter()
         .map(|p| {
-            if p.postgres {
-                cardinal::observed::from_postgres(&catalog, &p.name, &p.json, None)
-            } else {
-                cardinal::observed::from_duckdb(&catalog, &p.name, &p.json, None)
-            }
-            .map_err(|e| format!("{}: {e}", p.name))
+            let read = match p.engine {
+                Engine::Duckdb => cardinal::observed::from_duckdb,
+                Engine::Postgres => cardinal::observed::from_postgres,
+                Engine::Snowflake => cardinal::observed::from_snowflake,
+            };
+            read(&catalog, &p.name, &p.json, p.sql.as_deref()).map_err(|e| format!("{}: {e}", p.name))
         })
         .collect()
 }
@@ -154,6 +167,9 @@ pub enum Source {
     DuckDb { json: String, sql: Option<String> },
     /// PostgreSQL's `EXPLAIN (VERBOSE, FORMAT JSON)`, and the query's SQL if known.
     Postgres { json: String, sql: Option<String> },
+    /// Snowflake's `EXPLAIN USING JSON` (or operator stats), and the query's
+    /// SQL if known.
+    Snowflake { json: String, sql: Option<String> },
 }
 
 /// A context with the tables `ddl` creates: `CREATE TABLE` statements
@@ -210,10 +226,11 @@ pub async fn dump(
     let catalog = Catalog::from_context(ctx).await.map_err(err)?;
     let (query, builder): (String, Builder) = match source {
         Source::Sql(sql) => (sql.clone(), Analysis::sql(ctx, sql).await.map_err(err)?),
-        Source::DuckDb { json, sql } | Source::Postgres { json, sql } => {
+        Source::DuckDb { json, sql } | Source::Postgres { json, sql } | Source::Snowflake { json, sql } => {
             let b = match source {
                 Source::DuckDb { .. } => Analysis::duckdb(&catalog, json, sql.as_deref()),
-                _ => Analysis::postgres(&catalog, json, sql.as_deref()),
+                Source::Postgres { .. } => Analysis::postgres(&catalog, json, sql.as_deref()),
+                _ => Analysis::snowflake(&catalog, json, sql.as_deref()),
             }
             .map_err(err)?;
             (sql.clone().unwrap_or_else(|| "(from an EXPLAIN plan)".into()), b)

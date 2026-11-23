@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cardinal::Options;
-use cardinal_cli::{Dump, Informed, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_plans};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use cardinal_cli::{Dump, Engine, Informed, Profile, Prove, Source, ascii, context, dump, foreign_key, html, read_plans};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version, about = "Dump cardinal's Z3 constraints for a query and show why its bounds hold")]
@@ -53,19 +53,23 @@ struct Input {
     /// their primary keys).
     #[arg(long)]
     schema: PathBuf,
-    /// A file with the SQL query (or, with --duckdb or --postgres, the SQL the
-    /// plan is for).
+    /// A file with the SQL query (or, with --duckdb, --postgres or --snowflake,
+    /// the SQL the plan is for).
     #[arg(long)]
     sql: Option<PathBuf>,
     /// The SQL query, inline.
     #[arg(long, conflicts_with = "sql")]
     query: Option<String>,
     /// Read DuckDB's `EXPLAIN (FORMAT JSON)` plan from this file.
-    #[arg(long, conflicts_with = "postgres")]
+    #[arg(long, conflicts_with_all = ["postgres", "snowflake"])]
     duckdb: Option<PathBuf>,
     /// Read PostgreSQL's `EXPLAIN (VERBOSE, FORMAT JSON)` plan from this file.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "snowflake")]
     postgres: Option<PathBuf>,
+    /// Read Snowflake's `EXPLAIN USING JSON` plan (or its operator stats)
+    /// from this file.
+    #[arg(long)]
+    snowflake: Option<PathBuf>,
     /// A foreign key, as `orders(cust)->customers(id)`; repeatable.
     #[arg(long = "fk", value_parser = foreign_key)]
     foreign_keys: Vec<cardinal::ForeignKey>,
@@ -102,7 +106,13 @@ struct Known {
     /// another query, as a reference plan; repeatable.
     #[arg(long)]
     profile_postgres: Vec<PathBuf>,
-    /// Every `*.json` profile in this directory, as reference plans.
+    /// Snowflake's `GET_QUERY_OPERATOR_STATS` rows for another query (or a
+    /// snowflake-explain `QueryPlan`), as a reference plan; repeatable.
+    #[arg(long)]
+    profile_snowflake: Vec<PathBuf>,
+    /// Every `*.json` profile in this directory, as reference plans. A
+    /// profile's query, if any, is the `.sql` file of the same name next to
+    /// it.
     #[arg(long)]
     profiles_dir: Option<PathBuf>,
     /// The engine whose profiles --profiles-dir holds.
@@ -116,12 +126,6 @@ struct Known {
     /// them).
     #[arg(long)]
     no_explain: bool,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Engine {
-    Duckdb,
-    Postgres,
 }
 
 #[derive(Args)]
@@ -153,13 +157,18 @@ fn write(path: &PathBuf, text: &str) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Each profile `known` names, by its file's stem.
+/// Each profile `known` names, by its file's stem, with the query in the
+/// `.sql` file of that name next to it, if one.
 fn profiles(known: &Known) -> Result<Vec<Profile>, String> {
     let stem = |p: &PathBuf| p.file_stem().map_or_else(|| p.display().to_string(), |s| s.to_string_lossy().into_owned());
+    let profile = |p: &PathBuf, engine| -> Result<Profile, String> {
+        let sql = fs::read_to_string(p.with_extension("sql")).ok();
+        Ok(Profile { name: stem(p), json: read(p)?, engine, sql })
+    };
     let mut out = vec![];
-    for (paths, postgres) in [(&known.profile_duckdb, false), (&known.profile_postgres, true)] {
+    for (paths, engine) in [(&known.profile_duckdb, Engine::Duckdb), (&known.profile_postgres, Engine::Postgres), (&known.profile_snowflake, Engine::Snowflake)] {
         for p in paths {
-            out.push(Profile { name: stem(p), json: read(p)?, postgres });
+            out.push(profile(p, engine)?);
         }
     }
     if let Some(dir) = &known.profiles_dir {
@@ -170,9 +179,8 @@ fn profiles(known: &Known) -> Result<Vec<Profile>, String> {
             .filter(|p| known.except.as_deref().is_none_or(|x| stem(p) != x))
             .collect();
         paths.sort();
-        let postgres = matches!(known.profiles_format, Engine::Postgres);
         for p in paths {
-            out.push(Profile { name: stem(&p), json: read(&p)?, postgres });
+            out.push(profile(&p, known.profiles_format)?);
         }
     }
     Ok(out)
@@ -185,11 +193,12 @@ async fn analyze(input: &Input) -> Result<Dump, String> {
         (_, Some(q)) => Some(q.clone()),
         _ => None,
     };
-    let source = match (&input.duckdb, &input.postgres, sql) {
-        (Some(p), _, sql) => Source::DuckDb { json: read(p)?, sql },
-        (_, Some(p), sql) => Source::Postgres { json: read(p)?, sql },
-        (None, None, Some(sql)) => Source::Sql(sql),
-        (None, None, None) => return Err("give a query: --sql, --query, --duckdb or --postgres".into()),
+    let source = match (&input.duckdb, &input.postgres, &input.snowflake, sql) {
+        (Some(p), _, _, sql) => Source::DuckDb { json: read(p)?, sql },
+        (_, Some(p), _, sql) => Source::Postgres { json: read(p)?, sql },
+        (_, _, Some(p), sql) => Source::Snowflake { json: read(p)?, sql },
+        (None, None, None, Some(sql)) => Source::Sql(sql),
+        (None, None, None, None) => return Err("give a query: --sql, --query, --duckdb, --postgres or --snowflake".into()),
     };
     let mut options = Options { foreign_keys: input.foreign_keys.clone(), ..Default::default() };
     if let Some(n) = input.max_product {

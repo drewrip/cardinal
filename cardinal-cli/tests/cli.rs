@@ -61,6 +61,29 @@ fn reads_duckdb_plans() {
 }
 
 #[test]
+fn reads_snowflake_plans() {
+    let plan = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/snowflake/explain/q03.json");
+    let sql = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/tpch/q03.sql");
+    let text = run(&["analyze", "--schema", SCHEMA, "--snowflake", plan, "--sql", sql, "--brief", "--no-bounds"]);
+    assert!(text.contains("Root:") && text.contains("Plan and constraints:"), "{text}");
+}
+
+/// Snowflake's operator stats of TPC-H Q4 as a reference plan: the bounds
+/// are its true count.
+#[test]
+fn snowflake_profiles() {
+    let json = temp("q04_snowflake.json");
+    let profile = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/snowflake/tpch/q04.json");
+    let mut args = vec!["dump", "--schema", SCHEMA, "--snowflake", concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/snowflake/explain/q04.json")];
+    args.extend(["--sql", Q04, "--profile-snowflake", profile, "--no-plan-bounds", "-o", json.to_str().unwrap()]);
+    run(&args);
+    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let informed = dump.informed.as_ref().expect("an informed section");
+    assert_eq!(informed.plans, ["q04"]);
+    assert_eq!(informed.bounds.as_deref(), Some("X = 5"));
+}
+
+#[test]
 fn unknown_proof_is_an_error() {
     let out = Command::new(env!("CARGO_BIN_EXE_cardinal-cli"))
         .args(["analyze", "--schema", SCHEMA, "--query", "SELECT * FROM nation", "--no-plan-bounds", "--proof", "nope"])
