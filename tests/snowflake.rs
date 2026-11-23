@@ -153,3 +153,4 @@ async fn expressions() {
     let Op::Scan { filters, .. } = &scan.op else { unreachable!() };
     assert_eq!(filters.iter().map(|f| f.expr.as_ref().unwrap().to_string()).collect::<Vec<_>>(), [format!("{}.l_shipdate <= Date32(\"1998-09-02\")", p.nodes.iter().find_map(|n| match &n.op { Op::Scan { instance, .. } => Some(instance.clone()), _ => None }).unwrap())]);
 }
+

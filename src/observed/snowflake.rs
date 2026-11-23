@@ -340,14 +340,15 @@ impl<'a> Builder<'a> {
             })
             .collect();
         // The filters above, from the nearest. A predicate the scan applied
-        // in full, where its filter removed nothing, is the scan's own.
+        // in full, where its filter removed nothing, is the scan's own; in a
+        // plan that counts nothing, which applies it changes no count read.
         let (mut filters, mut runtime_filters) = (vec![], vec![]);
         let mut below = n;
         let mut at = n.parents.first().and_then(|&p| self.get(p).ok()).filter(|_| n.parents.len() == 1);
         while let Some(f) = at.filter(|f| f.children.len() == 1) {
             match f.operator.as_str() {
                 "Filter" => {
-                    let whole = self.counted && f.stats.output_rows.is_some() && f.stats.output_rows == below.stats.output_rows;
+                    let whole = !self.counted || (f.stats.output_rows.is_some() && f.stats.output_rows == below.stats.output_rows);
                     filters.extend(self.pred(text(&f.attributes, "filter_condition").unwrap_or(""), &columns, !whole));
                 }
                 // Which columns it filters, `Builder::bloom_filters` says.
@@ -422,6 +423,12 @@ impl<'a> Builder<'a> {
             }
         }
         on.extend(self.pred(text(attrs, "additional_join_condition").unwrap_or(""), &both, false));
+        // EXPLAIN's, which snowflake-explain keeps as it is.
+        for e in strings(attrs, "expressions") {
+            if let Some(c) = e.strip_prefix("joinFilter:") {
+                on.extend(self.pred(c.trim(), &both, false));
+            }
+        }
         // A join that printed no condition has one, but a cartesian join.
         if on.is_empty() && !cartesian {
             on.push(Pred { expr: None, text: "an unprinted condition".into(), optional: false });

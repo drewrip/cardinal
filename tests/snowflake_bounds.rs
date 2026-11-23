@@ -10,10 +10,10 @@
 
 mod fixtures;
 
-use cardinal::observed::{Catalog, ObservedPlan};
+use cardinal::observed::{Catalog, ObservedPlan, from_snowflake_explain};
 use cardinal::{Analysis, Bounds, Options};
 use datafusion::prelude::SessionContext;
-use fixtures::{catalog, context, foreign_keys, sf_plans, sf_query};
+use fixtures::{catalog, context, foreign_keys, sf_fixtures, sf_plans, sf_query};
 
 /// A fixture query, and its profile.
 struct Case {
@@ -135,4 +135,30 @@ async fn tight_rates() {
         }
         println!("{p:?}: {n} queries; capped at the truth with no plans {none_capped}, with the others' {capped} (exact {exact}); exact with its own {own_exact}");
     }
+}
+
+/// Snowflake's `EXPLAIN USING JSON` plan of each TPC-H query reads as a plan
+/// that counted nothing: as a reference plan, it adds nothing, and
+/// `Analysis::snowflake` is the two steps in one. Analyzed, it gives the
+/// constraints of the plan its profile ran.
+#[tokio::test]
+async fn explain_plans() {
+    let f = fixtures().await;
+    let mut differ = vec![];
+    for (name, json) in sf_fixtures("explain") {
+        let sql = sf_query(&name);
+        let plan = from_snowflake_explain(&f.catalog, &name, &json, Some(&sql)).unwrap();
+        assert!(!plan.counted);
+        let explained = Analysis::plan(&f.catalog, &plan).options(options()).build().unwrap();
+        let referenced = Analysis::plan(&f.catalog, &plan).options(options()).with_plans([&plan]).build().unwrap();
+        assert_eq!(referenced.constraints(), explained.constraints(), "{name}");
+        let direct = Analysis::snowflake(&f.catalog, &json, Some(&sql)).unwrap().options(options()).build().unwrap();
+        assert_eq!(direct.constraints(), explained.constraints(), "{name}");
+        let profile = &f.cases.iter().find(|c| c.name == format!("tpch/{name}")).unwrap().plan;
+        let profiled = Analysis::plan(&f.catalog, profile).options(options()).build().unwrap();
+        if explained.constraints() != profiled.constraints() {
+            differ.push(name);
+        }
+    }
+    assert!(differ.is_empty(), "EXPLAIN reads otherwise than the profile: {differ:?}");
 }
