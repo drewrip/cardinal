@@ -1,0 +1,1976 @@
+{
+  "q01": [
+    {
+      "operator": "TableScan: lineitem projection=[l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus, l_shipdate]",
+      "rows": 6001215,
+      "var": "op0_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate <= Date32(\"1998-09-02\")",
+      "rows": 5916591,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount) AS __common_expr_1, lineitem.l_quantity, lineitem.l_extendedprice, lineitem.l_discount, lineitem.l_tax, lineitem.l_returnflag, lineitem.l_linestatus",
+      "rows": 5916591,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_returnflag, lineitem.l_linestatus]], aggr=[[sum(lineitem.l_quantity), sum(lineitem.l_extendedprice), sum(__common_expr_1) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount), sum(__common_expr_1 * (Decimal128(1,20,0) + lineitem.l_tax)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount * Int64(1) + lineitem.l_tax), avg(lineitem.l_quantity), avg(lineitem.l_extendedprice), avg(lineitem.l_discount), count(Int64(1))]]",
+      "rows": 4,
+      "var": "op3_GroupBy"
+    },
+    {
+      "operator": "Projection: lineitem.l_returnflag, lineitem.l_linestatus, sum(lineitem.l_quantity) AS sum_qty, sum(lineitem.l_extendedprice) AS sum_base_price, sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS sum_disc_price, sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount * Int64(1) + lineitem.l_tax) AS sum_charge, avg(lineitem.l_quantity) AS avg_qty, avg(lineitem.l_extendedprice) AS avg_price, avg(lineitem.l_discount) AS avg_disc, count(Int64(1)) AS count(*) AS count_order",
+      "rows": 4,
+      "var": "op4_Projection"
+    },
+    {
+      "operator": "Sort: lineitem.l_returnflag ASC NULLS LAST, lineitem.l_linestatus ASC NULLS LAST",
+      "rows": 4,
+      "var": "op5_Sort"
+    }
+  ],
+  "q02": [
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_mfgr, p_type, p_size]",
+      "rows": 200000,
+      "var": "op0_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_size = Int32(15) AND part.p_type LIKE Utf8View(\"%BRASS\")",
+      "rows": 747,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: part.p_partkey, part.p_mfgr",
+      "rows": 747,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: partsupp projection=[ps_partkey, ps_suppkey, ps_supplycost]",
+      "rows": 800000,
+      "var": "op3_Scan_partsupp"
+    },
+    {
+      "operator": "Inner Join: part.p_partkey = partsupp.ps_partkey",
+      "rows": 2988,
+      "var": "op4_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: part.p_partkey, part.p_mfgr, partsupp.ps_suppkey, partsupp.ps_supplycost",
+      "rows": 2988,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_name, s_address, s_nationkey, s_phone, s_acctbal, s_comment]",
+      "rows": 10000,
+      "var": "op6_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: partsupp.ps_suppkey = supplier.s_suppkey",
+      "rows": 2988,
+      "var": "op7_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: part.p_partkey, part.p_mfgr, supplier.s_name, supplier.s_address, supplier.s_nationkey, supplier.s_phone, supplier.s_acctbal, supplier.s_comment, partsupp.ps_supplycost",
+      "rows": 2988,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name, n_regionkey]",
+      "rows": 25,
+      "var": "op9_Scan_nation"
+    },
+    {
+      "operator": "Inner Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 2988,
+      "var": "op10_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: part.p_partkey, part.p_mfgr, supplier.s_name, supplier.s_address, supplier.s_phone, supplier.s_acctbal, supplier.s_comment, partsupp.ps_supplycost, nation.n_name, nation.n_regionkey",
+      "rows": 2988,
+      "var": "op11_Projection"
+    },
+    {
+      "operator": "TableScan: region projection=[r_regionkey, r_name]",
+      "rows": 5,
+      "var": "op12_Scan_region"
+    },
+    {
+      "operator": "Filter: region.r_name = Utf8View(\"EUROPE\")",
+      "rows": 1,
+      "var": "op13_Filter"
+    },
+    {
+      "operator": "Projection: region.r_regionkey",
+      "rows": 1,
+      "var": "op14_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: nation.n_regionkey = region.r_regionkey",
+      "rows": 642,
+      "var": "op15_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: part.p_partkey, part.p_mfgr, supplier.s_name, supplier.s_address, supplier.s_phone, supplier.s_acctbal, supplier.s_comment, partsupp.ps_supplycost, nation.n_name",
+      "rows": 642,
+      "var": "op16_Projection"
+    },
+    {
+      "operator": "TableScan: partsupp projection=[ps_partkey, ps_suppkey, ps_supplycost]",
+      "rows": 800000,
+      "var": "op17_Scan_partsupp"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op18_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: partsupp.ps_suppkey = supplier.s_suppkey",
+      "rows": 800000,
+      "var": "op19_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_partkey, partsupp.ps_supplycost, supplier.s_nationkey",
+      "rows": 800000,
+      "var": "op20_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_regionkey]",
+      "rows": 25,
+      "var": "op21_Scan_nation"
+    },
+    {
+      "operator": "Inner Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 800000,
+      "var": "op22_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_partkey, partsupp.ps_supplycost, nation.n_regionkey",
+      "rows": 800000,
+      "var": "op23_Projection"
+    },
+    {
+      "operator": "TableScan: region projection=[r_regionkey, r_name]",
+      "rows": 5,
+      "var": "op24_Scan_region"
+    },
+    {
+      "operator": "Filter: region.r_name = Utf8View(\"EUROPE\")",
+      "rows": 1,
+      "var": "op25_Filter"
+    },
+    {
+      "operator": "Projection: region.r_regionkey",
+      "rows": 1,
+      "var": "op26_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: nation.n_regionkey = region.r_regionkey",
+      "rows": 158960,
+      "var": "op27_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_partkey, partsupp.ps_supplycost",
+      "rows": 158960,
+      "var": "op28_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[partsupp.ps_partkey]], aggr=[[min(partsupp.ps_supplycost)]]",
+      "rows": 117422,
+      "var": "op29_GroupBy"
+    },
+    {
+      "operator": "Projection: min(partsupp.ps_supplycost), partsupp.ps_partkey",
+      "rows": 117422,
+      "var": "op30_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __scalar_sq_1",
+      "rows": 117422,
+      "var": "op31_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: part.p_partkey = __scalar_sq_1.ps_partkey, partsupp.ps_supplycost = __scalar_sq_1.min(partsupp.ps_supplycost)",
+      "rows": 460,
+      "var": "op32_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_acctbal, supplier.s_name, nation.n_name, part.p_partkey, part.p_mfgr, supplier.s_address, supplier.s_phone, supplier.s_comment",
+      "rows": 460,
+      "var": "op33_Projection"
+    },
+    {
+      "operator": "Sort: supplier.s_acctbal DESC NULLS FIRST, nation.n_name ASC NULLS LAST, supplier.s_name ASC NULLS LAST, part.p_partkey ASC NULLS LAST, fetch=100",
+      "rows": 100,
+      "var": "op34_Sort"
+    }
+  ],
+  "q03": [
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_mktsegment]",
+      "rows": 150000,
+      "var": "op0_Scan_customer"
+    },
+    {
+      "operator": "Filter: customer.c_mktsegment = Utf8View(\"BUILDING\")",
+      "rows": 30142,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: customer.c_custkey",
+      "rows": 30142,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey, o_orderdate, o_shippriority]",
+      "rows": 1500000,
+      "var": "op3_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_orderdate < Date32(\"1995-03-15\")",
+      "rows": 727305,
+      "var": "op4_Filter"
+    },
+    {
+      "operator": "RightSemi Join: customer.c_custkey = orders.o_custkey",
+      "rows": 147126,
+      "var": "op5_RightSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: orders.o_orderkey, orders.o_orderdate, orders.o_shippriority",
+      "rows": 147126,
+      "var": "op6_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_extendedprice, l_discount, l_shipdate]",
+      "rows": 6001215,
+      "var": "op7_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate > Date32(\"1995-03-15\")",
+      "rows": 3241776,
+      "var": "op8_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 3241776,
+      "var": "op9_Projection"
+    },
+    {
+      "operator": "Inner Join: orders.o_orderkey = lineitem.l_orderkey",
+      "rows": 30519,
+      "var": "op10_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: orders.o_orderdate, orders.o_shippriority, lineitem.l_orderkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 30519,
+      "var": "op11_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_orderkey, orders.o_orderdate, orders.o_shippriority]], aggr=[[sum(lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 11620,
+      "var": "op12_GroupBy"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS revenue, orders.o_orderdate, orders.o_shippriority",
+      "rows": 11620,
+      "var": "op13_Projection"
+    },
+    {
+      "operator": "Sort: revenue DESC NULLS FIRST, orders.o_orderdate ASC NULLS LAST, fetch=10",
+      "rows": 10,
+      "var": "op14_Sort"
+    }
+  ],
+  "q04": [
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_orderdate, o_orderpriority]",
+      "rows": 1500000,
+      "var": "op0_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_orderdate >= Date32(\"1993-07-01\") AND orders.o_orderdate < Date32(\"1993-10-01\")",
+      "rows": 57218,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: orders.o_orderkey, orders.o_orderpriority",
+      "rows": 57218,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_commitdate, l_receiptdate]",
+      "rows": 6001215,
+      "var": "op3_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_receiptdate > lineitem.l_commitdate",
+      "rows": 3793296,
+      "var": "op4_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey",
+      "rows": 3793296,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_1",
+      "rows": 3793296,
+      "var": "op6_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: orders.o_orderkey = __correlated_sq_1.l_orderkey",
+      "rows": 52523,
+      "var": "op7_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: orders.o_orderpriority",
+      "rows": 52523,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[orders.o_orderpriority]], aggr=[[count(Int64(1))]]",
+      "rows": 5,
+      "var": "op9_GroupBy"
+    },
+    {
+      "operator": "Projection: orders.o_orderpriority, count(Int64(1)) AS count(*) AS order_count",
+      "rows": 5,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "Sort: orders.o_orderpriority ASC NULLS LAST",
+      "rows": 5,
+      "var": "op11_Sort"
+    }
+  ],
+  "q05": [
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_nationkey]",
+      "rows": 150000,
+      "var": "op0_Scan_customer"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey, o_orderdate]",
+      "rows": 1500000,
+      "var": "op1_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_orderdate >= Date32(\"1994-01-01\") AND orders.o_orderdate < Date32(\"1995-01-01\")",
+      "rows": 227597,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: orders.o_orderkey, orders.o_custkey",
+      "rows": 227597,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "Inner Join: customer.c_custkey = orders.o_custkey",
+      "rows": 227597,
+      "var": "op4_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_nationkey, orders.o_orderkey",
+      "rows": 227597,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_suppkey, l_extendedprice, l_discount]",
+      "rows": 6001215,
+      "var": "op6_Scan_lineitem"
+    },
+    {
+      "operator": "Inner Join: orders.o_orderkey = lineitem.l_orderkey",
+      "rows": 910519,
+      "var": "op7_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_nationkey, lineitem.l_suppkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 910519,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op9_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_suppkey = supplier.s_suppkey, customer.c_nationkey = supplier.s_nationkey",
+      "rows": 36236,
+      "var": "op10_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey",
+      "rows": 36236,
+      "var": "op11_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name, n_regionkey]",
+      "rows": 25,
+      "var": "op12_Scan_nation"
+    },
+    {
+      "operator": "Inner Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 36236,
+      "var": "op13_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, nation.n_name, nation.n_regionkey",
+      "rows": 36236,
+      "var": "op14_Projection"
+    },
+    {
+      "operator": "TableScan: region projection=[r_regionkey, r_name]",
+      "rows": 5,
+      "var": "op15_Scan_region"
+    },
+    {
+      "operator": "Filter: region.r_name = Utf8View(\"ASIA\")",
+      "rows": 1,
+      "var": "op16_Filter"
+    },
+    {
+      "operator": "Projection: region.r_regionkey",
+      "rows": 1,
+      "var": "op17_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: nation.n_regionkey = region.r_regionkey",
+      "rows": 7243,
+      "var": "op18_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, nation.n_name",
+      "rows": 7243,
+      "var": "op19_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[nation.n_name]], aggr=[[sum(lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 5,
+      "var": "op20_GroupBy"
+    },
+    {
+      "operator": "Projection: nation.n_name, sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS revenue",
+      "rows": 5,
+      "var": "op21_Projection"
+    },
+    {
+      "operator": "Sort: revenue DESC NULLS FIRST",
+      "rows": 5,
+      "var": "op22_Sort"
+    }
+  ],
+  "q06": [
+    {
+      "operator": "TableScan: lineitem projection=[l_quantity, l_extendedprice, l_discount, l_shipdate]",
+      "rows": 6001215,
+      "var": "op0_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate >= Date32(\"1994-01-01\") AND lineitem.l_shipdate < Date32(\"1995-01-01\") AND lineitem.l_discount >= Decimal128(0.05,15,2) AND lineitem.l_discount <= Decimal128(0.07,15,2) AND lineitem.l_quantity < Decimal128(24.00,15,2)",
+      "rows": 114160,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 114160,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[sum(lineitem.l_extendedprice * lineitem.l_discount)]]",
+      "rows": 1,
+      "var": "op3_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: sum(lineitem.l_extendedprice * lineitem.l_discount) AS revenue",
+      "rows": 1,
+      "var": "op4_Projection"
+    }
+  ],
+  "q07": [
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op0_Scan_supplier"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_suppkey, l_extendedprice, l_discount, l_shipdate]",
+      "rows": 6001215,
+      "var": "op1_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate >= Date32(\"1995-01-01\") AND lineitem.l_shipdate <= Date32(\"1996-12-31\")",
+      "rows": 1828450,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Inner Join: supplier.s_suppkey = lineitem.l_suppkey",
+      "rows": 1828450,
+      "var": "op3_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_nationkey, lineitem.l_orderkey, lineitem.l_extendedprice, lineitem.l_discount, lineitem.l_shipdate",
+      "rows": 1828450,
+      "var": "op4_Projection"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey]",
+      "rows": 1500000,
+      "var": "op5_Scan_orders"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_orderkey = orders.o_orderkey",
+      "rows": 1828450,
+      "var": "op6_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_nationkey, lineitem.l_extendedprice, lineitem.l_discount, lineitem.l_shipdate, orders.o_custkey",
+      "rows": 1828450,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_nationkey]",
+      "rows": 150000,
+      "var": "op8_Scan_customer"
+    },
+    {
+      "operator": "Inner Join: orders.o_custkey = customer.c_custkey",
+      "rows": 1828450,
+      "var": "op9_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_nationkey, lineitem.l_extendedprice, lineitem.l_discount, lineitem.l_shipdate, customer.c_nationkey",
+      "rows": 1828450,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op11_Scan_nation"
+    },
+    {
+      "operator": "Filter: nation.n_name = Utf8View(\"FRANCE\") OR nation.n_name = Utf8View(\"GERMANY\")",
+      "rows": 2,
+      "var": "op12_Filter"
+    },
+    {
+      "operator": "SubqueryAlias: n1",
+      "rows": 2,
+      "var": "op13_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: supplier.s_nationkey = n1.n_nationkey",
+      "rows": 145703,
+      "var": "op14_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, lineitem.l_shipdate, customer.c_nationkey, n1.n_name",
+      "rows": 145703,
+      "var": "op15_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op16_Scan_nation"
+    },
+    {
+      "operator": "Filter: nation.n_name = Utf8View(\"GERMANY\") OR nation.n_name = Utf8View(\"FRANCE\")",
+      "rows": 2,
+      "var": "op17_Filter"
+    },
+    {
+      "operator": "SubqueryAlias: n2",
+      "rows": 2,
+      "var": "op18_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: customer.c_nationkey = n2.n_nationkey Filter: n1.n_name = Utf8View(\"FRANCE\") AND n2.n_name = Utf8View(\"GERMANY\") OR n1.n_name = Utf8View(\"GERMANY\") AND n2.n_name = Utf8View(\"FRANCE\")",
+      "rows": 5924,
+      "var": "op19_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: n1.n_name AS supp_nation, n2.n_name AS cust_nation, date_part(Utf8(\"YEAR\"), lineitem.l_shipdate) AS l_year, lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount) AS volume",
+      "rows": 5924,
+      "var": "op20_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: shipping",
+      "rows": 5924,
+      "var": "op21_SubqueryAlias"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[shipping.supp_nation, shipping.cust_nation, shipping.l_year]], aggr=[[sum(shipping.volume)]]",
+      "rows": 4,
+      "var": "op22_GroupBy"
+    },
+    {
+      "operator": "Projection: shipping.supp_nation, shipping.cust_nation, shipping.l_year, sum(shipping.volume) AS revenue",
+      "rows": 4,
+      "var": "op23_Projection"
+    },
+    {
+      "operator": "Sort: shipping.supp_nation ASC NULLS LAST, shipping.cust_nation ASC NULLS LAST, shipping.l_year ASC NULLS LAST",
+      "rows": 4,
+      "var": "op24_Sort"
+    }
+  ],
+  "q08": [
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_type]",
+      "rows": 200000,
+      "var": "op0_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_type = Utf8View(\"ECONOMY ANODIZED STEEL\")",
+      "rows": 1451,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: part.p_partkey",
+      "rows": 1451,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_partkey, l_suppkey, l_extendedprice, l_discount]",
+      "rows": 6001215,
+      "var": "op3_Scan_lineitem"
+    },
+    {
+      "operator": "RightSemi Join: part.p_partkey = lineitem.l_partkey",
+      "rows": 43693,
+      "var": "op4_RightSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_suppkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 43693,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op6_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_suppkey = supplier.s_suppkey",
+      "rows": 43693,
+      "var": "op7_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey",
+      "rows": 43693,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey, o_orderdate]",
+      "rows": 1500000,
+      "var": "op9_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_orderdate >= Date32(\"1995-01-01\") AND orders.o_orderdate <= Date32(\"1996-12-31\")",
+      "rows": 457263,
+      "var": "op10_Filter"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_orderkey = orders.o_orderkey",
+      "rows": 13389,
+      "var": "op11_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey, orders.o_custkey, orders.o_orderdate",
+      "rows": 13389,
+      "var": "op12_Projection"
+    },
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_nationkey]",
+      "rows": 150000,
+      "var": "op13_Scan_customer"
+    },
+    {
+      "operator": "Inner Join: orders.o_custkey = customer.c_custkey",
+      "rows": 13389,
+      "var": "op14_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey, orders.o_orderdate, customer.c_nationkey",
+      "rows": 13389,
+      "var": "op15_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_regionkey]",
+      "rows": 25,
+      "var": "op16_Scan_nation"
+    },
+    {
+      "operator": "SubqueryAlias: n1",
+      "rows": 25,
+      "var": "op17_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: customer.c_nationkey = n1.n_nationkey",
+      "rows": 13389,
+      "var": "op18_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey, orders.o_orderdate, n1.n_regionkey",
+      "rows": 13389,
+      "var": "op19_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op20_Scan_nation"
+    },
+    {
+      "operator": "SubqueryAlias: n2",
+      "rows": 25,
+      "var": "op21_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: supplier.s_nationkey = n2.n_nationkey",
+      "rows": 13389,
+      "var": "op22_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount, orders.o_orderdate, n1.n_regionkey, n2.n_name",
+      "rows": 13389,
+      "var": "op23_Projection"
+    },
+    {
+      "operator": "TableScan: region projection=[r_regionkey, r_name]",
+      "rows": 5,
+      "var": "op24_Scan_region"
+    },
+    {
+      "operator": "Filter: region.r_name = Utf8View(\"AMERICA\")",
+      "rows": 1,
+      "var": "op25_Filter"
+    },
+    {
+      "operator": "Projection: region.r_regionkey",
+      "rows": 1,
+      "var": "op26_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: n1.n_regionkey = region.r_regionkey",
+      "rows": 2603,
+      "var": "op27_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: date_part(Utf8(\"YEAR\"), orders.o_orderdate) AS o_year, lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount) AS volume, n2.n_name AS nation",
+      "rows": 2603,
+      "var": "op28_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: all_nations",
+      "rows": 2603,
+      "var": "op29_SubqueryAlias"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[all_nations.o_year]], aggr=[[sum(CASE WHEN all_nations.nation = Utf8View(\"BRAZIL\") THEN all_nations.volume ELSE Decimal128(0.0000,38,4) END) AS sum(CASE WHEN all_nations.nation = Utf8(\"BRAZIL\") THEN all_nations.volume ELSE Int64(0) END), sum(all_nations.volume)]]",
+      "rows": 2,
+      "var": "op30_GroupBy"
+    },
+    {
+      "operator": "Projection: all_nations.o_year, sum(CASE WHEN all_nations.nation = Utf8(\"BRAZIL\") THEN all_nations.volume ELSE Int64(0) END) / sum(all_nations.volume) AS mkt_share",
+      "rows": 2,
+      "var": "op31_Projection"
+    },
+    {
+      "operator": "Sort: all_nations.o_year ASC NULLS LAST",
+      "rows": 2,
+      "var": "op32_Sort"
+    }
+  ],
+  "q09": [
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_name]",
+      "rows": 200000,
+      "var": "op0_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_name LIKE Utf8View(\"%green%\")",
+      "rows": 10664,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: part.p_partkey",
+      "rows": 10664,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_partkey, l_suppkey, l_quantity, l_extendedprice, l_discount]",
+      "rows": 6001215,
+      "var": "op3_Scan_lineitem"
+    },
+    {
+      "operator": "RightSemi Join: part.p_partkey = lineitem.l_partkey",
+      "rows": 319404,
+      "var": "op4_RightSemiKeyJoin"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op5_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_suppkey = supplier.s_suppkey",
+      "rows": 319404,
+      "var": "op6_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_partkey, lineitem.l_suppkey, lineitem.l_quantity, lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey",
+      "rows": 319404,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "TableScan: partsupp projection=[ps_partkey, ps_suppkey, ps_supplycost]",
+      "rows": 800000,
+      "var": "op8_Scan_partsupp"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_suppkey = partsupp.ps_suppkey, lineitem.l_partkey = partsupp.ps_partkey",
+      "rows": 319404,
+      "var": "op9_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_quantity, lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey, partsupp.ps_supplycost",
+      "rows": 319404,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_orderdate]",
+      "rows": 1500000,
+      "var": "op11_Scan_orders"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_orderkey = orders.o_orderkey",
+      "rows": 319404,
+      "var": "op12_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_quantity, lineitem.l_extendedprice, lineitem.l_discount, supplier.s_nationkey, partsupp.ps_supplycost, orders.o_orderdate",
+      "rows": 319404,
+      "var": "op13_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op14_Scan_nation"
+    },
+    {
+      "operator": "Inner Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 319404,
+      "var": "op15_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: nation.n_name AS nation, date_part(Utf8(\"YEAR\"), orders.o_orderdate) AS o_year, lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount) - partsupp.ps_supplycost * lineitem.l_quantity AS amount",
+      "rows": 319404,
+      "var": "op16_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: profit",
+      "rows": 319404,
+      "var": "op17_SubqueryAlias"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[profit.nation, profit.o_year]], aggr=[[sum(profit.amount)]]",
+      "rows": 175,
+      "var": "op18_GroupBy"
+    },
+    {
+      "operator": "Projection: profit.nation, profit.o_year, sum(profit.amount) AS sum_profit",
+      "rows": 175,
+      "var": "op19_Projection"
+    },
+    {
+      "operator": "Sort: profit.nation ASC NULLS LAST, profit.o_year DESC NULLS FIRST",
+      "rows": 175,
+      "var": "op20_Sort"
+    }
+  ],
+  "q10": [
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_name, c_address, c_nationkey, c_phone, c_acctbal, c_comment]",
+      "rows": 150000,
+      "var": "op0_Scan_customer"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey, o_orderdate]",
+      "rows": 1500000,
+      "var": "op1_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_orderdate >= Date32(\"1993-10-01\") AND orders.o_orderdate < Date32(\"1994-01-01\")",
+      "rows": 57069,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: orders.o_orderkey, orders.o_custkey",
+      "rows": 57069,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "Inner Join: customer.c_custkey = orders.o_custkey",
+      "rows": 57069,
+      "var": "op4_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, customer.c_name, customer.c_address, customer.c_nationkey, customer.c_phone, customer.c_acctbal, customer.c_comment, orders.o_orderkey",
+      "rows": 57069,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_extendedprice, l_discount, l_returnflag]",
+      "rows": 6001215,
+      "var": "op6_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_returnflag = Utf8View(\"R\")",
+      "rows": 1478870,
+      "var": "op7_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 1478870,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "Inner Join: orders.o_orderkey = lineitem.l_orderkey",
+      "rows": 114705,
+      "var": "op9_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, customer.c_name, customer.c_address, customer.c_nationkey, customer.c_phone, customer.c_acctbal, customer.c_comment, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 114705,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op11_Scan_nation"
+    },
+    {
+      "operator": "Inner Join: customer.c_nationkey = nation.n_nationkey",
+      "rows": 114705,
+      "var": "op12_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, customer.c_name, customer.c_address, customer.c_phone, customer.c_acctbal, customer.c_comment, lineitem.l_extendedprice, lineitem.l_discount, nation.n_name",
+      "rows": 114705,
+      "var": "op13_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[customer.c_custkey, customer.c_name, customer.c_acctbal, customer.c_phone, nation.n_name, customer.c_address, customer.c_comment]], aggr=[[sum(lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 37967,
+      "var": "op14_GroupBy"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, customer.c_name, sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS revenue, customer.c_acctbal, nation.n_name, customer.c_address, customer.c_phone, customer.c_comment",
+      "rows": 37967,
+      "var": "op15_Projection"
+    },
+    {
+      "operator": "Sort: revenue DESC NULLS FIRST, fetch=20",
+      "rows": 20,
+      "var": "op16_Sort"
+    }
+  ],
+  "q11": [
+    {
+      "operator": "TableScan: partsupp projection=[ps_suppkey, ps_availqty, ps_supplycost]",
+      "rows": 800000,
+      "var": "op0_Scan_partsupp"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op1_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: partsupp.ps_suppkey = supplier.s_suppkey",
+      "rows": 800000,
+      "var": "op2_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_availqty, partsupp.ps_supplycost, supplier.s_nationkey",
+      "rows": 800000,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op4_Scan_nation"
+    },
+    {
+      "operator": "Filter: nation.n_name = Utf8View(\"GERMANY\")",
+      "rows": 1,
+      "var": "op5_Filter"
+    },
+    {
+      "operator": "Projection: nation.n_nationkey",
+      "rows": 1,
+      "var": "op6_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 31680,
+      "var": "op7_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_availqty, partsupp.ps_supplycost",
+      "rows": 31680,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[sum(partsupp.ps_supplycost * CAST(partsupp.ps_availqty AS Decimal128(20, 0)))]]",
+      "rows": 1,
+      "var": "op9_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: CAST(CAST(sum(partsupp.ps_supplycost * partsupp.ps_availqty) AS Float64) * Float64(0.0001) AS Decimal128(38, 15))",
+      "rows": 1,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "Subquery:",
+      "rows": 1,
+      "var": "op11_Subquery"
+    },
+    {
+      "operator": "TableScan: partsupp projection=[ps_partkey, ps_suppkey, ps_availqty, ps_supplycost]",
+      "rows": 800000,
+      "var": "op12_Scan_partsupp"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_nationkey]",
+      "rows": 10000,
+      "var": "op13_Scan_supplier"
+    },
+    {
+      "operator": "Inner Join: partsupp.ps_suppkey = supplier.s_suppkey",
+      "rows": 800000,
+      "var": "op14_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_partkey, partsupp.ps_availqty, partsupp.ps_supplycost, supplier.s_nationkey",
+      "rows": 800000,
+      "var": "op15_Projection"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op16_Scan_nation"
+    },
+    {
+      "operator": "Filter: nation.n_name = Utf8View(\"GERMANY\")",
+      "rows": 1,
+      "var": "op17_Filter"
+    },
+    {
+      "operator": "Projection: nation.n_nationkey",
+      "rows": 1,
+      "var": "op18_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 31680,
+      "var": "op19_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_partkey, partsupp.ps_availqty, partsupp.ps_supplycost",
+      "rows": 31680,
+      "var": "op20_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[partsupp.ps_partkey]], aggr=[[sum(partsupp.ps_supplycost * CAST(partsupp.ps_availqty AS Decimal128(20, 0)))]]",
+      "rows": 29818,
+      "var": "op21_GroupBy"
+    },
+    {
+      "operator": "Filter: CAST(sum(partsupp.ps_supplycost * partsupp.ps_availqty) AS Decimal128(38, 15)) > (<subquery>)",
+      "rows": 1048,
+      "var": "op22_Filter"
+    },
+    {
+      "operator": "Projection: partsupp.ps_partkey, sum(partsupp.ps_supplycost * partsupp.ps_availqty) AS value",
+      "rows": 1048,
+      "var": "op23_Projection"
+    },
+    {
+      "operator": "Sort: value DESC NULLS FIRST",
+      "rows": 1048,
+      "var": "op24_Sort"
+    }
+  ],
+  "q12": [
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_orderpriority]",
+      "rows": 1500000,
+      "var": "op0_Scan_orders"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_shipdate, l_commitdate, l_receiptdate, l_shipmode]",
+      "rows": 6001215,
+      "var": "op1_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: (lineitem.l_shipmode = Utf8View(\"MAIL\") OR lineitem.l_shipmode = Utf8View(\"SHIP\")) AND lineitem.l_receiptdate > lineitem.l_commitdate AND lineitem.l_shipdate < lineitem.l_commitdate AND lineitem.l_receiptdate >= Date32(\"1994-01-01\") AND lineitem.l_receiptdate < Date32(\"1995-01-01\")",
+      "rows": 30988,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_shipmode",
+      "rows": 30988,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "Inner Join: orders.o_orderkey = lineitem.l_orderkey",
+      "rows": 30988,
+      "var": "op4_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: orders.o_orderpriority, lineitem.l_shipmode",
+      "rows": 30988,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_shipmode]], aggr=[[sum(CASE WHEN orders.o_orderpriority = Utf8View(\"1-URGENT\") OR orders.o_orderpriority = Utf8View(\"2-HIGH\") THEN Int64(1) ELSE Int64(0) END) AS sum(CASE WHEN orders.o_orderpriority = Utf8(\"1-URGENT\") OR orders.o_orderpriority = Utf8(\"2-HIGH\") THEN Int64(1) ELSE Int64(0) END), sum(CASE WHEN orders.o_orderpriority != Utf8View(\"1-URGENT\") AND orders.o_orderpriority != Utf8View(\"2-HIGH\") THEN Int64(1) ELSE Int64(0) END) AS sum(CASE WHEN orders.o_orderpriority != Utf8(\"1-URGENT\") AND orders.o_orderpriority != Utf8(\"2-HIGH\") THEN Int64(1) ELSE Int64(0) END)]]",
+      "rows": 2,
+      "var": "op6_GroupBy"
+    },
+    {
+      "operator": "Projection: lineitem.l_shipmode, sum(CASE WHEN orders.o_orderpriority = Utf8(\"1-URGENT\") OR orders.o_orderpriority = Utf8(\"2-HIGH\") THEN Int64(1) ELSE Int64(0) END) AS high_line_count, sum(CASE WHEN orders.o_orderpriority != Utf8(\"1-URGENT\") AND orders.o_orderpriority != Utf8(\"2-HIGH\") THEN Int64(1) ELSE Int64(0) END) AS low_line_count",
+      "rows": 2,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "Sort: lineitem.l_shipmode ASC NULLS LAST",
+      "rows": 2,
+      "var": "op8_Sort"
+    }
+  ],
+  "q13": [
+    {
+      "operator": "TableScan: customer projection=[c_custkey]",
+      "rows": 150000,
+      "var": "op0_Scan_customer"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey, o_comment]",
+      "rows": 1500000,
+      "var": "op1_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_comment NOT LIKE Utf8View(\"%special%requests%\")",
+      "rows": 1483918,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: orders.o_orderkey, orders.o_custkey",
+      "rows": 1483918,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "Left Join: customer.c_custkey = orders.o_custkey",
+      "rows": 1533923,
+      "var": "op4_LeftKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, orders.o_orderkey",
+      "rows": 1533923,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[customer.c_custkey]], aggr=[[count(orders.o_orderkey)]]",
+      "rows": 150000,
+      "var": "op6_GroupBy"
+    },
+    {
+      "operator": "Projection: count(orders.o_orderkey) AS c_count",
+      "rows": 150000,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: c_orders",
+      "rows": 150000,
+      "var": "op8_SubqueryAlias"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[c_orders.c_count]], aggr=[[count(Int64(1))]]",
+      "rows": 42,
+      "var": "op9_GroupBy"
+    },
+    {
+      "operator": "Projection: c_orders.c_count, count(Int64(1)) AS count(*) AS custdist",
+      "rows": 42,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "Sort: custdist DESC NULLS FIRST, c_orders.c_count DESC NULLS FIRST",
+      "rows": 42,
+      "var": "op11_Sort"
+    }
+  ],
+  "q14": [
+    {
+      "operator": "TableScan: lineitem projection=[l_partkey, l_extendedprice, l_discount, l_shipdate]",
+      "rows": 6001215,
+      "var": "op0_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate >= Date32(\"1995-09-01\") AND lineitem.l_shipdate < Date32(\"1995-10-01\")",
+      "rows": 75983,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_partkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 75983,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_type]",
+      "rows": 200000,
+      "var": "op3_Scan_part"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_partkey = part.p_partkey",
+      "rows": 75983,
+      "var": "op4_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount) AS __common_expr_1, part.p_type",
+      "rows": 75983,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[sum(CASE WHEN part.p_type LIKE Utf8View(\"PROMO%\") THEN __common_expr_1 ELSE Decimal128(0.0000,38,4) END) AS sum(CASE WHEN part.p_type LIKE Utf8(\"PROMO%\") THEN lineitem.l_extendedprice * Int64(1) - lineitem.l_discount ELSE Int64(0) END), sum(__common_expr_1) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 1,
+      "var": "op6_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: Float64(100) * CAST(sum(CASE WHEN part.p_type LIKE Utf8(\"PROMO%\") THEN lineitem.l_extendedprice * Int64(1) - lineitem.l_discount ELSE Int64(0) END) AS Float64) / CAST(sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS Float64) AS promo_revenue",
+      "rows": 1,
+      "var": "op7_Projection"
+    }
+  ],
+  "q15": [
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_name, s_address, s_phone]",
+      "rows": 10000,
+      "var": "op0_Scan_supplier"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_suppkey, l_extendedprice, l_discount, l_shipdate]",
+      "rows": 6001215,
+      "var": "op1_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate >= Date32(\"1996-01-01\") AND lineitem.l_shipdate < Date32(\"1996-04-01\")",
+      "rows": 225954,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_suppkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 225954,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_suppkey]], aggr=[[sum(lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 10000,
+      "var": "op4_GroupBy"
+    },
+    {
+      "operator": "Projection: sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS total_revenue",
+      "rows": 10000,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: revenue0",
+      "rows": 10000,
+      "var": "op6_SubqueryAlias"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[max(revenue0.total_revenue)]]",
+      "rows": 1,
+      "var": "op7_ScalarAggregate"
+    },
+    {
+      "operator": "Subquery:",
+      "rows": 1,
+      "var": "op8_Subquery"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_suppkey, l_extendedprice, l_discount, l_shipdate]",
+      "rows": 6001215,
+      "var": "op9_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate >= Date32(\"1996-01-01\") AND lineitem.l_shipdate < Date32(\"1996-04-01\")",
+      "rows": 225954,
+      "var": "op10_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_suppkey, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 225954,
+      "var": "op11_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_suppkey]], aggr=[[sum(lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 10000,
+      "var": "op12_GroupBy"
+    },
+    {
+      "operator": "Filter: sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) = (<subquery>)",
+      "rows": 1,
+      "var": "op13_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_suppkey AS supplier_no, sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS total_revenue",
+      "rows": 1,
+      "var": "op14_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: revenue0",
+      "rows": 1,
+      "var": "op15_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: supplier.s_suppkey = revenue0.supplier_no",
+      "rows": 1,
+      "var": "op16_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_suppkey, supplier.s_name, supplier.s_address, supplier.s_phone, revenue0.total_revenue",
+      "rows": 1,
+      "var": "op17_Projection"
+    },
+    {
+      "operator": "Sort: supplier.s_suppkey ASC NULLS LAST",
+      "rows": 1,
+      "var": "op18_Sort"
+    }
+  ],
+  "q16": [
+    {
+      "operator": "TableScan: partsupp projection=[ps_partkey, ps_suppkey]",
+      "rows": 800000,
+      "var": "op0_Scan_partsupp"
+    },
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_brand, p_type, p_size]",
+      "rows": 200000,
+      "var": "op1_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_brand != Utf8View(\"Brand#45\") AND part.p_size IN ([Int32(49), Int32(14), Int32(23), Int32(45), Int32(19), Int32(3), Int32(36), Int32(9)]) AND part.p_type NOT LIKE Utf8View(\"MEDIUM POLISHED%\")",
+      "rows": 29581,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Inner Join: partsupp.ps_partkey = part.p_partkey",
+      "rows": 118324,
+      "var": "op3_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_suppkey, part.p_brand, part.p_type, part.p_size",
+      "rows": 118324,
+      "var": "op4_Projection"
+    },
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_comment]",
+      "rows": 10000,
+      "var": "op5_Scan_supplier"
+    },
+    {
+      "operator": "Filter: supplier.s_comment LIKE Utf8View(\"%Customer%Complaints%\")",
+      "rows": 4,
+      "var": "op6_Filter"
+    },
+    {
+      "operator": "Projection: supplier.s_suppkey",
+      "rows": 4,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_1",
+      "rows": 4,
+      "var": "op8_SubqueryAlias"
+    },
+    {
+      "operator": "LeftAnti Join: partsupp.ps_suppkey = __correlated_sq_1.s_suppkey",
+      "rows": 118274,
+      "var": "op9_LeftAntiKeyJoin"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey AS alias1]], aggr=[[]]",
+      "rows": 118250,
+      "var": "op10_GroupBy"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[part.p_brand, part.p_type, part.p_size]], aggr=[[count(alias1)]]",
+      "rows": 18314,
+      "var": "op11_GroupBy"
+    },
+    {
+      "operator": "Projection: part.p_brand, part.p_type, part.p_size, count(alias1) AS supplier_cnt",
+      "rows": 18314,
+      "var": "op12_Projection"
+    },
+    {
+      "operator": "Sort: supplier_cnt DESC NULLS FIRST, part.p_brand ASC NULLS LAST, part.p_type ASC NULLS LAST, part.p_size ASC NULLS LAST",
+      "rows": 18314,
+      "var": "op13_Sort"
+    }
+  ],
+  "q17": [
+    {
+      "operator": "TableScan: lineitem projection=[l_partkey, l_quantity, l_extendedprice]",
+      "rows": 6001215,
+      "var": "op0_Scan_lineitem"
+    },
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_brand, p_container]",
+      "rows": 200000,
+      "var": "op1_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_brand = Utf8View(\"Brand#23\") AND part.p_container = Utf8View(\"MED BOX\")",
+      "rows": 204,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: part.p_partkey",
+      "rows": 204,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "Inner Join: lineitem.l_partkey = part.p_partkey",
+      "rows": 6088,
+      "var": "op4_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_quantity, lineitem.l_extendedprice, part.p_partkey",
+      "rows": 6088,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_partkey, l_quantity]",
+      "rows": 6001215,
+      "var": "op6_Scan_lineitem"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_partkey]], aggr=[[avg(lineitem.l_quantity)]]",
+      "rows": 200000,
+      "var": "op7_GroupBy"
+    },
+    {
+      "operator": "Projection: CAST(Float64(0.2) * CAST(avg(lineitem.l_quantity) AS Float64) AS Decimal128(30, 15)), lineitem.l_partkey",
+      "rows": 200000,
+      "var": "op8_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __scalar_sq_1",
+      "rows": 200000,
+      "var": "op9_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: part.p_partkey = __scalar_sq_1.l_partkey Filter: CAST(lineitem.l_quantity AS Decimal128(30, 15)) < __scalar_sq_1.Float64(0.2) * avg(lineitem.l_quantity)",
+      "rows": 587,
+      "var": "op10_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice",
+      "rows": 587,
+      "var": "op11_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[sum(lineitem.l_extendedprice)]]",
+      "rows": 1,
+      "var": "op12_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: CAST(sum(lineitem.l_extendedprice) AS Float64) / Float64(7) AS avg_yearly",
+      "rows": 1,
+      "var": "op13_Projection"
+    }
+  ],
+  "q18": [
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_name]",
+      "rows": 150000,
+      "var": "op0_Scan_customer"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_custkey, o_totalprice, o_orderdate]",
+      "rows": 1500000,
+      "var": "op1_Scan_orders"
+    },
+    {
+      "operator": "Inner Join: customer.c_custkey = orders.o_custkey",
+      "rows": 1500000,
+      "var": "op2_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, customer.c_name, orders.o_orderkey, orders.o_totalprice, orders.o_orderdate",
+      "rows": 1500000,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_quantity]",
+      "rows": 6001215,
+      "var": "op4_Scan_lineitem"
+    },
+    {
+      "operator": "Inner Join: orders.o_orderkey = lineitem.l_orderkey",
+      "rows": 6001215,
+      "var": "op5_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: customer.c_custkey, customer.c_name, orders.o_orderkey, orders.o_totalprice, orders.o_orderdate, lineitem.l_quantity",
+      "rows": 6001215,
+      "var": "op6_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_quantity]",
+      "rows": 6001215,
+      "var": "op7_Scan_lineitem"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_orderkey]], aggr=[[sum(lineitem.l_quantity)]]",
+      "rows": 1500000,
+      "var": "op8_GroupBy"
+    },
+    {
+      "operator": "Filter: sum(lineitem.l_quantity) > Decimal128(100.00,25,2)",
+      "rows": 729214,
+      "var": "op9_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey",
+      "rows": 729214,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_1",
+      "rows": 729214,
+      "var": "op11_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: orders.o_orderkey = __correlated_sq_1.l_orderkey",
+      "rows": 4079284,
+      "var": "op12_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[customer.c_name, customer.c_custkey, orders.o_orderkey, orders.o_orderdate, orders.o_totalprice]], aggr=[[sum(lineitem.l_quantity)]]",
+      "rows": 729214,
+      "var": "op13_GroupBy"
+    },
+    {
+      "operator": "Sort: orders.o_totalprice DESC NULLS FIRST, orders.o_orderdate ASC NULLS LAST, fetch=100",
+      "rows": 100,
+      "var": "op14_Sort"
+    }
+  ],
+  "q19": [
+    {
+      "operator": "TableScan: lineitem projection=[l_partkey, l_quantity, l_extendedprice, l_discount, l_shipinstruct, l_shipmode]",
+      "rows": 6001215,
+      "var": "op0_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: (lineitem.l_shipmode = Utf8View(\"AIR\") OR lineitem.l_shipmode = Utf8View(\"AIR REG\")) AND lineitem.l_shipinstruct = Utf8View(\"DELIVER IN PERSON\") AND (lineitem.l_quantity >= Decimal128(1.00,15,2) AND lineitem.l_quantity <= Decimal128(11.00,15,2) OR lineitem.l_quantity >= Decimal128(10.00,15,2) AND lineitem.l_quantity <= Decimal128(20.00,15,2) OR lineitem.l_quantity >= Decimal128(20.00,15,2) AND lineitem.l_quantity <= Decimal128(30.00,15,2))",
+      "rows": 128371,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_partkey, lineitem.l_quantity, lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 128371,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_brand, p_size, p_container]",
+      "rows": 200000,
+      "var": "op3_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_size >= Int32(1) AND (part.p_brand = Utf8View(\"Brand#12\") AND part.p_container IN ([Utf8View(\"SM CASE\"), Utf8View(\"SM BOX\"), Utf8View(\"SM PACK\"), Utf8View(\"SM PKG\")]) AND part.p_size <= Int32(5) OR part.p_brand = Utf8View(\"Brand#23\") AND part.p_container IN ([Utf8View(\"MED BAG\"), Utf8View(\"MED BOX\"), Utf8View(\"MED PKG\"), Utf8View(\"MED PACK\")]) AND part.p_size <= Int32(10) OR part.p_brand = Utf8View(\"Brand#34\") AND part.p_container IN ([Utf8View(\"LG CASE\"), Utf8View(\"LG BOX\"), Utf8View(\"LG PACK\"), Utf8View(\"LG PKG\")]) AND part.p_size <= Int32(15))",
+      "rows": 485,
+      "var": "op4_Filter"
+    },
+    {
+      "operator": "LeftSemi Join: lineitem.l_partkey = part.p_partkey Filter: part.p_brand = Utf8View(\"Brand#12\") AND part.p_container IN ([Utf8View(\"SM CASE\"), Utf8View(\"SM BOX\"), Utf8View(\"SM PACK\"), Utf8View(\"SM PKG\")]) AND lineitem.l_quantity >= Decimal128(1.00,15,2) AND lineitem.l_quantity <= Decimal128(11.00,15,2) AND part.p_size <= Int32(5) OR part.p_brand = Utf8View(\"Brand#23\") AND part.p_container IN ([Utf8View(\"MED BAG\"), Utf8View(\"MED BOX\"), Utf8View(\"MED PKG\"), Utf8View(\"MED PACK\")]) AND lineitem.l_quantity >= Decimal128(10.00,15,2) AND lineitem.l_quantity <= Decimal128(20.00,15,2) AND part.p_size <= Int32(10) OR part.p_brand = Utf8View(\"Brand#34\") AND part.p_container IN ([Utf8View(\"LG CASE\"), Utf8View(\"LG BOX\"), Utf8View(\"LG PACK\"), Utf8View(\"LG PKG\")]) AND lineitem.l_quantity >= Decimal128(20.00,15,2) AND lineitem.l_quantity <= Decimal128(30.00,15,2) AND part.p_size <= Int32(15)",
+      "rows": 121,
+      "var": "op5_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: lineitem.l_extendedprice, lineitem.l_discount",
+      "rows": 121,
+      "var": "op6_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[sum(lineitem.l_extendedprice * (Decimal128(1,20,0) - lineitem.l_discount)) AS sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount)]]",
+      "rows": 1,
+      "var": "op7_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: sum(lineitem.l_extendedprice * Int64(1) - lineitem.l_discount) AS revenue",
+      "rows": 1,
+      "var": "op8_Projection"
+    }
+  ],
+  "q20": [
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_name, s_address, s_nationkey]",
+      "rows": 10000,
+      "var": "op0_Scan_supplier"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op1_Scan_nation"
+    },
+    {
+      "operator": "Filter: nation.n_name = Utf8View(\"CANADA\")",
+      "rows": 1,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: nation.n_nationkey",
+      "rows": 1,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 412,
+      "var": "op4_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_suppkey, supplier.s_name, supplier.s_address",
+      "rows": 412,
+      "var": "op5_Projection"
+    },
+    {
+      "operator": "TableScan: partsupp projection=[ps_partkey, ps_suppkey, ps_availqty]",
+      "rows": 800000,
+      "var": "op6_Scan_partsupp"
+    },
+    {
+      "operator": "TableScan: part projection=[p_partkey, p_name]",
+      "rows": 200000,
+      "var": "op7_Scan_part"
+    },
+    {
+      "operator": "Filter: part.p_name LIKE Utf8View(\"forest%\")",
+      "rows": 2127,
+      "var": "op8_Filter"
+    },
+    {
+      "operator": "Projection: part.p_partkey",
+      "rows": 2127,
+      "var": "op9_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_1",
+      "rows": 2127,
+      "var": "op10_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: partsupp.ps_partkey = __correlated_sq_1.p_partkey",
+      "rows": 8508,
+      "var": "op11_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_partkey, l_suppkey, l_quantity, l_shipdate]",
+      "rows": 6001215,
+      "var": "op12_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_shipdate >= Date32(\"1994-01-01\") AND lineitem.l_shipdate < Date32(\"1995-01-01\")",
+      "rows": 909455,
+      "var": "op13_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_partkey, lineitem.l_suppkey, lineitem.l_quantity",
+      "rows": 909455,
+      "var": "op14_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[lineitem.l_partkey, lineitem.l_suppkey]], aggr=[[sum(lineitem.l_quantity)]]",
+      "rows": 543210,
+      "var": "op15_GroupBy"
+    },
+    {
+      "operator": "Projection: Float64(0.5) * CAST(sum(lineitem.l_quantity) AS Float64), lineitem.l_partkey, lineitem.l_suppkey",
+      "rows": 543210,
+      "var": "op16_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __scalar_sq_3",
+      "rows": 543210,
+      "var": "op17_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: partsupp.ps_partkey = __scalar_sq_3.l_partkey, partsupp.ps_suppkey = __scalar_sq_3.l_suppkey Filter: CAST(partsupp.ps_availqty AS Float64) > __scalar_sq_3.Float64(0.5) * sum(lineitem.l_quantity)",
+      "rows": 5833,
+      "var": "op18_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: partsupp.ps_suppkey",
+      "rows": 5833,
+      "var": "op19_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_2",
+      "rows": 5833,
+      "var": "op20_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: supplier.s_suppkey = __correlated_sq_2.ps_suppkey",
+      "rows": 186,
+      "var": "op21_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_name, supplier.s_address",
+      "rows": 186,
+      "var": "op22_Projection"
+    },
+    {
+      "operator": "Sort: supplier.s_name ASC NULLS LAST",
+      "rows": 186,
+      "var": "op23_Sort"
+    }
+  ],
+  "q21": [
+    {
+      "operator": "TableScan: supplier projection=[s_suppkey, s_name, s_nationkey]",
+      "rows": 10000,
+      "var": "op0_Scan_supplier"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_suppkey, l_commitdate, l_receiptdate]",
+      "rows": 6001215,
+      "var": "op1_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_receiptdate > lineitem.l_commitdate",
+      "rows": 3793296,
+      "var": "op2_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_suppkey",
+      "rows": 3793296,
+      "var": "op3_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: l1",
+      "rows": 3793296,
+      "var": "op4_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: supplier.s_suppkey = l1.l_suppkey",
+      "rows": 3793296,
+      "var": "op5_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_name, supplier.s_nationkey, l1.l_orderkey, l1.l_suppkey",
+      "rows": 3793296,
+      "var": "op6_Projection"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_orderkey, o_orderstatus]",
+      "rows": 1500000,
+      "var": "op7_Scan_orders"
+    },
+    {
+      "operator": "Filter: orders.o_orderstatus = Utf8View(\"F\")",
+      "rows": 729413,
+      "var": "op8_Filter"
+    },
+    {
+      "operator": "Projection: orders.o_orderkey",
+      "rows": 729413,
+      "var": "op9_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: l1.l_orderkey = orders.o_orderkey",
+      "rows": 1828911,
+      "var": "op10_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "TableScan: nation projection=[n_nationkey, n_name]",
+      "rows": 25,
+      "var": "op11_Scan_nation"
+    },
+    {
+      "operator": "Filter: nation.n_name = Utf8View(\"SAUDI ARABIA\")",
+      "rows": 1,
+      "var": "op12_Filter"
+    },
+    {
+      "operator": "Projection: nation.n_nationkey",
+      "rows": 1,
+      "var": "op13_Projection"
+    },
+    {
+      "operator": "LeftSemi Join: supplier.s_nationkey = nation.n_nationkey",
+      "rows": 75871,
+      "var": "op14_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_name, l1.l_orderkey, l1.l_suppkey",
+      "rows": 75871,
+      "var": "op15_Projection"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_suppkey]",
+      "rows": 6001215,
+      "var": "op16_Scan_lineitem"
+    },
+    {
+      "operator": "SubqueryAlias: l2",
+      "rows": 6001215,
+      "var": "op17_SubqueryAlias"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_1",
+      "rows": 6001215,
+      "var": "op18_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: l1.l_orderkey = __correlated_sq_1.l_orderkey Filter: __correlated_sq_1.l_suppkey != l1.l_suppkey",
+      "rows": 73089,
+      "var": "op19_LeftSemiEquiJoin"
+    },
+    {
+      "operator": "TableScan: lineitem projection=[l_orderkey, l_suppkey, l_commitdate, l_receiptdate]",
+      "rows": 6001215,
+      "var": "op20_Scan_lineitem"
+    },
+    {
+      "operator": "Filter: lineitem.l_receiptdate > lineitem.l_commitdate",
+      "rows": 3793296,
+      "var": "op21_Filter"
+    },
+    {
+      "operator": "Projection: lineitem.l_orderkey, lineitem.l_suppkey",
+      "rows": 3793296,
+      "var": "op22_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: l3",
+      "rows": 3793296,
+      "var": "op23_SubqueryAlias"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_2",
+      "rows": 3793296,
+      "var": "op24_SubqueryAlias"
+    },
+    {
+      "operator": "LeftAnti Join: l1.l_orderkey = __correlated_sq_2.l_orderkey Filter: __correlated_sq_2.l_suppkey != l1.l_suppkey",
+      "rows": 4141,
+      "var": "op25_LeftAntiEquiJoin"
+    },
+    {
+      "operator": "Projection: supplier.s_name",
+      "rows": 4141,
+      "var": "op26_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[supplier.s_name]], aggr=[[count(Int64(1))]]",
+      "rows": 411,
+      "var": "op27_GroupBy"
+    },
+    {
+      "operator": "Projection: supplier.s_name, count(Int64(1)) AS count(*) AS numwait",
+      "rows": 411,
+      "var": "op28_Projection"
+    },
+    {
+      "operator": "Sort: numwait DESC NULLS FIRST, supplier.s_name ASC NULLS LAST, fetch=100",
+      "rows": 100,
+      "var": "op29_Sort"
+    }
+  ],
+  "q22": [
+    {
+      "operator": "TableScan: customer projection=[c_phone, c_acctbal]",
+      "rows": 150000,
+      "var": "op0_Scan_customer"
+    },
+    {
+      "operator": "Filter: customer.c_acctbal > Decimal128(0.00,15,2) AND substr(customer.c_phone, Int64(1), Int64(2)) IN ([Utf8View(\"13\"), Utf8View(\"31\"), Utf8View(\"23\"), Utf8View(\"29\"), Utf8View(\"30\"), Utf8View(\"18\"), Utf8View(\"17\")])",
+      "rows": 38120,
+      "var": "op1_Filter"
+    },
+    {
+      "operator": "Projection: customer.c_acctbal",
+      "rows": 38120,
+      "var": "op2_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[avg(customer.c_acctbal)]]",
+      "rows": 1,
+      "var": "op3_ScalarAggregate"
+    },
+    {
+      "operator": "Subquery:",
+      "rows": 1,
+      "var": "op4_Subquery"
+    },
+    {
+      "operator": "TableScan: customer projection=[c_custkey, c_phone, c_acctbal]",
+      "rows": 150000,
+      "var": "op5_Scan_customer"
+    },
+    {
+      "operator": "Filter: substr(customer.c_phone, Int64(1), Int64(2)) IN ([Utf8View(\"13\"), Utf8View(\"31\"), Utf8View(\"23\"), Utf8View(\"29\"), Utf8View(\"30\"), Utf8View(\"18\"), Utf8View(\"17\")]) AND CAST(customer.c_acctbal AS Decimal128(19, 6)) > (<subquery>)",
+      "rows": 19000,
+      "var": "op6_Filter"
+    },
+    {
+      "operator": "TableScan: orders projection=[o_custkey]",
+      "rows": 1500000,
+      "var": "op7_Scan_orders"
+    },
+    {
+      "operator": "SubqueryAlias: __correlated_sq_1",
+      "rows": 1500000,
+      "var": "op8_SubqueryAlias"
+    },
+    {
+      "operator": "LeftAnti Join: customer.c_custkey = __correlated_sq_1.o_custkey",
+      "rows": 6384,
+      "var": "op9_LeftAntiKeyJoin"
+    },
+    {
+      "operator": "Projection: substr(customer.c_phone, Int64(1), Int64(2)) AS cntrycode, customer.c_acctbal",
+      "rows": 6384,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: custsale",
+      "rows": 6384,
+      "var": "op11_SubqueryAlias"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[custsale.cntrycode]], aggr=[[count(Int64(1)), sum(custsale.c_acctbal)]]",
+      "rows": 7,
+      "var": "op12_GroupBy"
+    },
+    {
+      "operator": "Projection: custsale.cntrycode, count(Int64(1)) AS count(*) AS numcust, sum(custsale.c_acctbal) AS totacctbal",
+      "rows": 7,
+      "var": "op13_Projection"
+    },
+    {
+      "operator": "Sort: custsale.cntrycode ASC NULLS LAST",
+      "rows": 7,
+      "var": "op14_Sort"
+    }
+  ]
+}

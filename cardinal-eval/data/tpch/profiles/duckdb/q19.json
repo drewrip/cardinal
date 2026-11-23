@@ -1,0 +1,232 @@
+{
+    "io": {
+        "total_bytes_read": 56623104,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 4.9e-7,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Aggregates": "sum(#0)",
+                                "Estimated Cardinality": "1"
+                            },
+                            "intermediate_rows": 1,
+                            "intermediate_size_bytes": 16,
+                            "timing": 0.0000054279999999999995,
+                            "type": "UNGROUPED_AGGREGATE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Projections": "(l_extendedprice * (1.00 - l_discount))",
+                                        "Estimated Cardinality": "2512"
+                                    },
+                                    "intermediate_rows": 121,
+                                    "intermediate_size_bytes": 968,
+                                    "timing": 0.000012703,
+                                    "type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Join Type": "INNER",
+                                                "Conditions": [
+                                                    "l_partkey = p_partkey",
+                                                    "(((l_quantity <= 11.00) AND (p_size <= 5) AND (p_brand = 'Brand#12') AND (p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG'))) OR ((l_quantity >= 10.00) AND (l_quantity <= 20.00) AND (p_size <= 10) AND (p_brand = 'Brand#23') AND (p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK'))) OR ((l_quantity >= 20.00) AND (l_quantity <= 30.00) AND (p_size <= 15) AND (p_brand = 'Brand#34') AND (p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG'))))"
+                                                ],
+                                                "Estimated Cardinality": "2512"
+                                            },
+                                            "intermediate_rows": 121,
+                                            "intermediate_size_bytes": 7260,
+                                            "timing": 0.0006398840000000001,
+                                            "type": "HASH_JOIN",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Projections": [
+                                                            "#0",
+                                                            "#1",
+                                                            "#3",
+                                                            "#4"
+                                                        ],
+                                                        "Estimated Cardinality": "300060"
+                                                    },
+                                                    "intermediate_rows": 323,
+                                                    "intermediate_size_bytes": 10336,
+                                                    "timing": 0.000001046,
+                                                    "type": "PROJECTION",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Expression": "((l_shipmode = 'AIR') OR (l_shipmode = 'AIR REG'))",
+                                                                "Estimated Cardinality": "300060"
+                                                            },
+                                                            "intermediate_rows": 323,
+                                                            "intermediate_size_bytes": 15504,
+                                                            "timing": 0.006816937999999996,
+                                                            "type": "FILTER",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Table": "tpch.main.lineitem",
+                                                                        "Type": "Sequential Scan",
+                                                                        "Projections": [
+                                                                            "l_partkey",
+                                                                            "l_quantity",
+                                                                            "l_shipmode",
+                                                                            "l_extendedprice",
+                                                                            "l_discount"
+                                                                        ],
+                                                                        "Filters": [
+                                                                            "((l_quantity <= 11.00) OR ((l_quantity >= 10.00) AND (l_quantity <= 20.00)) OR ((l_quantity >= 20.00) AND (l_quantity <= 30.00)))",
+                                                                            "optional: (l_shipmode IN ('AIR', 'AIR REG'))",
+                                                                            "(l_shipinstruct = 'DELIVER IN PERSON')"
+                                                                        ],
+                                                                        "Dynamic Filters": "optional: l_partkey IN PRF(p_partkey)",
+                                                                        "Estimated Cardinality": "1500304"
+                                                                    },
+                                                                    "intermediate_rows": 2268,
+                                                                    "intermediate_size_bytes": 509248,
+                                                                    "row_groups_scanned": 49,
+                                                                    "rows_scanned": 6001215,
+                                                                    "timing": 0.201033814,
+                                                                    "total_row_groups_to_scan": 49,
+                                                                    "type": "TABLE_SCAN"
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "extra_info": {
+                                                        "Expression": "(((p_size <= 5) AND ((p_brand = 'Brand#12') AND ((p_container = 'SM CASE') OR (p_container = 'SM BOX') OR (p_container = 'SM PACK') OR (p_container = 'SM PKG')))) OR ((p_size <= 10) AND ((p_brand = 'Brand#23') AND ((p_container = 'MED BAG') OR (p_container = 'MED BOX') OR (p_container = 'MED PKG') OR (p_container = 'MED PACK')))) OR ((p_size <= 15) AND ((p_brand = 'Brand#34') AND ((p_container = 'LG CASE') OR (p_container = 'LG BOX') OR (p_container = 'LG PACK') OR (p_container = 'LG PKG')))))",
+                                                        "Estimated Cardinality": "8000"
+                                                    },
+                                                    "intermediate_rows": 485,
+                                                    "intermediate_size_bytes": 21340,
+                                                    "timing": 0.0054986279999999985,
+                                                    "type": "FILTER",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Table": "tpch.main.part",
+                                                                "Type": "Sequential Scan",
+                                                                "Projections": [
+                                                                    "p_partkey",
+                                                                    "p_brand",
+                                                                    "p_container",
+                                                                    "p_size"
+                                                                ],
+                                                                "Filters": [
+                                                                    "(((p_brand = 'Brand#12') OR (p_brand = 'Brand#23')) OR (p_brand = 'Brand#34'))",
+                                                                    "(((p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')) OR (p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK'))) OR (p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')))"
+                                                                ],
+                                                                "Estimated Cardinality": "40000"
+                                                            },
+                                                            "intermediate_rows": 7085,
+                                                            "intermediate_size_bytes": 361404,
+                                                            "row_groups_scanned": 2,
+                                                            "rows_scanned": 200000,
+                                                            "timing": 0.005173715000000001,
+                                                            "total_row_groups_to_scan": 2,
+                                                            "type": "TABLE_SCAN"
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.00001353,
+        "aggregate_reuse": 0.000048642,
+        "build_side_probe_side": 0.000030727,
+        "column_lifetime": 0.000043332,
+        "common_aggregate": 0.000010973,
+        "common_subexpressions": 0.00001799,
+        "common_subplan": 0.000257666,
+        "cte_filter_pusher": 0.00000143,
+        "cte_inlining": 0.000001078,
+        "deliminator": 0.000002372,
+        "duplicate_groups": 0.000031675,
+        "empty_result_pullup": 0.000001102,
+        "expression_rewriter": 0.003342306,
+        "filter_pullup": 0.000003373,
+        "filter_pushdown": 0.00028808,
+        "grouping_sets": 0.000013391,
+        "in_clause": 0.000043297,
+        "join_elimination": 0.000020738,
+        "join_filter_pushdown": 0.000103815,
+        "join_order": 0.00695673,
+        "late_materialization": 0.00000264,
+        "limit_pushdown": 0.000001114,
+        "outer_join_simplification": 0.000014491,
+        "partial_aggregate_pushdown": 0.000014353,
+        "partitioned_execution": 0.00000155,
+        "projection_placement": 0.000005102,
+        "projection_pullup": 0.000009894,
+        "redundant_order_keys": 0.000013054,
+        "regex_range": 0.000017283,
+        "reorder_filter": 0.000048442,
+        "row_group_pruner": 8.17e-7,
+        "row_number_rewriter": 0.000001242,
+        "sampling_pushdown": 6.36e-7,
+        "scalar_fn_pushdown": 7.37e-7,
+        "statistics_propagation": 0.000404875,
+        "top_n": 9.83e-7,
+        "top_n_window_elimination": 0.000005925,
+        "total_time": 0.012387017,
+        "type_pushdown": 0.000001074,
+        "unnest_rewriter": 0.000001701,
+        "unused_columns": 0.000312014,
+        "window_self_join": 0.000014909
+    },
+    "parser": {
+        "total_time": 0.002253613
+    },
+    "physical_planner": {
+        "column_binding": 0.000026622,
+        "create_plan": 0.000140201,
+        "resolve_types": 0.000003133,
+        "total_time": 0.000181925
+    },
+    "planner": {
+        "binding_time": 0.001194176,
+        "total_time": 0.001499498
+    },
+    "query": {
+        "cpu_time": 0.219182646,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nselect sum(l_extendedprice * (1 - l_discount)) as revenue\nfrom lineitem, part\nwhere (p_partkey = l_partkey and p_brand = 'Brand#12'\n    and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')\n    and l_quantity >= 1 and l_quantity <= 1 + 10 and p_size between 1 and 5\n    and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')\n  or (p_partkey = l_partkey and p_brand = 'Brand#23'\n    and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')\n    and l_quantity >= 10 and l_quantity <= 10 + 10 and p_size between 1 and 10\n    and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')\n  or (p_partkey = l_partkey and p_brand = 'Brand#34'\n    and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')\n    and l_quantity >= 20 and l_quantity <= 20 + 10 and p_size between 1 and 15\n    and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')\n;",
+        "total_intermediate_rows": 10727,
+        "total_intermediate_size_bytes": 926076,
+        "total_row_groups_scanned": 51,
+        "total_row_groups_to_scan": 51,
+        "total_rows_scanned": 6201215,
+        "total_time": 0.239640796
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 87845264,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 4194304
+    }
+}

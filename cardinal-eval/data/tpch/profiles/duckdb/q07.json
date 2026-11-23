@@ -1,0 +1,433 @@
+{
+    "io": {
+        "total_bytes_read": 67371008,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 4.99e-7,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Projections": [
+                                    "__internal_decompress_string(#0)",
+                                    "__internal_decompress_string(#1)",
+                                    "__internal_decompress_integral_bigint(#2, 1992)",
+                                    "#3"
+                                ],
+                                "Estimated Cardinality": "8988"
+                            },
+                            "intermediate_rows": 4,
+                            "intermediate_size_bytes": 224,
+                            "timing": 0.000002175,
+                            "type": "PROJECTION",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Order By": [
+                                            "supp_nation ASC",
+                                            "cust_nation ASC",
+                                            "l_year ASC"
+                                        ],
+                                        "Estimated Cardinality": "8988"
+                                    },
+                                    "intermediate_rows": 4,
+                                    "intermediate_size_bytes": 196,
+                                    "timing": 0.000109486,
+                                    "type": "ORDER_BY",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Projections": [
+                                                    "__internal_compress_string_uhugeint(#0)",
+                                                    "__internal_compress_string_uhugeint(#1)",
+                                                    "__internal_compress_integral_utinyint(#2, 1992)",
+                                                    "#3"
+                                                ],
+                                                "Estimated Cardinality": "8988"
+                                            },
+                                            "intermediate_rows": 4,
+                                            "intermediate_size_bytes": 196,
+                                            "timing": 0.000002045,
+                                            "type": "PROJECTION",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Projections": [
+                                                            "__internal_decompress_string(#0)",
+                                                            "__internal_decompress_string(#1)",
+                                                            "__internal_decompress_integral_bigint(#2, 1992)",
+                                                            "#3"
+                                                        ],
+                                                        "Estimated Cardinality": "8988"
+                                                    },
+                                                    "intermediate_rows": 4,
+                                                    "intermediate_size_bytes": 224,
+                                                    "timing": 0.000013889,
+                                                    "type": "PROJECTION",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Groups": [
+                                                                    "#0",
+                                                                    "#1",
+                                                                    "#2"
+                                                                ],
+                                                                "Aggregates": "sum(#3)",
+                                                                "Estimated Cardinality": "8988"
+                                                            },
+                                                            "intermediate_rows": 4,
+                                                            "intermediate_size_bytes": 196,
+                                                            "timing": 0.0022957249999999998,
+                                                            "type": "HASH_GROUP_BY",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Projections": [
+                                                                            "supp_nation",
+                                                                            "cust_nation",
+                                                                            "__internal_compress_integral_utinyint(\"year\"(l_shipdate), 1992)",
+                                                                            "volume"
+                                                                        ],
+                                                                        "Estimated Cardinality": "9017"
+                                                                    },
+                                                                    "intermediate_rows": 5924,
+                                                                    "intermediate_size_bytes": 250420,
+                                                                    "timing": 0.00019594199999999997,
+                                                                    "type": "PROJECTION",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Projections": [
+                                                                                    "__internal_compress_string_uhugeint(#3)",
+                                                                                    "#0",
+                                                                                    "#1",
+                                                                                    "#2",
+                                                                                    "__internal_compress_string_uhugeint(#4)"
+                                                                                ],
+                                                                                "Estimated Cardinality": "9017"
+                                                                            },
+                                                                            "intermediate_rows": 5924,
+                                                                            "intermediate_size_bytes": 315584,
+                                                                            "timing": 0.000321549,
+                                                                            "type": "PROJECTION",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Join Type": "INNER",
+                                                                                        "Conditions": [
+                                                                                            "o_custkey = c_custkey",
+                                                                                            "(((n_name = 'FRANCE') AND (n_name = 'GERMANY')) OR ((n_name = 'GERMANY') AND (n_name = 'FRANCE')))"
+                                                                                        ],
+                                                                                        "Estimated Cardinality": "9017"
+                                                                                    },
+                                                                                    "intermediate_rows": 5924,
+                                                                                    "intermediate_size_bytes": 315584,
+                                                                                    "timing": 0.0030330620000000004,
+                                                                                    "type": "HASH_JOIN",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Join Type": "INNER",
+                                                                                                "Conditions": "o_orderkey = l_orderkey",
+                                                                                                "Estimated Cardinality": "192501"
+                                                                                            },
+                                                                                            "intermediate_rows": 11723,
+                                                                                            "intermediate_size_bytes": 523348,
+                                                                                            "timing": 0.014720342999999993,
+                                                                                            "type": "HASH_JOIN",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Table": "tpch.main.orders",
+                                                                                                        "Type": "Sequential Scan",
+                                                                                                        "Projections": [
+                                                                                                            "o_orderkey",
+                                                                                                            "o_custkey"
+                                                                                                        ],
+                                                                                                        "Dynamic Filters": [
+                                                                                                            "optional: o_orderkey IN PRF(l_orderkey)",
+                                                                                                            "optional: o_custkey IN PRF(c_custkey)"
+                                                                                                        ],
+                                                                                                        "Estimated Cardinality": "1500000"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 10082,
+                                                                                                    "intermediate_size_bytes": 161312,
+                                                                                                    "row_groups_scanned": 14,
+                                                                                                    "rows_scanned": 1500000,
+                                                                                                    "timing": 0.016794650999999997,
+                                                                                                    "total_row_groups_to_scan": 14,
+                                                                                                    "type": "TABLE_SCAN"
+                                                                                                },
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Join Type": "INNER",
+                                                                                                        "Conditions": "l_suppkey = s_suppkey",
+                                                                                                        "Estimated Cardinality": "252285"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 145703,
+                                                                                                    "intermediate_size_bytes": 6624452,
+                                                                                                    "timing": 0.012216065999999973,
+                                                                                                    "type": "HASH_JOIN",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Table": "tpch.main.lineitem",
+                                                                                                                "Type": "Sequential Scan",
+                                                                                                                "Projections": [
+                                                                                                                    "l_suppkey",
+                                                                                                                    "l_orderkey",
+                                                                                                                    "l_shipdate",
+                                                                                                                    "l_extendedprice",
+                                                                                                                    "l_discount"
+                                                                                                                ],
+                                                                                                                "Filters": "((l_shipdate >= '1995-01-01'::DATE) AND (l_shipdate <= '1996-12-31'::DATE))",
+                                                                                                                "Dynamic Filters": "optional: l_suppkey IN PRF(s_suppkey)",
+                                                                                                                "Estimated Cardinality": "1200243"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 145703,
+                                                                                                            "intermediate_size_bytes": 5245308,
+                                                                                                            "row_groups_scanned": 49,
+                                                                                                            "rows_scanned": 6001215,
+                                                                                                            "timing": 0.12982128499999993,
+                                                                                                            "total_row_groups_to_scan": 49,
+                                                                                                            "type": "TABLE_SCAN"
+                                                                                                        },
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Join Type": "INNER",
+                                                                                                                "Conditions": "s_nationkey = n_nationkey",
+                                                                                                                "Estimated Cardinality": "1923"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 798,
+                                                                                                            "intermediate_size_bytes": 19192,
+                                                                                                            "timing": 0.000135901,
+                                                                                                            "type": "HASH_JOIN",
+                                                                                                            "children": [
+                                                                                                                {
+                                                                                                                    "extra_info": {
+                                                                                                                        "Table": "tpch.main.supplier",
+                                                                                                                        "Type": "Sequential Scan",
+                                                                                                                        "Projections": [
+                                                                                                                            "s_suppkey",
+                                                                                                                            "s_nationkey"
+                                                                                                                        ],
+                                                                                                                        "Dynamic Filters": "optional: s_nationkey IN PRF(n_nationkey)",
+                                                                                                                        "Estimated Cardinality": "10000"
+                                                                                                                    },
+                                                                                                                    "intermediate_rows": 798,
+                                                                                                                    "intermediate_size_bytes": 9576,
+                                                                                                                    "row_groups_scanned": 1,
+                                                                                                                    "rows_scanned": 10000,
+                                                                                                                    "timing": 0.000329606,
+                                                                                                                    "total_row_groups_to_scan": 1,
+                                                                                                                    "type": "TABLE_SCAN"
+                                                                                                                },
+                                                                                                                {
+                                                                                                                    "extra_info": {
+                                                                                                                        "Expression": "((n_name = 'FRANCE') OR (n_name = 'GERMANY'))",
+                                                                                                                        "Estimated Cardinality": "5"
+                                                                                                                    },
+                                                                                                                    "intermediate_rows": 2,
+                                                                                                                    "intermediate_size_bytes": 40,
+                                                                                                                    "timing": 0.000013660000000000001,
+                                                                                                                    "type": "FILTER",
+                                                                                                                    "children": [
+                                                                                                                        {
+                                                                                                                            "extra_info": {
+                                                                                                                                "Table": "tpch.main.nation",
+                                                                                                                                "Type": "Sequential Scan",
+                                                                                                                                "Projections": [
+                                                                                                                                    "n_nationkey",
+                                                                                                                                    "n_name"
+                                                                                                                                ],
+                                                                                                                                "Filters": "optional: ((n_name = 'FRANCE') OR (n_name = 'GERMANY'))",
+                                                                                                                                "Estimated Cardinality": "25"
+                                                                                                                            },
+                                                                                                                            "intermediate_rows": 25,
+                                                                                                                            "intermediate_size_bytes": 500,
+                                                                                                                            "row_groups_scanned": 1,
+                                                                                                                            "rows_scanned": 25,
+                                                                                                                            "timing": 0.000019833,
+                                                                                                                            "total_row_groups_to_scan": 1,
+                                                                                                                            "type": "TABLE_SCAN"
+                                                                                                                        }
+                                                                                                                    ]
+                                                                                                                }
+                                                                                                            ]
+                                                                                                        }
+                                                                                                    ]
+                                                                                                }
+                                                                                            ]
+                                                                                        },
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Join Type": "INNER",
+                                                                                                "Conditions": "c_nationkey = n_nationkey",
+                                                                                                "Estimated Cardinality": "28846"
+                                                                                            },
+                                                                                            "intermediate_rows": 12008,
+                                                                                            "intermediate_size_bytes": 288192,
+                                                                                            "timing": 0.0005112369999999999,
+                                                                                            "type": "HASH_JOIN",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Table": "tpch.main.customer",
+                                                                                                        "Type": "Sequential Scan",
+                                                                                                        "Projections": [
+                                                                                                            "c_custkey",
+                                                                                                            "c_nationkey"
+                                                                                                        ],
+                                                                                                        "Filters": "(c_custkey <= 149999)",
+                                                                                                        "Dynamic Filters": "optional: c_nationkey IN PRF(n_nationkey)",
+                                                                                                        "Estimated Cardinality": "150000"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 12008,
+                                                                                                    "intermediate_size_bytes": 144096,
+                                                                                                    "row_groups_scanned": 2,
+                                                                                                    "rows_scanned": 150000,
+                                                                                                    "timing": 0.0015315370000000001,
+                                                                                                    "total_row_groups_to_scan": 2,
+                                                                                                    "type": "TABLE_SCAN"
+                                                                                                },
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Expression": "((n_name = 'GERMANY') OR (n_name = 'FRANCE'))",
+                                                                                                        "Estimated Cardinality": "25"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 2,
+                                                                                                    "intermediate_size_bytes": 40,
+                                                                                                    "timing": 0.000047978,
+                                                                                                    "type": "FILTER",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Table": "tpch.main.nation",
+                                                                                                                "Type": "Sequential Scan",
+                                                                                                                "Projections": [
+                                                                                                                    "n_nationkey",
+                                                                                                                    "n_name"
+                                                                                                                ],
+                                                                                                                "Filters": "optional: ((n_name = 'GERMANY') OR (n_name = 'FRANCE'))",
+                                                                                                                "Estimated Cardinality": "25"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 25,
+                                                                                                            "intermediate_size_bytes": 500,
+                                                                                                            "row_groups_scanned": 1,
+                                                                                                            "rows_scanned": 25,
+                                                                                                            "timing": 0.000236041,
+                                                                                                            "total_row_groups_to_scan": 1,
+                                                                                                            "type": "TABLE_SCAN"
+                                                                                                        }
+                                                                                                    ]
+                                                                                                }
+                                                                                            ]
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000009069,
+        "aggregate_reuse": 0.000013813,
+        "build_side_probe_side": 0.000039351,
+        "column_lifetime": 0.00006368,
+        "common_aggregate": 0.000010862,
+        "common_subexpressions": 0.000010635,
+        "common_subplan": 0.000210205,
+        "cte_filter_pusher": 8.67e-7,
+        "cte_inlining": 0.000001064,
+        "deliminator": 0.000001905,
+        "duplicate_groups": 0.000018391,
+        "empty_result_pullup": 0.000001047,
+        "expression_rewriter": 0.000477217,
+        "filter_pullup": 0.000001658,
+        "filter_pushdown": 0.000146896,
+        "grouping_sets": 0.000005064,
+        "in_clause": 0.000002821,
+        "join_elimination": 0.000011145,
+        "join_filter_pushdown": 0.000125044,
+        "join_order": 0.000563092,
+        "late_materialization": 0.000001244,
+        "limit_pushdown": 8.03e-7,
+        "outer_join_simplification": 0.000012255,
+        "partial_aggregate_pushdown": 0.000019267,
+        "partitioned_execution": 0.000001302,
+        "projection_placement": 0.000042547,
+        "projection_pullup": 0.000015718,
+        "redundant_order_keys": 0.000018403,
+        "regex_range": 0.000009082,
+        "reorder_filter": 0.000015849,
+        "row_group_pruner": 7.06e-7,
+        "row_number_rewriter": 9.71e-7,
+        "sampling_pushdown": 5.69e-7,
+        "scalar_fn_pushdown": 6.31e-7,
+        "statistics_propagation": 0.00036105,
+        "top_n": 5.93e-7,
+        "top_n_window_elimination": 0.000003515,
+        "total_time": 0.00244383,
+        "type_pushdown": 8.91e-7,
+        "unnest_rewriter": 0.000001245,
+        "unused_columns": 0.000073189,
+        "window_self_join": 0.000004702
+    },
+    "parser": {
+        "total_time": 0.002193995
+    },
+    "physical_planner": {
+        "column_binding": 0.00005197,
+        "create_plan": 0.000120603,
+        "resolve_types": 0.000003766,
+        "total_time": 0.000189023
+    },
+    "planner": {
+        "binding_time": 0.005785078,
+        "total_time": 0.006088207
+    },
+    "query": {
+        "cpu_time": 0.18235250999999988,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nselect supp_nation, cust_nation, l_year, sum(volume) as revenue\nfrom (\n  select n1.n_name as supp_nation, n2.n_name as cust_nation,\n    extract(year from l_shipdate) as l_year,\n    l_extendedprice * (1 - l_discount) as volume\n  from supplier, lineitem, orders, customer, nation n1, nation n2\n  where s_suppkey = l_suppkey and o_orderkey = l_orderkey\n    and c_custkey = o_custkey and s_nationkey = n1.n_nationkey\n    and c_nationkey = n2.n_nationkey\n    and ((n1.n_name = 'FRANCE' and n2.n_name = 'GERMANY')\n      or (n1.n_name = 'GERMANY' and n2.n_name = 'FRANCE'))\n    and l_shipdate between date '1995-01-01' and date '1996-12-31'\n) as shipping\ngroup by supp_nation, cust_nation, l_year\norder by supp_nation, cust_nation, l_year\n;",
+        "total_intermediate_rows": 356669,
+        "total_intermediate_size_bytes": 13899180,
+        "total_row_groups_scanned": 68,
+        "total_row_groups_to_scan": 68,
+        "total_rows_scanned": 7661265,
+        "total_time": 0.211632795
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 88453408,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 18874368
+    }
+}

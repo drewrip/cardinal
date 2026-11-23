@@ -43,6 +43,13 @@ $B analyze ... --profiles-dir tests/snowflake/tpch --profiles-format snowflake
 
 See the API docs with `cargo doc --open`.
 
+## Evaluations
+
+```sh
+cardinal-eval/prepare/tpch.sh                     # prebake data/tpch (DuckDB 2.0)
+cargo run --release -p cardinal-eval -- info --bench tpch
+```
+
 ## Tests
 
 ```sh
