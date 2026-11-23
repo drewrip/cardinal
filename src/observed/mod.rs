@@ -11,10 +11,12 @@
 mod duckdb;
 mod plan;
 mod postgres;
+mod snowflake;
 mod sql;
 
 pub use duckdb::{from_duckdb, from_duckdb_explain};
 pub use postgres::{from_postgres, from_postgres_explain};
+pub use snowflake::{from_snowflake, from_snowflake_explain, from_snowflake_plan};
 pub use sql::QueryText;
 
 use std::collections::{BTreeSet, HashMap};

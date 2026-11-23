@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use cardinal::observed::{Catalog, ObservedPlan, from_duckdb, from_postgres};
+use cardinal::observed::{Catalog, ObservedPlan, from_duckdb, from_postgres, from_snowflake};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -13,6 +13,9 @@ use serde_json::Value;
 pub const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/duckdb");
 /// The PostgreSQL fixtures: profiles of the same queries over the same data.
 pub const PG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/postgres");
+/// The Snowflake fixtures: operator stats of the same queries over the same
+/// data.
+pub const SF_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snowflake");
 
 pub fn json(path: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(format!("{DIR}/{path}")).unwrap()).unwrap()
@@ -107,6 +110,24 @@ pub fn pg_fixtures(dir: &str) -> Vec<(String, String)> {
 pub async fn pg_plans(dir: &str) -> Vec<ObservedPlan> {
     let catalog = catalog().await;
     pg_fixtures(dir).iter().map(|(name, json)| from_postgres(&catalog, name, json, Some(&pg_query(name))).unwrap()).collect()
+}
+
+/// The query a Snowflake profile ran, by name: TPC-H's, or one of the
+/// queries DuckDB's fixtures also ran.
+pub fn sf_query(name: &str) -> String {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let paths = [format!("{root}/tests/tpch/{name}.sql"), format!("{SF_DIR}/extra/{name}.sql"), format!("{DIR}/extra/{name}.sql")];
+    paths.iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| panic!("no query {name}"))
+}
+
+/// Every Snowflake profile under `dir` (`tpch`, `extra`), by name.
+pub fn sf_fixtures(dir: &str) -> Vec<(String, String)> {
+    fixtures_in(&format!("{SF_DIR}/{dir}"))
+}
+
+pub async fn sf_plans(dir: &str) -> Vec<ObservedPlan> {
+    let catalog = catalog().await;
+    sf_fixtures(dir).iter().map(|(name, json)| from_snowflake(&catalog, name, json, Some(&sf_query(name))).unwrap()).collect()
 }
 
 /// TPC-H's foreign keys, all of which its data satisfies.
