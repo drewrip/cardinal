@@ -1,0 +1,114 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Simple",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Actual Rows": 1.00,
+      "Actual Loops": 1,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Hashed",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE t",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Actual Rows": 996.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Output": ["orders.o_custkey", "count(*)"],
+          "Group Key": ["orders.o_custkey"],
+          "HashAgg Batches": 1,
+          "Peak Memory Usage": 121,
+          "Disk Usage": 0,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "orders",
+              "Schema": "public",
+              "Alias": "orders",
+              "Actual Rows": 7304.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["orders.o_orderkey", "orders.o_custkey", "orders.o_orderstatus", "orders.o_totalprice", "orders.o_orderdate", "orders.o_orderpriority", "orders.o_clerk", "orders.o_shippriority", "orders.o_comment"],
+              "Filter": "((orders.o_orderstatus)::text = 'F'::text)",
+              "Rows Removed by Filter": 7696
+            }
+          ]
+        },
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Actual Rows": 41.00,
+          "Actual Loops": 1,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Hash Cond": "((b.o_custkey + 1) = a.o_custkey)",
+          "Join Filter": "(a.n > b.n)",
+          "Rows Removed by Join Filter": 455,
+          "Plans": [
+            {
+              "Node Type": "CTE Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "t",
+              "Alias": "b",
+              "Actual Rows": 996.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["b.o_custkey", "b.n"],
+              "Storage": "Memory",
+              "Maximum Storage": 55
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Actual Rows": 996.00,
+              "Actual Loops": 1,
+              "Disabled": false,
+              "Output": ["a.o_custkey", "a.n"],
+              "Hash Buckets": 1024,
+              "Original Hash Buckets": 1024,
+              "Hash Batches": 1,
+              "Original Hash Batches": 1,
+              "Peak Memory Usage": 55,
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "CTE Name": "t",
+                  "Alias": "a",
+                  "Actual Rows": 996.00,
+                  "Actual Loops": 1,
+                  "Disabled": false,
+                  "Output": ["a.o_custkey", "a.n"],
+                  "Storage": "Memory",
+                  "Maximum Storage": 55
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Triggers": [
+    ]
+  }
+]

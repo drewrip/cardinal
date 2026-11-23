@@ -1398,6 +1398,177 @@ fn permutations(xs: &[usize]) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::datasource::MemTable;
+    use datafusion::logical_expr::{LogicalPlanBuilder, TableScan, table_scan};
+    use datafusion::prelude::SessionContext;
+
+    use crate::analysis::DEFAULT_MAX_PRODUCT;
+
+    /// Columns `a`, `b`, `x`: integers, nullable or not.
+    fn schema(nullable: bool) -> Schema {
+        Schema::new(["a", "b", "x"].map(|c| Field::new(c, DataType::Int64, nullable)).to_vec())
+    }
+
+    /// `sql` planned over `t` and `u` (nullable) and `v` and `w` (not).
+    async fn plan(sql: &str) -> LogicalPlan {
+        let ctx = SessionContext::new();
+        for (t, nullable) in [("t", true), ("u", true), ("v", false), ("w", false)] {
+            let table = MemTable::try_new(Arc::new(schema(nullable)), vec![vec![]]).unwrap();
+            ctx.register_table(t, Arc::new(table)).unwrap();
+        }
+        ctx.sql(sql).await.unwrap().into_optimized_plan().unwrap()
+    }
+
+    /// `f` of the analyzer of `plan`, its rules applied, logging every
+    /// assertion.
+    fn analyzed<R>(plan: &LogicalPlan, f: impl FnOnce(&Analyzer) -> R) -> R {
+        let resolve = |s: &TableScan| crate::builder::bare_kind(s.table_name.table());
+        let mut a = Analyzer::new(&resolve, DEFAULT_MAX_PRODUCT, &[], true).with_ranges(plan);
+        a.visit(plan);
+        f(&a)
+    }
+
+    /// The nodes of `a` whose plans `f` takes, in order.
+    fn nodes(a: &Analyzer, f: impl Fn(&LogicalPlan) -> bool) -> Vec<usize> {
+        (0..a.nodes.len()).filter(|&i| f(&a.nodes[i].plan)).collect()
+    }
+
+    /// The claims `a` asserted as property `name`.
+    fn claims(a: &Analyzer, name: &str) -> Vec<String> {
+        a.log.borrow().iter().filter(|l| l.rule == Some(name)).map(|l| l.expr.to_string()).collect()
+    }
+
+    /// Whether `claim` reads variable `var`.
+    fn reads(claim: &str, var: &str) -> bool {
+        claim.split([' ', '(', ')']).any(|t| t == var)
+    }
+
+    fn aggregates(a: &Analyzer) -> Vec<usize> {
+        nodes(a, |p| matches!(p, LogicalPlan::Aggregate(_)))
+    }
+
+    fn joins(a: &Analyzer, kind: JoinType) -> Vec<usize> {
+        nodes(a, |p| matches!(p, LogicalPlan::Join(j) if j.join_type == kind))
+    }
+
+    /// Rows only Decide equates are one class, and so are the GROUP BYs
+    /// over them.
+    #[tokio::test]
+    async fn group_bys_over_equal_rows_are_one_class() {
+        let p = plan("SELECT a FROM t WHERE x > 5 GROUP BY a UNION ALL SELECT a FROM t WHERE x >= 6 GROUP BY a").await;
+        analyzed(&p, |a| {
+            let mut link = Link::new(a);
+            link.run();
+            let [x, y] = aggregates(a)[..] else { panic!("two GROUP BYs") };
+            assert_eq!(link.uf.find(x).0, link.uf.find(y).0);
+        });
+    }
+
+    /// A union of classes others read rebuilds them: GROUP BYs over rows
+    /// found equal after they were placed become one class.
+    #[tokio::test]
+    async fn a_union_rebuilds_what_reads_it() {
+        let p = plan("SELECT a FROM t WHERE x > 5 GROUP BY a UNION ALL SELECT a FROM t WHERE x > 6 GROUP BY a").await;
+        analyzed(&p, |a| {
+            let mut link = Link::new(a);
+            link.run();
+            let [x, y] = aggregates(a)[..] else { panic!("two GROUP BYs") };
+            assert_ne!(link.uf.find(x).0, link.uf.find(y).0);
+            // The older class moves under the newer one.
+            link.union(a.nodes[x].inputs[0], a.nodes[y].inputs[0], &[0]);
+            assert!(link.work.contains(&x));
+            link.run();
+            assert_eq!(link.uf.find(x).0, link.uf.find(y).0);
+        });
+    }
+
+    /// A GROUP BY of fewer keys of the same rows has no more rows, and
+    /// equal key columns; one without keys has a row even over none, so
+    /// relates to none.
+    #[tokio::test]
+    async fn fewer_keys_fewer_groups() {
+        let p = plan(
+            "SELECT a, 0 AS b FROM t GROUP BY a UNION ALL SELECT a, b FROM t GROUP BY a, b \
+             UNION ALL SELECT count(*), 0 FROM t",
+        )
+        .await;
+        analyzed(&p, |a| {
+            link_all(a);
+            let keys = |i: usize| match &a.nodes[i].plan {
+                LogicalPlan::Aggregate(g) => g.group_expr.len(),
+                _ => unreachable!(),
+            };
+            let by_keys = |n: usize| a.nodes[aggregates(a).into_iter().find(|&i| keys(i) == n).unwrap()].var.clone();
+            let (one, two, none) = (by_keys(1), by_keys(2), by_keys(0));
+            let fewer = claims(a, "fewer link");
+            assert!(fewer.contains(&format!("(<= {one} {two})")), "{fewer:?}");
+            assert!(fewer.iter().any(|c| c.starts_with("(= ") && reads(c, &format!("{one}_c0"))), "{fewer:?}");
+            assert!(!fewer.iter().any(|c| reads(c, &none)), "{fewer:?}");
+        });
+    }
+
+    /// A semi join of fewer partners keeps fewer rows; an anti join of
+    /// fewer partners keeps more.
+    #[tokio::test]
+    async fn anti_joins_reverse_their_right() {
+        let p = plan(
+            "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a) \
+             UNION ALL SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a AND u.x > 5) \
+             UNION ALL SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.a = t.a) \
+             UNION ALL SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.a = t.a AND u.x > 5)",
+        )
+        .await;
+        analyzed(&p, |a| {
+            link_all(a);
+            let var = |i: usize| a.nodes[i].var.clone();
+            let ([all, some], [none_of_all, none_of_some]) =
+                (&joins(a, JoinType::LeftSemi)[..], &joins(a, JoinType::LeftAnti)[..])
+            else {
+                panic!("two semi and two anti joins")
+            };
+            let subset = claims(a, "subset link");
+            for (sub, sup) in [(some, all), (none_of_all, none_of_some)] {
+                assert!(subset.contains(&format!("(<= {} {})", var(*sub), var(*sup))), "{subset:?}");
+                assert!(!subset.contains(&format!("(<= {} {})", var(*sup), var(*sub))), "{subset:?}");
+            }
+            // Each row of `t` (one class, its scans) has a partner in `u`,
+            // or none: in all of `u`, and in its rows `x > 5`.
+            let split = claims(a, "split link");
+            let t = |s: &(usize, usize)| format!("(= (+ {} {}) eq0)", var(s.0), var(s.1));
+            assert_eq!(split, [t(&(*all, *none_of_all)), t(&(*some, *none_of_some))]);
+        });
+    }
+
+    /// A semi join and a NULL-aware anti join of one left do not split it:
+    /// a NULL key keeps a row from both. Over keys that are never NULL,
+    /// they do.
+    #[test]
+    fn null_aware_anti_joins_do_not_split() {
+        let join = |l: &str, r: &str, nullable: bool, kind: JoinType| {
+            let right = table_scan(Some(r), &schema(nullable), None).unwrap().build().unwrap();
+            let keys = (vec![format!("{l}.a")], vec![format!("{r}.a")]);
+            let null_aware = kind == JoinType::LeftAnti;
+            table_scan(Some(l), &schema(nullable), None)
+                .unwrap()
+                .join_detailed_with_options(right, kind, keys, None, NullEquality::NullEqualsNothing, null_aware)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        for (nullable, splits) in [(true, 0), (false, 1)] {
+            let (l, r) = if nullable { ("t", "u") } else { ("v", "w") };
+            let p = LogicalPlanBuilder::from(join(l, r, nullable, JoinType::LeftSemi))
+                .union(join(l, r, nullable, JoinType::LeftAnti))
+                .unwrap()
+                .build()
+                .unwrap();
+            analyzed(&p, |a| {
+                link_all(a);
+                assert_eq!(claims(a, "split link").len(), splits, "nullable: {nullable}");
+            });
+        }
+    }
 
     /// `x³ + y³ = z³` has no solution in `x, y, z > 1`, which Z3 cannot
     /// decide: its negation is valid, but checking it spends any limit.

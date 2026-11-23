@@ -103,3 +103,18 @@ async fn plans_must_be_verbose() {
     assert!(e.contains("ANALYZE"), "{e}");
     assert!(!from_postgres_explain(&catalog, "q", &explain, None).unwrap().counted);
 }
+
+/// A CTE read twice is two instances: a join comparing them, `a.k = b.k +
+/// 1`, holds of some rows. The reader reads both as one, so the join's
+/// condition is `k = k + 1` and the constraints contradict.
+#[tokio::test]
+#[ignore = "the PostgreSQL reader reads a CTE's reuses as one instance"]
+async fn cte_reuses_are_apart() {
+    let catalog = catalog().await;
+    let name = "cte_reuses_compared";
+    let sql = std::fs::read_to_string(format!("{PG_DIR}/known/{name}.sql")).unwrap();
+    let json = std::fs::read_to_string(format!("{PG_DIR}/known/{name}.json")).unwrap();
+    let p = from_postgres(&catalog, name, &json, Some(&sql)).unwrap();
+    let b = Analysis::plan(&catalog, &p).with_plans([&p]).build().unwrap().bounds().unwrap();
+    assert!(b.holds(p.nodes[p.root].rows), "{b}");
+}

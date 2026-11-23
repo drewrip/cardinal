@@ -164,3 +164,52 @@ select n_name, count(*) from customer
   join nation on n_nationkey = c_nationkey
 where coalesce(t.n, 0) > 10
 group by n_name
+
+-- name: having_over_filtered_group
+select o_custkey, count(*) from orders where o_orderstatus = 'F'
+group by o_custkey having count(*) > 10
+
+-- name: having_over_group
+select o_custkey, count(*) from orders
+group by o_custkey having count(*) > 10
+
+-- name: group_more_keys_filtered
+select o_custkey, o_orderpriority, count(*) from orders where o_orderstatus = 'F'
+group by o_custkey, o_orderpriority
+
+-- name: group_over_group_counts
+select n, count(*) from
+  (select o_custkey, count(*) as n from orders where o_orderstatus = 'F' group by o_custkey) t
+group by n
+
+-- name: count_distinct_regrouped
+select o_orderpriority, count(distinct o_custkey) from orders where o_orderstatus = 'F'
+group by o_orderpriority
+
+-- name: semi_filtered_both
+select count(*) from customer where c_acctbal > 0
+  and exists (select * from orders where o_custkey = c_custkey and o_totalprice > 100000)
+
+-- name: semi_wider
+select count(*) from customer where exists (select * from orders where o_custkey = c_custkey)
+
+-- name: anti_wider
+select count(*) from customer where not exists (select * from orders where o_custkey = c_custkey)
+
+-- name: not_in_keys
+select count(*) from customer where c_custkey not in (select o_custkey from orders)
+
+-- name: anti_filtered_left
+select count(*) from customer where c_acctbal > 0
+  and not exists (select * from orders where o_custkey = c_custkey)
+
+-- name: anti_filtered_right
+select count(*) from customer
+where not exists (select * from orders where o_custkey = c_custkey and o_totalprice > 100000)
+
+-- name: cte_joined_to_itself
+with t as (select o_custkey, count(*) as n from orders where o_orderstatus = 'F' group by o_custkey)
+select a.o_custkey from t a join t b on a.o_custkey = b.o_custkey where a.n > 10
+
+-- name: top_groups
+select o_custkey, count(*) from orders group by o_custkey order by 2 desc, 1 limit 7
