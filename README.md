@@ -24,9 +24,11 @@ let a = Analysis::sql(&ctx, sql).await?
 // Several queries alike, one result per query:
 let analyses = Analysis::sqls(&ctx, [q1, q2]).await?.options(options).build();
 
-// As DuckDB or PostgreSQL planned it, from EXPLAIN (FORMAT JSON) output:
+// As DuckDB or PostgreSQL planned it, from EXPLAIN (FORMAT JSON) output,
+// or Snowflake, from EXPLAIN USING JSON:
 let a = Analysis::duckdb(&catalog, &explain_json, Some(sql))?.build()?;
 let a = Analysis::postgres(&catalog, &explain_json, Some(sql))?.build()?;
+let a = Analysis::snowflake(&catalog, &explain_json, Some(sql))?.build()?;
 ```
 
 The `cardinal-cli` CLI shows the constraints behind a result:
@@ -36,6 +38,7 @@ B="cargo run -p cardinal-cli --"
 $B analyze --schema cardinal-cli/tests/fixtures/tpch.sql --sql tests/tpch/q03.sql
 $B analyze ... --html q03.html  # plan tree beside its constraints
 $B analyze ... --profiles-dir tests/duckdb/tpch --except q03  # with other plans
+$B analyze ... --profiles-dir tests/snowflake/tpch --profiles-format snowflake
 ```
 
 See the API docs with `cargo doc --open`.
@@ -47,5 +50,5 @@ cargo test                                   # everything
 CARDINAL_FUZZ_N=1000 cargo test --test fuzz  # larger random-query fuzz
 ```
 
-`scripts/duckdb_fixtures.sh` and `scripts/postgres_fixtures.sh` regenerate the
-engine fixtures under `tests/`.
+`scripts/duckdb_fixtures.sh`, `scripts/postgres_fixtures.sh` and
+`scripts/snowflake_fixtures.sh` regenerate the engine fixtures under `tests/`.
