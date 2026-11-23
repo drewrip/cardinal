@@ -19,6 +19,8 @@ enum Eval {
     Holdout(cardinal_eval::holdout::HoldoutArgs),
     /// Each query bounded with its own plan.
     OwnPlan(cardinal_eval::own_plan::OwnPlanArgs),
+    /// The same queries bounded with each engine's plans.
+    Engines(cardinal_eval::engines::EnginesArgs),
     /// Summarize a prebaked benchmark: its queries, profiles and query sets.
     Info {
         #[arg(long)]
@@ -34,6 +36,7 @@ async fn main() -> Result<()> {
         Eval::Info { bench, data } => info(&Benchmark::load(&data, &bench).await?),
         Eval::Holdout(args) => cardinal_eval::holdout::holdout(args).await,
         Eval::OwnPlan(args) => cardinal_eval::own_plan::own_plan(args).await,
+        Eval::Engines(args) => cardinal_eval::engines::engines(args).await,
     }
 }
 

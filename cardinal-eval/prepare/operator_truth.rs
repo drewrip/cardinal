@@ -12,6 +12,9 @@
 //!   whose root count DataFusion agrees with), and the reason each other
 //!   query is excluded.
 //!
+//! Each query's counts are kept under `raw/operator_truth/` as they come,
+//! so a run stopped part way resumes; delete them to count again.
+//!
 //! The Parquet tables are wrapped to look like the schema's empty tables
 //! (the same schema and keys, no filter pushed into the scan), so each
 //! query's analysis, and its operator ids, are those the evals make. Each
@@ -155,6 +158,7 @@ fn write(bench: &Benchmark, file: &str, v: &Value) -> Result<()> {
 }
 
 /// One query's operators' rows, and any violation validation found.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Truth {
     ops: Vec<OperatorTruth>,
     violation: Option<String>,
@@ -164,6 +168,8 @@ struct Truth {
 /// thread of its own with its own Parquet context.
 fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64) -> Result<Vec<(String, Result<Truth>)>> {
     let queue = Mutex::new(queries.iter().rev().cloned().collect::<Vec<_>>());
+    let cache = bench.dir.join("raw").join("operator_truth");
+    let cache = &cache;
     let out = Mutex::new(vec![]);
     std::thread::scope(|s| -> Result<()> {
         let mut handles = vec![];
@@ -173,12 +179,23 @@ fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64
                 let ctx = rt.block_on(parquet_context(bench))?;
                 loop {
                     let Some(q) = queue.lock().unwrap().pop() else { return Ok(()) };
+                    // Each query's truth is kept as it is counted, so a run
+                    // stopped part way resumes.
+                    let cached = cache.join(format!("{q}.json"));
+                    if let Ok(t) = std::fs::read_to_string(&cached).map_err(anyhow::Error::from).and_then(|s| Ok(serde_json::from_str::<Truth>(&s)?)) {
+                        out.lock().unwrap().push((q, Ok(t)));
+                        continue;
+                    }
                     let start = std::time::Instant::now();
                     let limit = std::time::Duration::from_secs(timeout);
                     let r = rt
                         .block_on(async { tokio::time::timeout(limit, validate(bench, &ctx, &q)).await })
                         .unwrap_or_else(|_| Err(anyhow!("timed out after {timeout} s")));
                     eprintln!("{q}: {:.1} s{}", start.elapsed().as_secs_f64(), r.as_ref().err().map(|e| format!(": {e:#}")).unwrap_or_default());
+                    if let Ok(t) = &r {
+                        std::fs::create_dir_all(cached.parent().unwrap())?;
+                        std::fs::write(&cached, serde_json::to_string(t)?)?;
+                    }
                     out.lock().unwrap().push((q, r));
                 }
             })?);

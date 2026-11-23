@@ -59,6 +59,14 @@ pub struct HoldoutArgs {
     /// No k above this.
     #[arg(long)]
     pub max_k: Option<usize>,
+    /// Add this many plans at each step of the full grid: k in {0, s, 2s,
+    /// ..., n}. Fewer steps, so a faster run.
+    #[arg(long)]
+    pub step: Option<usize>,
+    /// The k to bound at, in place of the grid: e.g. `0,8,32,n`, where `n`
+    /// is every other query's plan.
+    #[arg(long, value_delimiter = ',')]
+    pub ks: Vec<String>,
     /// DSB: the first N instances of each template.
     #[arg(long, default_value_t = 1)]
     pub instances: u32,
@@ -74,6 +82,8 @@ struct Switches {
     trials: u32,
     seed: u64,
     grid: Grid,
+    step: Option<usize>,
+    ks: Vec<String>,
     only: Vec<String>,
     max_k: Option<usize>,
     cardinalities: bool,
@@ -86,13 +96,16 @@ impl HoldoutArgs {
     fn switches(&self) -> Switches {
         let c = &self.common;
         let trials = self.trials.unwrap_or(if c.unbounded { 3 } else if self.operators { 5 } else { 10 });
-        let grid = self.grid.unwrap_or(if c.bench == "tpch" && !c.unbounded { Grid::Full } else { Grid::Log });
+        let full = (c.bench == "tpch" && !c.unbounded) || self.step.is_some();
+        let grid = self.grid.unwrap_or(if full { Grid::Full } else { Grid::Log });
         let target = self.target.unwrap_or(if c.bench == "job" { Target::Core } else { Target::Root });
         Switches {
             target,
             trials,
             seed: c.seed,
             grid,
+            step: self.step,
+            ks: self.ks.clone(),
             only: self.only.clone(),
             max_k: self.max_k,
             cardinalities: c.cardinalities,
@@ -103,10 +116,32 @@ impl HoldoutArgs {
     }
 }
 
-/// The k of `grid` for `n` references, at most `max_k`.
-pub fn ks(grid: Grid, n: usize, max_k: Option<usize>) -> Vec<usize> {
+impl Switches {
+    /// The k to bound at, for `n` references: `ks` if given, else the
+    /// grid's, at most `max_k`.
+    fn ks(&self, n: usize) -> Result<Vec<usize>> {
+        if self.ks.is_empty() {
+            return Ok(ks(self.grid, n, self.step, self.max_k));
+        }
+        let mut out = BTreeSet::new();
+        for k in &self.ks {
+            let k = match k.trim() {
+                "n" => n,
+                k => k.parse::<usize>().map_err(|_| anyhow::anyhow!("--ks: {k} is not a number or n"))?.min(n),
+            };
+            if self.max_k.is_none_or(|m| k <= m) {
+                out.insert(k);
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+}
+
+/// The k of `grid` for `n` references, `step` plans apart on the full
+/// grid (and n), at most `max_k`.
+pub fn ks(grid: Grid, n: usize, step: Option<usize>, max_k: Option<usize>) -> Vec<usize> {
     let all: Vec<usize> = match grid {
-        Grid::Full => (0..=n).collect(),
+        Grid::Full => (0..=n).step_by(step.unwrap_or(1).max(1)).chain([n]).collect::<BTreeSet<_>>().into_iter().collect(),
         Grid::Log => [0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96].into_iter().filter(|&k| k < n).chain([n]).collect(),
     };
     all.into_iter().filter(|&k| max_k.is_none_or(|m| k <= m)).collect()
@@ -206,7 +241,7 @@ fn plan(bench: &Benchmark, builders: &Builders, sw: &Switches, q_ref: &[String],
 
         for trial in 1..=sw.trials {
             let order = permuted(&refs, sw.seed, &bench.name, t, trial);
-            for k in ks(sw.grid, n, sw.max_k) {
+            for k in sw.ks(n)? {
                 let given = &order[..k];
                 let mut rel: Vec<String> = given.iter().filter(|r| relevant.contains(r)).cloned().collect();
                 rel.sort();
@@ -291,9 +326,11 @@ mod tests {
 
     #[test]
     fn log_grid_ends_at_n() {
-        assert_eq!(ks(Grid::Log, 21, None), vec![0, 1, 2, 3, 4, 6, 8, 12, 16, 21]);
-        assert_eq!(ks(Grid::Log, 16, None), vec![0, 1, 2, 3, 4, 6, 8, 12, 16]);
-        assert_eq!(ks(Grid::Full, 3, Some(2)), vec![0, 1, 2]);
+        assert_eq!(ks(Grid::Log, 21, None, None), vec![0, 1, 2, 3, 4, 6, 8, 12, 16, 21]);
+        assert_eq!(ks(Grid::Log, 16, None, None), vec![0, 1, 2, 3, 4, 6, 8, 12, 16]);
+        assert_eq!(ks(Grid::Full, 3, None, Some(2)), vec![0, 1, 2]);
+        assert_eq!(ks(Grid::Full, 21, Some(5), None), vec![0, 5, 10, 15, 20, 21]);
+        assert_eq!(ks(Grid::Full, 20, Some(5), None), vec![0, 5, 10, 15, 20]);
     }
 
     #[test]
