@@ -78,9 +78,11 @@ pub(crate) fn translate<'p>(catalog: &Catalog, plans: &[&'p ObservedPlan]) -> Ve
 }
 
 /// The columns of `plans` that get min and max variables, as the query's
-/// do ([`ranged_columns`]).
-pub(crate) fn ranged(plans: &[Translated]) -> BTreeSet<String> {
-    plans.iter().flat_map(|t| ranged_columns(&t.root)).collect()
+/// do ([`ranged_columns`]): those of the subtrees [`visit`] selects for
+/// `query`, so a plan it selects none of changes nothing.
+pub(crate) fn ranged(query: &LogicalPlan, plans: &[Translated], options: &Options) -> BTreeSet<String> {
+    let within = reachable(&tables_of(query), options);
+    plans.iter().flat_map(|t| selected(t, &within)).flat_map(ranged_columns).collect()
 }
 
 /// One operator of a reference plan held to the rows it was counted with.
@@ -94,7 +96,7 @@ pub(crate) struct Pin {
     engine_op: String,
     rows: u64,
     /// Whether the rows are only a floor (a runtime filter pruned them).
-    floor: bool,
+    pub(crate) floor: bool,
 }
 
 /// Visits each of `plans`' subtrees `query` could share rows with
@@ -109,8 +111,7 @@ pub(crate) fn visit(
     let within = reachable(&tables_of(query), options);
     let (mut pins, mut owners) = (vec![], vec![]);
     for t in plans {
-        let mut parts = vec![];
-        maximal(&t.root, &within, &mut parts);
+        let parts = selected(t, &within);
         let first = a.nodes.len();
         for part in parts {
             let start = a.nodes.len();
@@ -133,6 +134,21 @@ pub(crate) fn visit(
         }
     }
     (pins, owners)
+}
+
+/// The maximal subtrees of `t` that scan only tables of `within`
+/// (`maximal`): the parts of it the query could share rows with.
+fn selected<'p>(t: &'p Translated, within: &BTreeSet<String>) -> Vec<&'p LogicalPlan> {
+    let mut parts = vec![];
+    maximal(&t.root, within, &mut parts);
+    parts
+}
+
+/// Whether [`visit`] would select any subtree of `plan` for `query`: if
+/// not, giving it adds no constraint.
+pub(crate) fn relevant(catalog: &Catalog, query: &LogicalPlan, plan: &ObservedPlan, options: &Options) -> bool {
+    let within = reachable(&tables_of(query), options);
+    translate(catalog, &[plan]).iter().any(|t| !selected(t, &within).is_empty())
 }
 
 /// Asserts each pin, and gives it as a fact for the trace.

@@ -81,12 +81,13 @@ pub mod trace;
 mod validate;
 
 pub use batch::Batch;
-pub use bounds::{Bounds, NodeBounds, PlanBounds, SearchStats};
+pub use bounds::{Bounds, CheckStats, NodeBounds, PlanBounds, SearchStats};
 pub use builder::Builder;
 pub use trace::{Constraint, FactInfo, FactRef, Proof, ProofStatus, Trace, TraceNode};
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use datafusion::prelude::SessionContext;
 use z3::ast::{Bool, Int};
@@ -111,6 +112,9 @@ pub enum Error {
     /// against ([`Analysis::logical`]).
     #[error("reference plans need a catalog: make the query with Analysis::sql or Analysis::plan")]
     NoCatalog,
+    /// An operator id the query does not have ([`Analysis::node_bounds`]).
+    #[error("no operator {0}")]
+    NoOperator(usize),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -138,6 +142,57 @@ pub struct Analysis {
     assertions: usize,
     /// Every plan node, children before parents.
     nodes: Vec<Node>,
+    /// The budgets of the bounds search's checks.
+    limits: Limits,
+    stats: BuildStats,
+}
+
+/// What building an analysis took ([`Analysis::stats`]).
+#[derive(Debug, Clone, Default)]
+pub struct BuildStats {
+    /// Wall time of the rules, the query's and the plans' (with reading
+    /// the plans).
+    pub rules: Duration,
+    /// Wall time of [link](crate::link).
+    pub link: Duration,
+    /// Wall time of the pins, the row counts and the reduction
+    /// ([`joint`]).
+    pub pins: Duration,
+    /// Wall time of all of [`Builder::build`].
+    pub total: Duration,
+    /// The query's operators.
+    pub nodes: usize,
+    /// Reference plans given.
+    pub plans_given: usize,
+    /// Plans with a subtree selected ([`joint`]'s "Selection").
+    pub plans_selected: usize,
+    /// The selected subtrees' operators.
+    pub plan_nodes: usize,
+    /// Operators pinned to their rows (`X = rows`).
+    pub pinned: usize,
+    /// Operators pinned to a floor (`X >= rows`, under a runtime filter).
+    pub floors: usize,
+    /// Assertions before the reduction, and after.
+    pub assertions_before: usize,
+    pub assertions: usize,
+    /// Link's e-graph classes.
+    pub link_classes: usize,
+    /// Links asserted.
+    pub links: usize,
+    /// How link's checks came out.
+    pub link_checks: CheckStats,
+}
+
+/// One of the query's operators, as [`PlanBounds::nodes`] lists them:
+/// children before parents, its index its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Operator {
+    /// The cardinality variable.
+    pub var: String,
+    /// The operator, as DataFusion shows it on one line.
+    pub operator: String,
+    /// Ids of the operator's inputs, in order.
+    pub inputs: Vec<usize>,
 }
 
 /// Result of checking a real execution against the constraint set `S`.
@@ -192,9 +247,30 @@ impl Analysis {
     }
 
     /// [`Analysis::bounds`], and how its solver checks went.
-    #[doc(hidden)]
     pub fn bounds_with_stats(&self) -> Result<(Bounds, SearchStats)> {
         Ok(self.with_search(|s| (s.bounds(), s.stats())))
+    }
+
+    /// What building the analysis took.
+    pub fn stats(&self) -> &BuildStats {
+        &self.stats
+    }
+
+    /// The query's operators (not the reference plans'), children before
+    /// parents. They are the same, in the same order and with the same
+    /// variables, whatever plans and row counts are given.
+    pub fn operators(&self) -> Vec<Operator> {
+        self.nodes
+            .iter()
+            .map(|n| Operator { var: n.var.clone(), operator: n.plan.display().to_string(), inputs: n.inputs.clone() })
+            .collect()
+    }
+
+    /// [`Analysis::bounds`] of operator `id` ([`Analysis::operators`]),
+    /// and how its solver checks went.
+    pub fn node_bounds(&self, id: usize) -> Result<(Bounds, SearchStats)> {
+        let var = &self.nodes.get(id).ok_or(Error::NoOperator(id))?.var;
+        Ok(self.with_search(|s| (s.range(&Int::new_const(var.as_str())), s.stats())))
     }
 
     /// Proves the tightest range on every operator's output cardinality,
@@ -211,7 +287,6 @@ impl Analysis {
     }
 
     /// [`Analysis::plan_bounds`], and how its solver checks went.
-    #[doc(hidden)]
     pub fn plan_bounds_with_stats(&self) -> Result<(PlanBounds, SearchStats)> {
         let vars: Vec<&str> = self.nodes.iter().map(|n| n.var.as_str()).collect();
         let same: Vec<Option<usize>> = self
@@ -256,7 +331,7 @@ impl Analysis {
     /// Runs `f` on a search over the constraints, in a Z3 context of its
     /// own ([`in_own_context`]).
     fn with_search<R: Send + Sync>(&self, f: impl FnOnce(&bounds::Search) -> R + Send + Sync) -> R {
-        in_own_context(|| f(&bounds::Search::new(&self.constraints.recover(), &self.root)))
+        in_own_context(|| f(&bounds::Search::new(&self.constraints.recover(), &self.root, self.limits)))
     }
 
     /// Proves each side of `bounds` again, with a minimal set of the
@@ -358,6 +433,9 @@ pub struct Options {
     /// from ([`Analysis::trace`]), to inspect or explain the analysis.
     /// Defaults to false.
     pub trace: bool,
+    /// Z3's budget per check, for link's and the bounds search's.
+    /// Defaults to [`Limits::default`].
+    pub limits: Limits,
 }
 
 impl Default for Options {
@@ -366,6 +444,51 @@ impl Default for Options {
             max_product: analysis::DEFAULT_MAX_PRODUCT,
             foreign_keys: Vec::new(),
             trace: false,
+            limits: Limits::default(),
         }
+    }
+}
+
+/// Z3's budget per check, in its resource count (`rlimit`, counted from
+/// the check's start), and a wall-clock guard. A check that runs out
+/// gives up, and is counted ([`CheckStats`]): an undecided check never
+/// yields a bound or a link, so a smaller budget is sound, only weaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The bounds search's first check, which loads the constraints.
+    pub search_first: u32,
+    /// Each later check of the bounds search.
+    pub search: u32,
+    /// Each of link's checks of whether two operators are related.
+    pub link: u32,
+    /// The wall-clock guard on every check, or none; the search's first
+    /// check gets six times it.
+    pub timeout_ms: Option<u32>,
+}
+
+impl Default for Limits {
+    /// What cardinal has always used. Proofs take far less than the
+    /// search's; what reaches it is most often the search for a model
+    /// refuting a claim, a few tenths of a second to a few seconds on an
+    /// unloaded core. Over TPC-H every link check is decided well within
+    /// link's: proofs spend about 50, refutations about 700. The guard
+    /// only stops a check that stalls without spending its budget, far
+    /// beyond what the budget takes.
+    fn default() -> Limits {
+        Limits { search_first: 10_000_000, search: 300_000, link: 1_000_000, timeout_ms: Some(10_000) }
+    }
+}
+
+impl Limits {
+    /// Every rlimit at its maximum (`u32::MAX`, about 400 times the
+    /// first check's default), and no timeout: checks end on Z3's work,
+    /// never on time.
+    pub fn unbounded() -> Limits {
+        Limits { search_first: u32::MAX, search: u32::MAX, link: u32::MAX, timeout_ms: None }
+    }
+
+    /// The guard on the search's first check.
+    pub(crate) fn first_timeout_ms(&self) -> Option<u32> {
+        self.timeout_ms.map(|ms| ms.saturating_mul(6))
     }
 }

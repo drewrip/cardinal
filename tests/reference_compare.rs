@@ -181,8 +181,8 @@ async fn compare() {
                     rows.push(json!({
                         "suite": c.suite, "query": c.name, "planner": planner, "plans": which, "contender": contender,
                         "truth": truth, "lo": b.lower, "hi": b.upper, "unsound": unsound,
-                        "sat": o.stats.sat, "unsat": o.stats.unsat, "unknown": o.stats.unknown,
-                        "setup_ms": ms(o.setup), "search_ms": ms(o.search), "solver_ms": ms(o.stats.time),
+                        "sat": o.stats.checks.sat, "unsat": o.stats.checks.unsat, "unknown": o.stats.checks.unknown(),
+                        "setup_ms": ms(o.setup), "search_ms": ms(o.search), "solver_ms": ms(o.stats.checks.time),
                     }));
                 }
                 println!("{:<9} {:<26} {:<10} {:<6} truth {truth:<8} {}", c.suite, c.name, planner, which, line.join("  "));
@@ -196,7 +196,7 @@ async fn compare() {
         let q = |p: f64| t.ratios.get(((t.ratios.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(f64::NAN);
         println!(
             "{contender:<11} {which:<6} {:>4} {:>7} {:>8} {:>3}/{:<3} {:>9.2} {:>9.2} {:>6} {:>6} {:>7} {:>9.1} {:>9.1}",
-            t.n, t.errors, t.unsound, t.tight, t.bounded, q(0.5), q(0.9), t.stats.sat, t.stats.unknown, t.stats.unsat,
+            t.n, t.errors, t.unsound, t.tight, t.bounded, q(0.5), q(0.9), t.stats.checks.sat, t.stats.checks.unknown(), t.stats.checks.unsat,
             t.setup.as_secs_f64(), t.search.as_secs_f64(),
         );
     }

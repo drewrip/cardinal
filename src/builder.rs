@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::panic::Location;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use datafusion::catalog::TableProvider;
 use datafusion::common::TableReference;
@@ -19,7 +20,7 @@ use z3::ast::Int;
 use crate::analysis::{Analyzer, ScanKind};
 use crate::observed::{self, Catalog, ObservedPlan};
 use crate::trace::{FactClaim, FactInfo, FactRef, Trace};
-use crate::{Analysis, Error, Options, Result, in_own_context, joint, link};
+use crate::{Analysis, BuildStats, Error, Options, Result, in_own_context, joint, link};
 
 /// An [`Analysis`] being made: the query to bound, the [`Options`], the
 /// executed plans of other queries to analyze it with
@@ -200,19 +201,39 @@ impl<'c> Builder<'c> {
     /// ([`in_own_context`]), so a query gives the same constraints built
     /// alone or in a [`Batch`](crate::Batch).
     pub fn build(self) -> Result<Analysis> {
-        in_own_context(|| self.analyze())
+        let start = Instant::now();
+        let mut a = in_own_context(|| self.analyze())?;
+        a.stats.total = start.elapsed();
+        Ok(a)
+    }
+
+    /// Whether `joint` would select any subtree of `plan` for this query:
+    /// if not, giving it adds no constraint. False for a plan that was not
+    /// run or does not translate, which is left out.
+    #[doc(hidden)]
+    pub fn relevant(&self, plan: &ObservedPlan) -> bool {
+        let Some(catalog) = self.catalog.as_ref().map(CatalogRef::get) else { return false };
+        let Ok((query, _, _)) = self.query_plan() else { return false };
+        joint::relevant(catalog, &query, plan, &self.options)
+    }
+
+    /// The query's plan, the default catalog and schema it names tables
+    /// in, and its base tables by provider, if told by them.
+    #[allow(clippy::type_complexity)]
+    fn query_plan(&self) -> Result<(LogicalPlan, (String, String), Option<&HashMap<usize, ScanKind>>)> {
+        Ok(match &self.query {
+            Query::DataFusion { plan, base, defaults } => (plan.clone(), defaults.clone(), base.as_ref()),
+            Query::Observed(p) => {
+                let catalog = self.catalog.as_ref().map(CatalogRef::get).expect("an engine's plan comes with its catalog");
+                (catalog.to_logical(p)?, default_names(), None)
+            }
+        })
     }
 
     fn analyze(&self) -> Result<Analysis> {
         let options = &self.options;
         let catalog = self.catalog.as_ref().map(CatalogRef::get);
-        let (plan, defaults, base) = match &self.query {
-            Query::DataFusion { plan, base, defaults } => (plan.clone(), defaults.clone(), base.as_ref()),
-            Query::Observed(p) => {
-                let catalog = catalog.expect("an engine's plan comes with its catalog");
-                (catalog.to_logical(p)?, default_names(), None)
-            }
-        };
+        let (plan, defaults, base) = self.query_plan()?;
         // An engine's plan, and a reference plan, scan the catalog's tables
         // by their bare names.
         let referenced = |scan: &TableScan| base_kind(&scan.table_name, &defaults.0, &defaults.1);
@@ -227,11 +248,13 @@ impl<'c> Builder<'c> {
                 if work { ScanKind::NonBase } else { referenced(scan) }
             }
         };
+        let start = Instant::now();
         let plans = match (self.plans.is_empty(), catalog) {
             (true, _) => vec![],
             (false, Some(c)) => joint::translate(c, &self.plans),
             (false, None) => return Err(Error::NoCatalog),
         };
+        let translating = start.elapsed();
         let sizes: Vec<(String, u64)> = self
             .cardinalities
             .iter()
@@ -240,7 +263,10 @@ impl<'c> Builder<'c> {
                 ScanKind::NonBase => None,
             })
             .collect();
-        Ok(analyze(&plan, &resolve, &referenced, &plans, &sizes, options))
+        let mut a = analyze(&plan, &resolve, &referenced, &plans, &sizes, options);
+        a.stats.rules += translating;
+        a.stats.plans_given = self.plans.len();
+        Ok(a)
     }
 }
 
@@ -255,19 +281,27 @@ fn analyze(
     sizes: &[(String, u64)],
     options: &Options,
 ) -> Analysis {
+    let mut stats = BuildStats::default();
+    let start = Instant::now();
     let mut a = Analyzer::new(resolve, options.max_product, &options.foreign_keys, options.trace).with_ranges(plan);
+    a.limits = options.limits;
     let joint = !plans.is_empty();
     if joint {
         a.referenced_sizes = true;
-        a.ranged.extend(joint::ranged(plans));
+        a.ranged.extend(joint::ranged(plan, plans, options));
     }
     let root = a.visit(plan).card;
     let (own, own_scans, own_vars) = (a.nodes.len(), a.scans.len(), a.vars.len());
     a.resolve = referenced;
     let (pins, owners) = joint::visit(&mut a, plan, plans, options);
-    link::link_all(&a);
+    stats.rules = start.elapsed();
+    let start = Instant::now();
+    let linked = link::link_all(&a);
+    stats.link = start.elapsed();
+    let start = Instant::now();
     let mut pinned = joint::assert_pins(&a, &pins);
     pinned.extend(assert_sizes(&a, sizes));
+    let mut pins_time = start.elapsed();
 
     let root_name = a.name_of(&root);
     let asserted = a.solver.get_assertions();
@@ -284,9 +318,26 @@ fn analyze(
         (t, full)
     });
     let (trace, full) = traced.unzip();
+    let start = Instant::now();
     let (constraints, text) = match joint {
         false => (asserted, full),
         true => (joint::reduce(&asserted, &joint::kept(&a, own_vars)), None),
+    };
+    pins_time += start.elapsed();
+    let floors = pins.iter().filter(|p| p.floor).count();
+    let stats = BuildStats {
+        pins: pins_time,
+        nodes: own,
+        plans_selected: owners.len(),
+        plan_nodes: a.nodes.len() - own,
+        pinned: pins.len() - floors,
+        floors,
+        assertions_before: n,
+        assertions: constraints.len(),
+        link_classes: linked.classes,
+        links: linked.links,
+        link_checks: linked.checks,
+        ..stats
     };
     let mut nodes = a.nodes;
     nodes.truncate(own);
@@ -299,6 +350,8 @@ fn analyze(
         constraints: constraints.synchronized(),
         text: text.map(OnceLock::from).unwrap_or_default(),
         nodes,
+        limits: options.limits,
+        stats,
     }
 }
 

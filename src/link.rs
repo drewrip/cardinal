@@ -99,6 +99,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, ExprSchemable, Operator, binary
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
+use crate::CheckStats;
 use crate::analysis::{Analyzer, inexact_filters, product, solver_with_limits};
 use crate::observed;
 use crate::predicates::Encoder;
@@ -187,12 +188,24 @@ impl ENode {
 /// becomes `σ[k]`.
 type Mapping = Vec<usize>;
 
+/// What [`link_all`] did.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinkStats {
+    /// The e-graph's classes.
+    pub classes: usize,
+    /// Links asserted: each a property between some classes.
+    pub links: usize,
+    /// How its checks of whether operators are related came out.
+    pub checks: CheckStats,
+}
+
 /// Asserts every property link finds between the rows of `a`'s operators,
 /// once its rules have visited every plan.
-pub fn link_all(a: &Analyzer) {
+pub fn link_all(a: &Analyzer) -> LinkStats {
     let mut link = Link::new(a);
     link.run();
     link.relate();
+    LinkStats { classes: link.classes, links: link.links.get(), checks: link.decide.stats }
 }
 
 /// Where an `Spj` is placed: its partition, and what is computed of it
@@ -276,11 +289,14 @@ struct Link<'a, 'b> {
     disjoint: Vec<(usize, usize)>,
     /// Nodes to place, children first.
     work: BTreeSet<usize>,
+    /// Classes related, and links asserted ([`LinkStats`]).
+    classes: usize,
+    links: std::cell::Cell<usize>,
 }
 
 impl<'a, 'b> Link<'a, 'b> {
     fn new(a: &'a Analyzer<'b>) -> Self {
-        Link::with_decide(a, Decide::new())
+        Link::with_decide(a, Decide::with_rlimit(a.limits.link, a.limits.timeout_ms))
     }
 
     fn with_decide(a: &'a Analyzer<'b>, decide: Decide) -> Self {
@@ -307,6 +323,8 @@ impl<'a, 'b> Link<'a, 'b> {
             edges: vec![],
             disjoint: vec![],
             work: (0..n).collect(),
+            classes: 0,
+            links: Default::default(),
         }
     }
 
@@ -668,6 +686,13 @@ impl<'a, 'b> Link<'a, 'b> {
         Some(ENode::Join { kind, null_aware, left: first.0, right: second.0, on: canonical(on), columns })
     }
 
+    /// Asserts the link `name`, counted.
+    #[track_caller]
+    fn assert_link(&self, name: &'static str, claims: Vec<Bool>) {
+        self.links.set(self.links.get() + 1);
+        self.a.assert_property(name, claims);
+    }
+
     /// Asserts each class's `eq link`s, then what relates the classes.
     fn relate(&mut self) {
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -677,6 +702,7 @@ impl<'a, 'b> Link<'a, 'b> {
                 groups.entry(root).or_default().push(i);
             }
         }
+        self.classes = groups.len();
         let mut classes: HashMap<usize, Class> = HashMap::new();
         for (&root, ms) in &groups {
             let ms: Vec<(usize, Vec<Option<Column>>)> = ms.iter().map(|&x| (x, self.columns_of(x))).collect();
@@ -685,7 +711,7 @@ impl<'a, 'b> Link<'a, 'b> {
                 _ => {
                     let class = self.synthetic(&ms);
                     for (x, columns) in &ms {
-                        self.a.assert_property("eq link", eq_link(self.a, *x, columns, &class));
+                        self.assert_link("eq link", eq_link(self.a, *x, columns, &class));
                     }
                     class
                 }
@@ -729,14 +755,14 @@ impl<'a, 'b> Link<'a, 'b> {
         for (x, y) in pairs {
             let Some(ENode::Spj(c)) = &self.enodes[x] else { unreachable!("an Spj") };
             let claims = disjoint_link(self.a, &classes, &classes[&x], &classes[&y], &c.scans);
-            self.a.assert_property("disjoint link", claims);
+            self.assert_link("disjoint link", claims);
         }
 
         let roots: Vec<usize> = groups.keys().copied().collect();
         edges.extend(self.joins(&roots, &classes, &mut subsets));
         self.aggregates(&roots, &classes, &subsets);
         for e in reduced(&edges, &classes) {
-            self.a.assert_property("subset link", subset_link(&classes[&e.sub], &classes[&e.sup], &e.sigma));
+            self.assert_link("subset link", subset_link(&classes[&e.sub], &classes[&e.sup], &e.sigma));
         }
     }
 
@@ -807,7 +833,7 @@ impl<'a, 'b> Link<'a, 'b> {
             let ENode::Join { kind: LeftAnti, null_aware: false, left, right, on, .. } = e else { continue };
             if let Some(s) = semis.get(&(*left, *right, on)) {
                 let claims = properties::split(&classes[s].card, &classes[r].card, &classes[left].card);
-                self.a.assert_property("split link", claims);
+                self.assert_link("split link", claims);
             }
         }
         out
@@ -833,7 +859,7 @@ impl<'a, 'b> Link<'a, 'b> {
                 let (Some(p), Some(q)) = (cy.columns.get(&base_column(0, &k)), cz.columns.get(&base_column(0, &m))) else { continue };
                 claims.extend(properties::same(&column3_pairs(p, q)));
             }
-            self.a.assert_property("regroup link", claims);
+            self.assert_link("regroup link", claims);
         }
         for (x, ix, kx) in &aggs {
             if kx.is_empty() {
@@ -858,7 +884,7 @@ impl<'a, 'b> Link<'a, 'b> {
                     let pairs = column3_pairs(p, q);
                     claims.extend(if ix == iy { properties::same(&pairs) } else { properties::within(&pairs) });
                 }
-                self.a.assert_property("fewer link", claims);
+                self.assert_link("fewer link", claims);
             }
         }
     }
@@ -1071,22 +1097,20 @@ struct Relation {
 
 /// Decides [`Relation`]s with a solver of its own, once per pair of
 /// predicates. Each check is limited by Z3's resource count
-/// ([`DECIDE_RLIMIT`]), not by time, so the links found do not depend on
+/// ([`Limits::link`](crate::Limits::link)), not by time, so the links found do not depend on
 /// the machine's load.
 struct Decide {
     solver: Solver,
+    rlimit: u32,
+    stats: CheckStats,
     encoders: usize,
     /// By partition and the two nodes' conjuncts' keys.
     known: HashMap<(Vec<Input>, Vec<u32>, Vec<u32>), Option<Relation>>,
 }
 
 impl Decide {
-    fn new() -> Decide {
-        Decide::with_rlimit(DECIDE_RLIMIT)
-    }
-
-    fn with_rlimit(rlimit: u32) -> Decide {
-        Decide { solver: solver_with_limits(rlimit, DECIDE_TIMEOUT_MS), encoders: 0, known: HashMap::new() }
+    fn with_rlimit(rlimit: u32, ms: Option<u32>) -> Decide {
+        Decide { solver: solver_with_limits(rlimit, ms), rlimit, stats: CheckStats::default(), encoders: 0, known: HashMap::new() }
     }
 
     /// How `c1`'s predicates relate to `c2`'s, both over the same sorted
@@ -1112,25 +1136,14 @@ impl Decide {
 
     /// True if `f` holds whatever its variables, as far as the solver
     /// decides within the check's resource limit: undecided is not valid.
-    fn valid(&self, f: &Bool) -> bool {
+    fn valid(&mut self, f: &Bool) -> bool {
         self.solver.push();
         self.solver.assert(f.not());
-        let unsat = self.solver.check() == SatResult::Unsat;
+        let unsat = self.stats.check(&self.solver, self.rlimit) == SatResult::Unsat;
         self.solver.pop(1);
         unsat
     }
 }
-
-/// Per-check resource limit of [`Decide`]. Over TPC-H, alone and with the
-/// other queries' plans, every check is decided: proofs spend at most
-/// about 50, refutations about 700. A hard nonlinear formula spends about
-/// 4 million a second on an unloaded core, so this is a fraction of a
-/// second's work, as Z3 counts work unevenly: about the 1 s timeout it
-/// replaces.
-const DECIDE_RLIMIT: u32 = 1_000_000;
-/// Wall-clock limit, only against a check that stalls without spending
-/// its resources: far beyond what its resource limit takes.
-const DECIDE_TIMEOUT_MS: u32 = 10_000;
 
 /// Node `x`, a member of `class` with `columns` over the class's, is the
 /// class's rows: its card and each column's quantities equal the class's
@@ -1629,8 +1642,9 @@ mod tests {
     /// simple one is still decided.
     #[test]
     fn decide_limit_is_per_check() {
-        let d = Decide::new();
-        while spent(&d) <= u64::from(DECIDE_RLIMIT) {
+        let limit = crate::Limits::default().link;
+        let mut d = Decide::with_rlimit(limit, None);
+        while spent(&d) <= u64::from(limit) {
             assert!(!d.valid(&hard()));
         }
         assert!(d.valid(&easy()));
@@ -1640,10 +1654,11 @@ mod tests {
     /// a small limit.
     #[test]
     fn decide_first_check_is_limited() {
-        let d = Decide::with_rlimit(1_000);
+        let mut d = Decide::with_rlimit(1_000, None);
         assert!(!d.valid(&hard()));
         assert!(spent(&d) < 100_000, "{}", spent(&d));
         assert!(d.valid(&easy()));
+        assert_eq!((d.stats.limited, d.stats.unsat, d.stats.timed_out, d.stats.incomplete), (1, 1, 0, 0), "{:?}", d.stats);
     }
 
     #[test]

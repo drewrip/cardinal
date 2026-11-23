@@ -161,6 +161,8 @@ pub struct Analyzer<'a> {
     /// Whether to assert [`referenced size`](Self::referenced_size) on each
     /// scan, with reference plans ([`crate::joint`]).
     pub(crate) referenced_sizes: bool,
+    /// The budgets of [link](crate::link)'s checks.
+    pub(crate) limits: crate::Limits,
 }
 
 /// One assertion: the frame of the node it was made for (none for one
@@ -250,8 +252,8 @@ pub(crate) fn solver_with_timeout(ms: u32) -> Solver {
 }
 
 /// A solver whose every check is limited to `rlimit` of Z3's resource
-/// count and `ms` milliseconds ([`set_limits`]).
-pub(crate) fn solver_with_limits(rlimit: u32, ms: u32) -> Solver {
+/// count and `ms` milliseconds, if any ([`set_limits`]).
+pub(crate) fn solver_with_limits(rlimit: u32, ms: Option<u32>) -> Solver {
     let solver = Solver::new();
     set_limits(&solver, rlimit, ms);
     solver
@@ -259,11 +261,12 @@ pub(crate) fn solver_with_limits(rlimit: u32, ms: u32) -> Solver {
 
 /// Limits each of `solver`'s next checks to `rlimit` of Z3's resource
 /// count, counted from the check's start (not cumulative over checks),
-/// and `ms` milliseconds.
-pub(crate) fn set_limits(solver: &Solver, rlimit: u32, ms: u32) {
+/// and `ms` milliseconds, if any.
+pub(crate) fn set_limits(solver: &Solver, rlimit: u32, ms: Option<u32>) {
     let mut params = Params::new();
     params.set_u32("rlimit", rlimit);
-    params.set_u32("timeout", ms);
+    // Z3 reads the largest timeout as none.
+    params.set_u32("timeout", ms.unwrap_or(u32::MAX));
     solver.set_params(&params);
 }
 
@@ -329,6 +332,7 @@ impl<'a> Analyzer<'a> {
             relied: RefCell::new(Vec::new()),
             ranged: BTreeSet::new(),
             referenced_sizes: false,
+            limits: crate::Limits::default(),
         }
     }
 

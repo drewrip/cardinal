@@ -11,7 +11,8 @@
 //!
 //! Each check's budget is a resource limit (Z3's `rlimit`), not a time:
 //! the same constraints give the same bounds however loaded the machine
-//! is. A generous timeout only guards against a check that stalls.
+//! is. A generous timeout only guards against a check that stalls
+//! ([`Limits`](crate::Limits)).
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
+use crate::Limits;
 use crate::analysis::{set_limits, solver_with_limits};
 
 /// The proven range of a query's output cardinality `X`.
@@ -73,51 +75,99 @@ pub struct NodeBounds {
 
 /// Largest constant tried; a bound needing more is treated as unbounded.
 const CAP: u64 = 1 << 30;
-/// Per-check resource limit: bounds are best-effort, so give up quickly.
-/// Z3 applies it to each check. Proofs take far less; what reaches it is
-/// most often the search for a model refuting a claim, at a few tenths of
-/// a second to a few seconds on an unloaded core, as Z3 counts work
-/// unevenly.
-const RLIMIT: u32 = 300_000;
-/// The first check of a search, which also loads the constraints into the
-/// solver.
-const FIRST_RLIMIT: u32 = 10_000_000;
-/// Wall-clock limits, only against a check that stalls without spending
-/// its resources: far beyond what its resource limit takes.
-const TIMEOUT_MS: u32 = 10_000;
-const FIRST_TIMEOUT_MS: u32 = 60_000;
 
-/// How a bounds search's solver checks came out, and how long they took.
-#[doc(hidden)]
+/// How solver checks came out: decided, or why not; and the work and
+/// time they took.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SearchStats {
+pub struct CheckStats {
     /// Checks that found a model: a claim refuted, or a claim added.
     pub sat: u32,
     /// Checks that found none: a claim proven, or contradicted.
     pub unsat: u32,
-    /// Checks that gave up, mostly at the resource limit.
-    pub unknown: u32,
+    /// Gave up at the resource limit: a bigger budget might have decided
+    /// it. Depends only on the constraints, never on the machine's load.
+    pub limited: u32,
+    /// Gave up at the wall-clock guard: can depend on the machine's load.
+    pub timed_out: u32,
+    /// Gave up for another reason (Z3 is incomplete on nonlinear integer
+    /// arithmetic): no budget would decide it.
+    pub incomplete: u32,
+    /// Z3's `rlimit count`, summed over the checks.
+    pub rlimit: u64,
     pub time: Duration,
 }
 
-impl SearchStats {
+impl CheckStats {
+    /// Every check.
     pub fn checks(&self) -> u32 {
-        self.sat + self.unsat + self.unknown
+        self.sat + self.unsat + self.unknown()
     }
+
+    /// Checks that gave up, for any reason.
+    pub fn unknown(&self) -> u32 {
+        self.limited + self.timed_out + self.incomplete
+    }
+
+    /// Checks `solver`, counting the outcome. `rlimit` is the check's
+    /// resource limit, which tells a check that spent it from one canceled
+    /// otherwise.
+    pub(crate) fn check(&mut self, solver: &Solver, rlimit: u32) -> SatResult {
+        let before = rlimit_count(solver);
+        let start = Instant::now();
+        let result = solver.check();
+        self.time += start.elapsed();
+        let spent = rlimit_count(solver).saturating_sub(before);
+        self.rlimit += spent;
+        match result {
+            SatResult::Sat => self.sat += 1,
+            SatResult::Unsat => self.unsat += 1,
+            SatResult::Unknown => match solver.get_reason_unknown().as_deref() {
+                Some("timeout") => self.timed_out += 1,
+                Some("canceled" | "max. resource limit exceeded") => self.limited += 1,
+                _ if spent >= u64::from(rlimit) => self.limited += 1,
+                _ => self.incomplete += 1,
+            },
+        }
+        result
+    }
+}
+
+impl std::ops::AddAssign for CheckStats {
+    fn add_assign(&mut self, o: CheckStats) {
+        self.sat += o.sat;
+        self.unsat += o.unsat;
+        self.limited += o.limited;
+        self.timed_out += o.timed_out;
+        self.incomplete += o.incomplete;
+        self.rlimit += o.rlimit;
+        self.time += o.time;
+    }
+}
+
+/// Z3's resource count of `solver`'s context so far.
+fn rlimit_count(solver: &Solver) -> u64 {
+    match solver.get_statistics().value("rlimit count") {
+        Some(z3::StatisticsValue::UInt(n)) => n.into(),
+        _ => 0,
+    }
+}
+
+/// How a bounds search's solver checks went.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchStats {
+    pub checks: CheckStats,
 }
 
 impl std::ops::AddAssign for SearchStats {
     fn add_assign(&mut self, o: SearchStats) {
-        self.sat += o.sat;
-        self.unsat += o.unsat;
-        self.unknown += o.unknown;
-        self.time += o.time;
+        self.checks += o.checks;
     }
 }
 
 pub(crate) struct Search {
     solver: Solver,
     output: Int,
+    limits: Limits,
     stats: Cell<SearchStats>,
     /// Whether a check has run, loading the constraints.
     warm: Cell<bool>,
@@ -142,12 +192,13 @@ struct Known {
 
 impl Search {
     /// A search over `constraints`, bounding variable `root`.
-    pub(crate) fn new(constraints: &[Bool], root: &str) -> Self {
-        let solver = solver_with_limits(FIRST_RLIMIT, FIRST_TIMEOUT_MS);
+    pub(crate) fn new(constraints: &[Bool], root: &str, limits: Limits) -> Self {
+        let solver = solver_with_limits(limits.search_first, limits.first_timeout_ms());
         constraints.iter().for_each(|f| solver.assert(f));
         Search {
             solver,
             output: Int::new_const(root),
+            limits,
             stats: Cell::default(),
             warm: Cell::new(false),
             targets: RefCell::default(),
@@ -161,28 +212,22 @@ impl Search {
 
     /// The resource and time limits of the next check: larger for the
     /// first.
-    fn limits(&self) -> (u32, u32) {
-        if self.warm.get() { (RLIMIT, TIMEOUT_MS) } else { (FIRST_RLIMIT, FIRST_TIMEOUT_MS) }
+    fn limits(&self) -> (u32, Option<u32>) {
+        let l = &self.limits;
+        if self.warm.get() { (l.search, l.timeout_ms) } else { (l.search_first, l.first_timeout_ms()) }
     }
 
     /// Checks the solver, counting the outcome.
     fn check(&self) -> SatResult {
         let first = !self.warm.get();
-        let start = Instant::now();
-        let result = self.solver.check();
+        let mut stats = self.stats.get();
+        let result = stats.checks.check(&self.solver, self.limits().0);
+        self.stats.set(stats);
         self.warm.set(true);
         if first {
             let (rlimit, ms) = self.limits();
             set_limits(&self.solver, rlimit, ms);
         }
-        let mut stats = self.stats.get();
-        stats.time += start.elapsed();
-        match result {
-            SatResult::Sat => stats.sat += 1,
-            SatResult::Unsat => stats.unsat += 1,
-            SatResult::Unknown => stats.unknown += 1,
-        }
-        self.stats.set(stats);
         result
     }
 
@@ -240,7 +285,7 @@ impl Search {
     }
 
     /// The proven range of `x`, a target of the search.
-    fn range(&self, x: &Int) -> Bounds {
+    pub(crate) fn range(&self, x: &Int) -> Bounds {
         let i = self.target(x);
         self.range_of(i)
     }
@@ -368,7 +413,7 @@ mod tests {
     fn over(smt: &str, root: &str) -> Search {
         let solver = Solver::new();
         solver.from_string(smt);
-        Search::new(&solver.get_assertions(), root)
+        Search::new(&solver.get_assertions(), root, Limits::default())
     }
 
     /// `plan` gives every card the range a search of it alone gives.
@@ -427,9 +472,9 @@ mod tests {
         let search = over("(declare-const x Int) (assert (<= 0 x 5000))", "x");
         let i = search.target(&Int::new_const("x"));
         assert_eq!(search.upper(i), Some(5000));
-        let before = search.stats().checks();
+        let before = search.stats().checks.checks();
         assert_eq!(search.lower(i), 0);
-        assert!(search.stats().checks() - before <= 2, "{:?}", search.stats());
+        assert!(search.stats().checks.checks() - before <= 2, "{:?}", search.stats());
     }
 
     /// The first check, which loads the constraints, gets the larger
@@ -437,11 +482,12 @@ mod tests {
     #[test]
     fn first_check_gets_more_time() {
         let search = over("(declare-const x Int) (assert (<= 0 x 5))", "x");
-        assert_eq!(search.limits(), (FIRST_RLIMIT, FIRST_TIMEOUT_MS));
+        let l = Limits::default();
+        assert_eq!(search.limits(), (l.search_first, l.first_timeout_ms()));
         search.check();
-        assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
+        assert_eq!(search.limits(), (l.search, l.timeout_ms));
         search.check();
-        assert_eq!(search.limits(), (RLIMIT, TIMEOUT_MS));
+        assert_eq!(search.limits(), (l.search, l.timeout_ms));
     }
 
     /// Z3 is the pinned release, not an older system library: older ones
