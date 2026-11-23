@@ -11,13 +11,14 @@
 //! A query with every other query's plan takes seconds to analyze, so the
 //! tests over every query with every other's plans are ignored by default
 //! (tens of minutes, in parallel); the others use the query's own plan.
+//! `tests/duckdb/t3` holds more shapes, bounded only with their own plan.
 
 mod fixtures;
 
 use cardinal::observed::{Catalog, ObservedPlan};
 use cardinal::{Analysis, Bounds, Options};
 use datafusion::prelude::SessionContext;
-use fixtures::{catalog, context, foreign_keys, plans, query};
+use fixtures::{DIR, catalog, context, foreign_keys, plans, query};
 
 /// A fixture query, and its profile.
 struct Case {
@@ -85,6 +86,102 @@ impl Fixtures {
     async fn bounds(&self, c: &Case, planner: Planner, references: &[&ObservedPlan]) -> Option<Bounds> {
         Some(self.analyze(c, planner, references).await?.bounds().unwrap())
     }
+}
+
+/// Each fixture's bounds with its own plan, `[lower, upper]`, as DataFusion
+/// plans it (`None` where it cannot) and as DuckDB did. Link relates the
+/// query's operators to the plan's, so most are exact. Update a bound that
+/// tightens; none may loosen.
+#[allow(clippy::type_complexity)]
+const OWN: &[(&str, Option<(u64, Option<u64>)>, (u64, Option<u64>))] = &[
+    ("alias", Some((7, Some(7))), (7, Some(7))),
+    ("anti_exists", Some((1, Some(1))), (1, Some(1))),
+    ("cte", None, (1, Some(1))),
+    ("distinct", Some((125, Some(125))), (125, Some(125))),
+    ("full_one_side", Some((0, Some(16499))), (715, Some(715))),
+    ("group_base", Some((100, Some(100))), (100, Some(100))),
+    ("group_key_filter", Some((25, Some(25))), (25, Some(25))),
+    ("group_over_filter", Some((100, Some(100))), (100, Some(100))),
+    ("having", Some((838, Some(838))), (838, Some(838))),
+    ("in_subquery", Some((1, Some(1))), (1, Some(1))),
+    ("join_filtered", Some((5, None)), (5, Some(5))),
+    ("left_chain", Some((322, Some(322))), (322, Some(322))),
+    ("left_preserved", Some((715, Some(715))), (715, Some(715))),
+    ("left_rejected", Some((532, None)), (532, Some(532))),
+    ("limit", Some((5, Some(5))), (0, Some(5))),
+    ("not_exists", Some((1, Some(1))), (1, Some(1))),
+    ("not_in", Some((1, Some(1))), (1, Some(1))),
+    ("project_filter", Some((0, None)), (0, Some(10816))),
+    ("same_pred_two_inputs", Some((1, Some(1))), (1, Some(1))),
+    ("scalar_subquery", Some((1, Some(1))), (1, Some(1))),
+    ("scan_filter", Some((10816, Some(10816))), (10816, Some(10816))),
+    ("self_join", Some((1, Some(1))), (1, Some(1))),
+    ("semi_in", Some((1, Some(1))), (1, Some(1))),
+    ("semi_join", Some((1, Some(1))), (1, Some(1))),
+    ("q01", Some((4, Some(4))), (4, Some(4))),
+    ("q02", Some((0, Some(5))), (4, Some(4))),
+    ("q03", Some((10, Some(10))), (10, Some(10))),
+    ("q04", Some((0, Some(582))), (5, Some(5))),
+    ("q05", Some((5, None)), (5, Some(5))),
+    ("q06", Some((1, Some(1))), (1, Some(1))),
+    ("q07", Some((4, Some(8))), (4, Some(4))),
+    ("q08", Some((2, Some(2))), (2, Some(2))),
+    ("q09", Some((173, Some(173))), (173, Some(173))),
+    ("q10", Some((20, Some(20))), (20, Some(20))),
+    ("q11", Some((0, Some(374))), (359, Some(359))),
+    ("q12", Some((2, Some(2))), (2, Some(2))),
+    ("q13", Some((1, Some(1500))), (1, Some(1500))),
+    ("q14", Some((1, Some(1))), (1, Some(1))),
+    ("q15", Some((0, Some(100))), (0, Some(100))),
+    ("q16", Some((296, Some(296))), (296, Some(296))),
+    ("q17", Some((1, Some(1))), (1, Some(1))),
+    ("q18", Some((0, Some(100))), (100, Some(100))),
+    ("q19", Some((1, Some(1))), (1, Some(1))),
+    ("q20", Some((0, Some(3))), (0, Some(3))),
+    ("q21", Some((0, Some(1))), (0, Some(1))),
+    ("q22", Some((0, Some(7))), (7, Some(7))),
+    ("e04_group_small", Some((4, Some(4))), (4, Some(4))),
+    ("e06_limit", Some((0, Some(25))), (0, Some(25))),
+    ("h06_nested_agg", Some((1, Some(1000))), (1, Some(1000))),
+    ("h07_cte_twice", Some((0, Some(15000))), (0, Some(15000))),
+    ("h10_full_join", Some((464, Some(464))), (464, Some(464))),
+    ("h11_q18_like", Some((0, Some(60175))), (67, Some(67))),
+    ("m03_exists", Some((0, Some(15000))), (13773, Some(13773))),
+    ("m05_in_sub", Some((83, Some(83))), (83, Some(83))),
+    ("m06_left_join", Some((3597, Some(3597))), (3597, Some(3597))),
+    ("m07_distinct", Some((403, Some(403))), (403, Some(403))),
+    ("m08_having", Some((217, Some(217))), (217, Some(217))),
+];
+
+/// The `tests/duckdb/t3` fixtures, read with their queries' text.
+async fn t3() -> Vec<Case> {
+    let catalog = catalog().await;
+    fixtures::fixtures("t3")
+        .into_iter()
+        .map(|(name, json)| {
+            let sql = query("t3", &name);
+            let plan = cardinal::observed::from_duckdb(&catalog, &name, &json, Some(&sql)).unwrap();
+            Case { name, sql, plan }
+        })
+        .collect()
+}
+
+/// With its own plan, each fixture's bounds are those of [`OWN`].
+#[tokio::test]
+async fn own_plan_bounds() {
+    let mut f = fixtures().await;
+    f.cases.extend(t3().await);
+    assert_eq!(f.cases.len(), OWN.len(), "a fixture in {DIR} without its bounds in OWN");
+    let bounds = |b: Option<Bounds>| b.map(|b| (b.lower, b.upper));
+    let mut differ = vec![];
+    for (name, df, duck) in OWN {
+        let c = f.case(name);
+        let got = (bounds(f.bounds(c, Planner::DataFusion, &[&c.plan]).await), bounds(f.bounds(c, Planner::DuckDb, &[&c.plan]).await));
+        if got != (*df, Some(*duck)) {
+            differ.push(format!("{name}: {got:?}, not {:?}", (df, duck)));
+        }
+    }
+    assert!(differ.is_empty(), "{differ:#?}");
 }
 
 #[tokio::test]

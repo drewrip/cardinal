@@ -472,10 +472,7 @@ impl<'a, 'b> Link<'a, 'b> {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
                 let over = |e: &Expr| substitute(e, agg.input.schema(), &columns).map(ordered);
                 let keys = agg.group_expr.iter().map(over).collect::<Option<Vec<Expr>>>()?;
-                match self.regrouped(node.inputs[0], &keys, agg.aggr_expr.len()) {
-                    Some(e) => e,
-                    None => ENode::Agg { input, keys, aggs: agg.aggr_expr.iter().map(over).collect() },
-                }
+                ENode::Agg { input, keys, aggs: agg.aggr_expr.iter().map(over).collect() }
             }
             LogicalPlan::Distinct(Distinct::All(_)) => {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
@@ -496,22 +493,6 @@ impl<'a, 'b> Link<'a, 'b> {
             e => e.columns().len(),
         };
         (width == node.ndv_vars.len()).then_some(e)
-    }
-
-    /// A `GROUP BY` of `keys` over node `c`, as a `GROUP BY` of `c`'s input
-    /// if `c` is a `GROUP BY` and `keys` some of its keys: its groups'
-    /// values of them are its input's. Its aggregates, over groups, are
-    /// opaque.
-    fn regrouped(&self, c: usize, keys: &[Expr], aggs: usize) -> Option<ENode> {
-        let Some(ENode::Agg { input, keys: inner, .. }) = &self.enodes[c] else { return None };
-        let keys: Vec<Expr> = keys
-            .iter()
-            .map(|k| match k {
-                Expr::Column(k) if instance(k) == Some(0) => inner.iter().find(|i| i.to_string() == k.name).cloned(),
-                _ => None,
-            })
-            .collect::<Option<_>>()?;
-        Some(ENode::Agg { input: *input, keys, aggs: vec![None; aggs] })
     }
 
     /// The class whose count is node `c`'s, for a limit, which reads only
@@ -827,7 +808,8 @@ impl<'a, 'b> Link<'a, 'b> {
     }
 
     /// Asserts each `fewer link` between `GROUP BY`s: of fewer keys over the
-    /// same rows, or of the same keys or fewer over fewer rows.
+    /// same rows, or of the same keys or fewer over fewer rows; and the
+    /// `regroup link` of a `GROUP BY` of some of another's keys.
     fn aggregates(&self, roots: &[usize], classes: &HashMap<usize, Class>, subsets: &HashMap<(usize, usize), Vec<Mapping>>) {
         let aggs: Vec<(usize, usize, Vec<Expr>)> = roots
             .iter()
@@ -836,6 +818,17 @@ impl<'a, 'b> Link<'a, 'b> {
                 _ => None,
             })
             .collect();
+        let by_key: HashMap<(usize, &[Expr]), usize> = aggs.iter().map(|(r, i, k)| ((*i, &k[..]), *r)).collect();
+        for (y, c, ky) in &aggs {
+            let Some((z, pairs)) = self.regrouped(*c, ky, &by_key) else { continue };
+            let (cy, cz) = (&classes[y], &classes[&z]);
+            let mut claims = properties::same(&[Pair::Card(&cy.card, &cz.card)]);
+            for (k, m) in pairs {
+                let (Some(p), Some(q)) = (cy.columns.get(&base_column(0, &k)), cz.columns.get(&base_column(0, &m))) else { continue };
+                claims.extend(properties::same(&column3_pairs(p, q)));
+            }
+            self.a.assert_property("regroup link", claims);
+        }
         for (x, ix, kx) in &aggs {
             if kx.is_empty() {
                 continue;
@@ -862,6 +855,27 @@ impl<'a, 'b> Link<'a, 'b> {
                 self.a.assert_property("fewer link", claims);
             }
         }
+    }
+
+    /// The `GROUP BY` class of the rows of `GROUP BY` class `c`'s input by
+    /// `keys` over `c`'s columns, if `keys` are some of `c`'s keys and it
+    /// is one of `by_key`: the same rows, each group's values of `keys`
+    /// being some of `c`'s groups'. With each key, by its name in each.
+    fn regrouped(&self, c: usize, keys: &[Expr], by_key: &HashMap<(usize, &[Expr]), usize>) -> Option<(usize, Vec<(String, String)>)> {
+        let Some(ENode::Agg { input, keys: inner, .. }) = &self.enodes[c] else { return None };
+        let pairs: Vec<(Expr, Expr)> = keys
+            .iter()
+            .map(|k| match k {
+                Expr::Column(col) if instance(col) == Some(0) => Some((k.clone(), inner.iter().find(|i| i.to_string() == col.name)?.clone())),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        // Without keys, one row either way.
+        if pairs.is_empty() {
+            return None;
+        }
+        let z = *by_key.get(&(*input, &sorted(pairs.iter().map(|(_, m)| m.clone()).collect())[..]))?;
+        Some((z, pairs.iter().map(|(k, m)| (k.to_string(), m.to_string())).collect()))
     }
 
     /// The mappings under which class `x`'s rows are among class `y`'s:
@@ -1505,6 +1519,20 @@ mod tests {
             assert!(fewer.contains(&format!("(<= {one} {two})")), "{fewer:?}");
             assert!(fewer.iter().any(|c| c.starts_with("(= ") && reads(c, &format!("{one}_c0"))), "{fewer:?}");
             assert!(!fewer.iter().any(|c| reads(c, &none)), "{fewer:?}");
+        });
+    }
+
+    /// DataFusion counts distinct values by grouping twice: grouping the
+    /// groups by some of their keys has the rows of grouping by them.
+    #[tokio::test]
+    async fn regrouping_groups_alike() {
+        let p = plan("SELECT a, count(DISTINCT b) FROM t GROUP BY a UNION ALL SELECT a, count(*) FROM t GROUP BY a").await;
+        analyzed(&p, |a| {
+            link_all(a);
+            let [inner, outer, other] = aggregates(a)[..] else { panic!("three GROUP BYs") };
+            assert_eq!(a.nodes[outer].inputs[0], inner);
+            let regroup = claims(a, "regroup link");
+            assert_eq!(regroup[0], format!("(= {} {})", a.nodes[outer].var, a.nodes[other].var), "{regroup:?}");
         });
     }
 

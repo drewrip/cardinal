@@ -54,7 +54,6 @@ async fn reference_plans_are_traced() {
 }
 
 #[tokio::test]
-#[ignore = "bound needs link"]
 async fn tighter_bound_needs_the_plan() {
     let p = profile("q04").await;
     let a = traced("q04").await.build().unwrap();

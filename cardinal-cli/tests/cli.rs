@@ -91,7 +91,6 @@ fn dump_q04(name: &str, extra: &[&str]) -> (PathBuf, Dump) {
 }
 
 #[test]
-#[ignore = "bound needs link"]
 fn reference_plans_from_profiles() {
     let (json, dump) = dump_q04("q04.json", &[]);
     let informed = dump.informed.as_ref().expect("an informed section");

@@ -79,7 +79,6 @@ fn pin(op: &str, claim: &str) -> (String, String) {
 /// other rows than the engine counted contradicts the constraints, and the
 /// bounds then hold nothing in particular.
 #[tokio::test]
-#[ignore = "bound needs link"]
 async fn own_profile_pins_the_truth() {
     let catalog = catalog().await;
     let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
@@ -105,7 +104,6 @@ async fn own_profile_pins_the_truth() {
 /// DuckDB 2.0 lays a profile out anew: the plan under `operator`, each
 /// operator's rows as `intermediate_rows`. Its profiles pin the truth too.
 #[tokio::test]
-#[ignore = "bound needs link"]
 async fn reads_duckdb_2_profiles() {
     let catalog = catalog().await;
     let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
