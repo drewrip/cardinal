@@ -1,0 +1,195 @@
+[
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "COUNT(*)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 3686,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 11002,
+   "output_rows": 3686
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "equality_join_condition": "(ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)",
+   "join_type": "INNER"
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7304,
+   "output_rows": 7304
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "ORDERS.O_ORDERSTATUS = 'F'"
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 40960,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 7304,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_ORDERKEY",
+    "O_ORDERSTATUS"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.ORDERS"
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5249,
+   "output_rows": 3698
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_ORDERKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5249,
+   "output_rows": 5249
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "LINEITEM.L_QUANTITY < 10"
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 8,
+  "PARENT_OPERATORS": [
+   7
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5249,
+   "output_rows": 5249
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "3"
+  }
+ },
+ {
+  "QUERY_ID": "same_pred_two_inputs",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 9,
+  "PARENT_OPERATORS": [
+   8
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 180224,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 5249,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_ORDERKEY",
+    "L_QUANTITY"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.LINEITEM"
+  }
+ }
+]

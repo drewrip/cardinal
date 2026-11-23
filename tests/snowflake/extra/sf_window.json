@@ -1,0 +1,84 @@
+[
+ {
+  "QUERY_ID": "sf_window",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 3
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "NATION.N_NAME",
+    "ROW_NUMBER() OVER (PARTITION BY NATION.N_REGIONKEY ORDER BY NATION.N_NAME ASC NULLS LAST)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_window",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "SortWithLimit",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 25,
+   "output_rows": 3
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "offset": 0.0,
+   "rows": 3.0,
+   "sort_keys": [
+    "NATION.N_NAME ASC NULLS LAST"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_window",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "WindowFunction",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 50,
+   "output_rows": 25
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "ROW_NUMBER() OVER (PARTITION BY NATION.N_REGIONKEY ORDER BY NATION.N_NAME ASC NULLS LAST)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "sf_window",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 4096,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 25,
+   "pruning": {
+    "partitions_scanned": 2,
+    "partitions_total": 2
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "N_NAME",
+    "N_REGIONKEY"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.NATION"
+  }
+ }
+]

@@ -1,0 +1,248 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 4,
+  "partitionsAssigned": 4,
+  "bytesAssigned": 2338816
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "CUSTOMER.C_CUSTKEY",
+     "CUSTOMER.C_NAME",
+     "SUM(SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*)))",
+     "CUSTOMER.C_ACCTBAL",
+     "NATION.N_NAME",
+     "CUSTOMER.C_ADDRESS",
+     "CUSTOMER.C_PHONE",
+     "CUSTOMER.C_COMMENT"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "SortWithLimit",
+    "expressions": [
+     "sortKey: [SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)) DESC NULLS FIRST]",
+     "rowCount: 20"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*)))]",
+     "groupKeys: [CUSTOMER.C_CUSTKEY, CUSTOMER.C_NAME, CUSTOMER.C_ACCTBAL, CUSTOMER.C_PHONE, NATION.N_NAME, CUSTOMER.C_ADDRESS, CUSTOMER.C_COMMENT]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM_INTERNAL(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)), COUNT(*))]",
+     "groupKeys: [CUSTOMER.C_CUSTKEY, CUSTOMER.C_NAME, CUSTOMER.C_ACCTBAL, CUSTOMER.C_PHONE, NATION.N_NAME, CUSTOMER.C_ADDRESS, CUSTOMER.C_COMMENT]"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [CUSTOMER.C_CUSTKEY, CUSTOMER.C_NAME, CUSTOMER.C_ACCTBAL, CUSTOMER.C_PHONE, NATION.N_NAME, CUSTOMER.C_ADDRESS, CUSTOMER.C_COMMENT, ORDERS.O_ORDERKEY]"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = CUSTOMER.C_NATIONKEY)"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [CUSTOMER.C_CUSTKEY, CUSTOMER.C_NAME, CUSTOMER.C_ACCTBAL, CUSTOMER.C_PHONE, CUSTOMER.C_ADDRESS, CUSTOMER.C_COMMENT, ORDERS.O_ORDERKEY, CUSTOMER.C_NATIONKEY]"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (ORDERS.O_CUSTKEY = CUSTOMER.C_CUSTKEY)"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "Filter",
+    "expressions": [
+     "(ORDERS.O_ORDERDATE >= '1993-10-01') AND (ORDERS.O_ORDERDATE < '1994-01-01')"
+    ],
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_CUSTKEY",
+     "O_ORDERDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     10
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [CUSTOMER.C_CUSTKEY, CUSTOMER.C_NAME, CUSTOMER.C_ACCTBAL, CUSTOMER.C_PHONE, CUSTOMER.C_ADDRESS, CUSTOMER.C_COMMENT, CUSTOMER.C_NATIONKEY]"
+    ],
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 13,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = CUSTOMER.C_NATIONKEY)"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 14,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.CUSTOMER"
+    ],
+    "expressions": [
+     "C_CUSTKEY",
+     "C_NAME",
+     "C_ADDRESS",
+     "C_NATIONKEY",
+     "C_PHONE",
+     "C_ACCTBAL",
+     "C_COMMENT"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 109568,
+    "parentOperators": [
+     13
+    ]
+   },
+   {
+    "id": 15,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]",
+     "groupKeys: [LINEITEM.L_ORDERKEY]"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 16,
+    "operation": "Filter",
+    "expressions": [
+     "LINEITEM.L_RETURNFLAG = 'R'"
+    ],
+    "parentOperators": [
+     15
+    ]
+   },
+   {
+    "id": 17,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)"
+    ],
+    "parentOperators": [
+     16
+    ]
+   },
+   {
+    "id": 18,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT",
+     "L_RETURNFLAG"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     17
+    ]
+   }
+  ]
+ ]
+}

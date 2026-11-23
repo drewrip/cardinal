@@ -1,0 +1,151 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 3,
+  "partitionsAssigned": 3,
+  "bytesAssigned": 686080
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "(SUM(CUSTOMER.C_ACCTBAL)) / (COUNT(CUSTOMER.C_ACCTBAL))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(CUSTOMER.C_ACCTBAL), COUNT(CUSTOMER.C_ACCTBAL)]"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Filter",
+    "expressions": [
+     "(CUSTOMER.C_ACCTBAL > 0) AND ((SUBSTRING(CUSTOMER.C_PHONE, 1, 2)) IN '13' IN '31' IN '23' IN '29' IN '30' IN '18' IN '17')"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.CUSTOMER"
+    ],
+    "expressions": [
+     "C_PHONE",
+     "C_ACCTBAL"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 109568,
+    "parentOperators": [
+     2
+    ]
+   }
+  ],
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "SUBSTRING(CUSTOMER.C_PHONE, 1, 2)",
+     "COUNT(*)",
+     "SUM(CUSTOMER.C_ACCTBAL)"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "SUBSTRING(CUSTOMER.C_PHONE, 1, 2) ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*), SUM(CUSTOMER.C_ACCTBAL)]",
+     "groupKeys: [SUBSTRING(CUSTOMER.C_PHONE, 1, 2)]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "AntiJoin",
+    "expressions": [
+     "joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Filter",
+    "expressions": [
+     "((SUBSTRING(CUSTOMER.C_PHONE, 1, 2)) IN '13' IN '31' IN '23' IN '29' IN '30' IN '18' IN '17') AND ((CUSTOMER.C_ACCTBAL) > Subquery(Step1))"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.CUSTOMER"
+    ],
+    "expressions": [
+     "C_CUSTKEY",
+     "C_PHONE",
+     "C_ACCTBAL"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 109568,
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_CUSTKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     6
+    ]
+   }
+  ]
+ ]
+}

@@ -1,0 +1,131 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 2,
+  "partitionsAssigned": 2,
+  "bytesAssigned": 1832448
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "SUM(SUM(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))))]"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT)))]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+     "joinFilter: ((PART.P_BRAND = 'Brand#12') AND (PART.P_CONTAINER IN 'SM CASE' IN 'SM BOX' IN 'SM PACK' IN 'SM PKG') AND (LINEITEM.L_QUANTITY <= 11) AND (PART.P_SIZE <= 5)) OR ((PART.P_BRAND = 'Brand#23') AND (PART.P_CONTAINER IN 'MED BAG' IN 'MED BOX' IN 'MED PKG' IN 'MED PACK') AND (LINEITEM.L_QUANTITY >= 10) AND (LINEITEM.L_QUANTITY <= 20) AND (PART.P_SIZE <= 10)) OR ((PART.P_BRAND = 'Brand#34') AND (PART.P_CONTAINER IN 'LG CASE' IN 'LG BOX' IN 'LG PACK' IN 'LG PKG') AND (LINEITEM.L_QUANTITY >= 20) AND (LINEITEM.L_QUANTITY <= 30) AND (PART.P_SIZE <= 15))"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Filter",
+    "expressions": [
+     "(PART.P_BRAND IN 'Brand#12' IN 'Brand#23' IN 'Brand#34') AND ((PART.P_CONTAINER IN 'SM CASE' IN 'SM BOX' IN 'SM PACK' IN 'SM PKG') OR (PART.P_CONTAINER IN 'MED BAG' IN 'MED BOX' IN 'MED PKG' IN 'MED PACK') OR (PART.P_CONTAINER IN 'LG CASE' IN 'LG BOX' IN 'LG PACK' IN 'LG PKG')) AND ((PART.P_SIZE <= 5) OR (PART.P_SIZE <= 10) OR (PART.P_SIZE <= 15))"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PART"
+    ],
+    "expressions": [
+     "P_PARTKEY",
+     "P_BRAND",
+     "P_SIZE",
+     "P_CONTAINER"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 72192,
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(LINEITEM.L_EXTENDEDPRICE * (1 - LINEITEM.L_DISCOUNT))]",
+     "groupKeys: [LINEITEM.L_PARTKEY, LINEITEM.L_QUANTITY]"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "Filter",
+    "expressions": [
+     "(LINEITEM.L_SHIPMODE IN 'AIR' IN 'AIR REG') AND (LINEITEM.L_SHIPINSTRUCT = 'DELIVER IN PERSON') AND ((LINEITEM.L_QUANTITY <= 11) OR (LINEITEM.L_QUANTITY >= 10) OR (LINEITEM.L_QUANTITY <= 20) OR (LINEITEM.L_QUANTITY >= 20) OR (LINEITEM.L_QUANTITY <= 30))"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+     "joinFilter: ((PART.P_BRAND = 'Brand#12') AND (PART.P_CONTAINER IN 'SM CASE' IN 'SM BOX' IN 'SM PACK' IN 'SM PKG') AND (LINEITEM.L_QUANTITY <= 11) AND (PART.P_SIZE <= 5)) OR ((PART.P_BRAND = 'Brand#23') AND (PART.P_CONTAINER IN 'MED BAG' IN 'MED BOX' IN 'MED PKG' IN 'MED PACK') AND (LINEITEM.L_QUANTITY >= 10) AND (LINEITEM.L_QUANTITY <= 20) AND (PART.P_SIZE <= 10)) OR ((PART.P_BRAND = 'Brand#34') AND (PART.P_CONTAINER IN 'LG CASE' IN 'LG BOX' IN 'LG PACK' IN 'LG PKG') AND (LINEITEM.L_QUANTITY >= 20) AND (LINEITEM.L_QUANTITY <= 30) AND (PART.P_SIZE <= 15))"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_PARTKEY",
+     "L_QUANTITY",
+     "L_EXTENDEDPRICE",
+     "L_DISCOUNT",
+     "L_SHIPINSTRUCT",
+     "L_SHIPMODE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     8
+    ]
+   }
+  ]
+ ]
+}

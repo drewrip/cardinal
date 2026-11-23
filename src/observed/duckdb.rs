@@ -1126,7 +1126,7 @@ fn rewrite(text: &str) -> String {
 
 /// Replaces `from` where it is a whole word: not preceded, nor (if it ends
 /// in a word character) followed, by a word character.
-fn replace_word(s: &str, from: &str, to: &str) -> String {
+pub(super) fn replace_word(s: &str, from: &str, to: &str) -> String {
     let word = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = String::new();
     let mut rest = s;

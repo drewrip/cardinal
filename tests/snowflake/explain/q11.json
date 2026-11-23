@@ -1,0 +1,339 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 6,
+  "partitionsAssigned": 6,
+  "bytesAssigned": 735232
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "(SUM(SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*)))) * 0.0001"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*)))]"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*))]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = PARTSUPP.PS_SUPPKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [SUPPLIER.S_SUPPKEY]"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [NATION.N_NATIONKEY]"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "Filter",
+    "expressions": [
+     "NATION.N_NAME = 'GERMANY'"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = PARTSUPP.PS_SUPPKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PARTSUPP"
+    ],
+    "expressions": [
+     "PS_SUPPKEY",
+     "PS_AVAILQTY",
+     "PS_SUPPLYCOST"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 356864,
+    "parentOperators": [
+     11
+    ]
+   }
+  ],
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "PARTSUPP.PS_PARTKEY",
+     "SUM(SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*)))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "SUM(SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*))) DESC NULLS FIRST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Filter",
+    "expressions": [
+     "(SUM(SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*)))) > Subquery(Step1)"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*)))]",
+     "groupKeys: [PARTSUPP.PS_PARTKEY]"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM_INTERNAL(PARTSUPP.PS_SUPPLYCOST * (PARTSUPP.PS_AVAILQTY), COUNT(*))]",
+     "groupKeys: [PARTSUPP.PS_PARTKEY]"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = PARTSUPP.PS_SUPPKEY)"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [SUPPLIER.S_SUPPKEY]"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [NATION.N_NATIONKEY]"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "Filter",
+    "expressions": [
+     "NATION.N_NAME = 'GERMANY'"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.NATION"
+    ],
+    "expressions": [
+     "N_NATIONKEY",
+     "N_NAME"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 2048,
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (NATION.N_NATIONKEY = SUPPLIER.S_NATIONKEY)"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_NATIONKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     11
+    ]
+   },
+   {
+    "id": 13,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = PARTSUPP.PS_SUPPKEY)"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 14,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PARTSUPP"
+    ],
+    "expressions": [
+     "PS_PARTKEY",
+     "PS_SUPPKEY",
+     "PS_AVAILQTY",
+     "PS_SUPPLYCOST"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 356864,
+    "parentOperators": [
+     13
+    ]
+   }
+  ]
+ ]
+}

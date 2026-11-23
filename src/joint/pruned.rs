@@ -8,7 +8,8 @@
 //! column, which drops the rows it pruned anyway, or a filter checking the
 //! same predicate. An operator's count is then:
 //!
-//! - its rows, if no filter pruned at or below it, or every one is moot;
+//! - its rows, if no filter pruned at or below it, or every one is moot
+//!   (for a top-n, below it);
 //! - a floor, if only runtime filters are pending and every operator since
 //!   keeps fewer rows for fewer input;
 //! - nothing, otherwise, or if it may have stopped early ([`stopped`]).
@@ -147,6 +148,10 @@ pub(crate) fn counts(plan: &ObservedPlan) -> Vec<Count> {
         .map(|(j, n)| match () {
             _ if !n.counted || stopped[j] => Count::Unknown,
             _ if !pruned[j] => Count::Rows,
+            // A top-n outputs `fetch` of its input's rows, or all: as many as
+            // the translation, if its input has as many. (Its rows are not
+            // the translation's, which taints what reads them.)
+            _ if matches!(n.op, Op::TopN { .. }) && n.children.iter().all(|&c| states[c] == State::Clean) => Count::Rows,
             _ => states[j].count(),
         })
         .collect()
@@ -301,6 +306,19 @@ fn state(plan: &ObservedPlan, i: usize, inputs: &[State], above: &BTreeSet<Strin
                 pending.retain(|p| !matches!(p, Pending::Join { column: Some(c), .. } if keys.contains(c) && !above.contains(c)));
             }
             State::with(pending)
+        }
+        // A runtime filter on a grouping key drops whole groups, and leaves
+        // the others' values: the groups are some of the translation's.
+        Op::Aggregate { keys, .. } if matches!(inputs, [State::Pending(_)]) => {
+            let keys: BTreeSet<String> = keys.iter().filter_map(|k| match k {
+                Some(Expr::Column(c)) => Some(column_key(c)),
+                _ => None,
+            }).collect();
+            let pending = inputs[0].pending();
+            match pending.iter().all(|p| matches!(p, Pending::Join { column: Some(c), .. } if keys.contains(c))) {
+                true => State::with(pending),
+                false => State::Tainted,
+            }
         }
         // Over pruned rows, groups and their values are no translation's.
         Op::Aggregate { .. } | Op::Union => match inputs.iter().all(|s| *s == State::Clean) {

@@ -1,0 +1,83 @@
+[
+ {
+  "QUERY_ID": "having",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 838
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "LINEITEM.L_ORDERKEY",
+    "SUM(LINEITEM.L_QUANTITY)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "having",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 15000,
+   "output_rows": 838
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(SUM(LINEITEM.L_QUANTITY)) > 200"
+  }
+ },
+ {
+  "QUERY_ID": "having",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 60175,
+   "output_rows": 15000
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(LINEITEM.L_QUANTITY)"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_ORDERKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "having",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 180224,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 60175,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_ORDERKEY",
+    "L_QUANTITY"
+   ],
+   "table_name": "CMU.CARDINAL_TPCH.LINEITEM"
+  }
+ }
+]

@@ -25,7 +25,8 @@ use crate::{Analysis, Error, Options, Result, in_own_context, joint, link};
 /// executed plans of other queries to analyze it with
 /// ([`Builder::with_plans`]) and tables' row counts
 /// ([`Builder::with_cardinalities`]). Made by [`Analysis::sql`], [`Analysis::plan`],
-/// [`Analysis::duckdb`], [`Analysis::postgres`] or [`Analysis::logical`].
+/// [`Analysis::duckdb`], [`Analysis::postgres`], [`Analysis::snowflake`] or
+/// [`Analysis::logical`].
 ///
 /// ```ignore
 /// let a = Analysis::plan(&catalog, &plan)
@@ -103,6 +104,14 @@ impl Analysis {
     /// `EXPLAIN (VERBOSE, FORMAT JSON)` (or with `ANALYZE`, too).
     pub fn postgres<'c>(catalog: &'c Catalog, json: &str, sql: Option<&str>) -> Result<Builder<'c>> {
         let plan = observed::from_postgres_explain(catalog, "", json, sql)?;
+        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), Some(CatalogRef::Borrowed(catalog))))
+    }
+
+    /// [`Analysis::plan`] on Snowflake's plan for `sql`, as printed by
+    /// `EXPLAIN USING JSON` (or its operator stats, or a
+    /// [`snowflake_explain::QueryPlan`]): see [`observed::from_snowflake`].
+    pub fn snowflake<'c>(catalog: &'c Catalog, json: &str, sql: Option<&str>) -> Result<Builder<'c>> {
+        let plan = observed::from_snowflake_explain(catalog, "", json, sql)?;
         Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), Some(CatalogRef::Borrowed(catalog))))
     }
 

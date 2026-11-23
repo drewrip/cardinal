@@ -1,0 +1,138 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 2,
+  "partitionsAssigned": 2,
+  "bytesAssigned": 2227200
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "ORDERS.O_ORDERPRIORITY",
+     "COUNT(*)"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "ORDERS.O_ORDERPRIORITY ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [ORDERS.O_ORDERPRIORITY]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [ORDERS.O_ORDERPRIORITY]"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "SemiJoin",
+    "expressions": [
+     "joinKey: (ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [ORDERS.O_ORDERPRIORITY, ORDERS.O_ORDERKEY]"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Filter",
+    "expressions": [
+     "(ORDERS.O_ORDERDATE >= '1993-07-01') AND (ORDERS.O_ORDERDATE < '1993-10-01')"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_ORDERDATE",
+     "O_ORDERPRIORITY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "Filter",
+    "expressions": [
+     "LINEITEM.L_COMMITDATE < LINEITEM.L_RECEIPTDATE"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_COMMITDATE",
+     "L_RECEIPTDATE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     9
+    ]
+   }
+  ]
+ ]
+}

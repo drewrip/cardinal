@@ -1,0 +1,188 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 3,
+  "partitionsAssigned": 3,
+  "bytesAssigned": 437760
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "PART.P_BRAND",
+     "PART.P_TYPE",
+     "PART.P_SIZE",
+     "COUNT(DISTINCT PARTSUPP.PS_SUPPKEY)"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "COUNT(DISTINCT PARTSUPP.PS_SUPPKEY) DESC NULLS FIRST",
+     "PART.P_BRAND ASC NULLS LAST",
+     "PART.P_TYPE ASC NULLS LAST",
+     "PART.P_SIZE ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(DISTINCT PARTSUPP.PS_SUPPKEY)]",
+     "groupKeys: [PART.P_BRAND, PART.P_TYPE, PART.P_SIZE]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "AntiJoin",
+    "expressions": [
+     "joinKey: (SUPPLIER.S_SUPPKEY = PARTSUPP.PS_SUPPKEY)"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "Aggregate",
+    "expressions": [
+     "groupKeys: [SUPPLIER.S_SUPPKEY]"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "Filter",
+    "expressions": [
+     "SUPPLIER.S_COMMENT LIKE '%Customer%Complaints%'"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.SUPPLIER"
+    ],
+    "expressions": [
+     "S_SUPPKEY",
+     "S_COMMENT"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 8704,
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "Aggregate",
+    "expressions": [
+     "groupKeys: [PART.P_BRAND, PART.P_TYPE, PART.P_SIZE, PARTSUPP.PS_SUPPKEY]"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = PARTSUPP.PS_PARTKEY)"
+    ],
+    "parentOperators": [
+     7
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "Aggregate",
+    "expressions": [
+     "groupKeys: [PART.P_BRAND, PART.P_TYPE, PART.P_SIZE, PART.P_PARTKEY]"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "Filter",
+    "expressions": [
+     "(PART.P_BRAND <> 'Brand#45') AND (NOT(STARTSWITH(PART.P_TYPE, 'MEDIUM POLISHED'))) AND (PART.P_SIZE IN 49 IN 14 IN 23 IN 45 IN 19 IN 3 IN 36 IN 9)"
+    ],
+    "parentOperators": [
+     9
+    ]
+   },
+   {
+    "id": 11,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PART"
+    ],
+    "expressions": [
+     "P_PARTKEY",
+     "P_BRAND",
+     "P_TYPE",
+     "P_SIZE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 72192,
+    "parentOperators": [
+     10
+    ]
+   },
+   {
+    "id": 12,
+    "operation": "Aggregate",
+    "expressions": [
+     "groupKeys: [PARTSUPP.PS_SUPPKEY, PARTSUPP.PS_PARTKEY]"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 13,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (PART.P_PARTKEY = PARTSUPP.PS_PARTKEY)"
+    ],
+    "parentOperators": [
+     12
+    ]
+   },
+   {
+    "id": 14,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.PARTSUPP"
+    ],
+    "expressions": [
+     "PS_PARTKEY",
+     "PS_SUPPKEY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 356864,
+    "parentOperators": [
+     13
+    ]
+   }
+  ]
+ ]
+}

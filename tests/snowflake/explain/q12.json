@@ -1,0 +1,141 @@
+{
+ "GlobalStats": {
+  "partitionsTotal": 2,
+  "partitionsAssigned": 2,
+  "bytesAssigned": 2227200
+ },
+ "Operations": [
+  [
+   {
+    "id": 0,
+    "operation": "Result",
+    "expressions": [
+     "LINEITEM.L_SHIPMODE",
+     "SUM(SUM_INTERNAL(SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), COUNT(*)))",
+     "SUM(SUM_INTERNAL(SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0)), COUNT(*)))"
+    ]
+   },
+   {
+    "id": 1,
+    "operation": "Sort",
+    "expressions": [
+     "LINEITEM.L_SHIPMODE ASC NULLS LAST"
+    ],
+    "parentOperators": [
+     0
+    ]
+   },
+   {
+    "id": 2,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(SUM_INTERNAL(SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), COUNT(*))), SUM(SUM_INTERNAL(SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0)), COUNT(*)))]",
+     "groupKeys: [LINEITEM.L_SHIPMODE]"
+    ],
+    "parentOperators": [
+     1
+    ]
+   },
+   {
+    "id": 3,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM_INTERNAL(SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), COUNT(*)), SUM_INTERNAL(SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0)), COUNT(*))]",
+     "groupKeys: [LINEITEM.L_SHIPMODE]"
+    ],
+    "parentOperators": [
+     2
+    ]
+   },
+   {
+    "id": 4,
+    "operation": "InnerJoin",
+    "expressions": [
+     "joinKey: (LINEITEM.L_ORDERKEY = ORDERS.O_ORDERKEY)"
+    ],
+    "parentOperators": [
+     3
+    ]
+   },
+   {
+    "id": 5,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [COUNT(*)]",
+     "groupKeys: [LINEITEM.L_SHIPMODE, LINEITEM.L_ORDERKEY]"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 6,
+    "operation": "Filter",
+    "expressions": [
+     "(LINEITEM.L_SHIPMODE IN 'MAIL' IN 'SHIP') AND (LINEITEM.L_COMMITDATE < LINEITEM.L_RECEIPTDATE) AND (LINEITEM.L_SHIPDATE < LINEITEM.L_COMMITDATE) AND (LINEITEM.L_RECEIPTDATE >= '1994-01-01') AND (LINEITEM.L_RECEIPTDATE < '1995-01-01')"
+    ],
+    "parentOperators": [
+     5
+    ]
+   },
+   {
+    "id": 7,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.LINEITEM"
+    ],
+    "expressions": [
+     "L_ORDERKEY",
+     "L_SHIPDATE",
+     "L_COMMITDATE",
+     "L_RECEIPTDATE",
+     "L_SHIPMODE"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 1760256,
+    "parentOperators": [
+     6
+    ]
+   },
+   {
+    "id": 8,
+    "operation": "Aggregate",
+    "expressions": [
+     "aggExprs: [SUM(CASE_FLATTENED(ORDERS.O_ORDERPRIORITY IN '1-URGENT' IN '2-HIGH', 1, 0)), SUM(CASE_FLATTENED((ORDERS.O_ORDERPRIORITY <> '1-URGENT') AND (ORDERS.O_ORDERPRIORITY <> '2-HIGH'), 1, 0))]",
+     "groupKeys: [ORDERS.O_ORDERKEY]"
+    ],
+    "parentOperators": [
+     4
+    ]
+   },
+   {
+    "id": 9,
+    "operation": "JoinFilter",
+    "expressions": [
+     "joinKey: (LINEITEM.L_ORDERKEY = ORDERS.O_ORDERKEY)"
+    ],
+    "parentOperators": [
+     8
+    ]
+   },
+   {
+    "id": 10,
+    "operation": "TableScan",
+    "objects": [
+     "CMU.CARDINAL_TPCH.ORDERS"
+    ],
+    "expressions": [
+     "O_ORDERKEY",
+     "O_ORDERPRIORITY"
+    ],
+    "partitionsAssigned": 1,
+    "partitionsTotal": 1,
+    "bytesAssigned": 466944,
+    "parentOperators": [
+     9
+    ]
+   }
+  ]
+ ]
+}
