@@ -481,13 +481,13 @@ impl<'a, 'b> Link<'a, 'b> {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
                 ENode::Agg { input, keys: columns.into_iter().collect::<Option<_>>()?, aggs: vec![] }
             }
-            LogicalPlan::Join(j) if STAGE >= 3 => self.join(i, j)?,
-            LogicalPlan::Sort(s) if STAGE >= 4 => ENode::Limit { input: self.class(node.inputs[0])?, skip: 0, fetch: s.fetch },
-            LogicalPlan::Limit(l) if STAGE >= 4 => {
+            LogicalPlan::Join(j) => self.join(i, j)?,
+            LogicalPlan::Sort(s) => ENode::Limit { input: self.counted(node.inputs[0])?, skip: 0, fetch: s.fetch },
+            LogicalPlan::Limit(l) => {
                 let (Ok(SkipType::Literal(skip)), Ok(FetchType::Literal(fetch))) = (l.get_skip_type(), l.get_fetch_type()) else {
                     return None;
                 };
-                ENode::Limit { input: self.class(node.inputs[0])?, skip, fetch }
+                ENode::Limit { input: self.counted(node.inputs[0])?, skip, fetch }
             }
             _ => return None,
         };
@@ -512,6 +512,17 @@ impl<'a, 'b> Link<'a, 'b> {
             })
             .collect::<Option<_>>()?;
         Some(ENode::Agg { input: *input, keys, aggs: vec![None; aggs] })
+    }
+
+    /// The class whose count is node `c`'s, for a limit, which reads only
+    /// that: an `Spj` without predicates over one class has its count.
+    fn counted(&mut self, c: usize) -> Option<usize> {
+        if let Some(ENode::Spj(s)) = &self.enodes[c]
+            && let ([(Input::Class(k), _)], []) = (&s.scans[..], &s.preds[..])
+        {
+            return Some(*k);
+        }
+        self.class(c)
     }
 
     /// Node `c`'s class, if it has an e-node.
@@ -907,9 +918,6 @@ impl<'a, 'b> Link<'a, 'b> {
         Class { card: Int::new_const(base.as_str()), columns, exprs: HashMap::new() }
     }
 }
-
-/// The kinds [`Link::enode`] builds: 2 aggregates, 3 joins, 4 limits.
-const STAGE: u8 = 3;
 
 /// A union-find over every analyzer node, each `Spj` with the mapping of
 /// its inputs onto its parent's (none for other kinds).
