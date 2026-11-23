@@ -317,6 +317,7 @@ fn plan(bench: &Benchmark, builders: &Builders, sw: &Switches, q_ref: &[String],
 /// The run's checks: unsound bounds, trials that disagree given the same
 /// plans (at k = n, every trial),
 /// non-monotone steps, records whose checks ran out of budget, errors.
+#[allow(clippy::type_complexity)]
 fn check(records: &[Record]) -> Value {
     let unsound: Vec<String> = records
         .iter()

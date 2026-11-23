@@ -313,7 +313,7 @@ fn audit(builders: &Builders, planned: &[Planned], outcomes: &BTreeMap<usize, Re
 
 fn progress(done: usize, total: usize, started: Instant, job: &Job) {
     let every = (total / 100).max(1);
-    if done % every == 0 || done == total {
+    if done.is_multiple_of(every) || done == total {
         let el = started.elapsed().as_secs_f64();
         let eta = el / done as f64 * (total - done) as f64;
         eprintln!("[{done}/{total}] {:.0} s, ~{:.0} s left ({} with {} plans)", el, eta, job.target, job.plans.len());
