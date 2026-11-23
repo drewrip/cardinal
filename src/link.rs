@@ -89,7 +89,7 @@ use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Column, DFSchema, DataFusionError, NullEquality, TableReference};
 use datafusion::logical_expr::logical_plan::{Distinct, FetchType, JoinType, LogicalPlan, SkipType};
 use datafusion::logical_expr::utils::split_conjunction_owned;
-use datafusion::logical_expr::{BinaryExpr, Expr, Operator, binary_expr};
+use datafusion::logical_expr::{BinaryExpr, Expr, ExprSchemable, Operator, binary_expr};
 use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
@@ -472,7 +472,10 @@ impl<'a, 'b> Link<'a, 'b> {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
                 let over = |e: &Expr| substitute(e, agg.input.schema(), &columns).map(ordered);
                 let keys = agg.group_expr.iter().map(over).collect::<Option<Vec<Expr>>>()?;
-                ENode::Agg { input, keys, aggs: agg.aggr_expr.iter().map(over).collect() }
+                match self.regrouped(node.inputs[0], &keys, agg.aggr_expr.len()) {
+                    Some(e) => e,
+                    None => ENode::Agg { input, keys, aggs: agg.aggr_expr.iter().map(over).collect() },
+                }
             }
             LogicalPlan::Distinct(Distinct::All(_)) => {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
@@ -493,6 +496,22 @@ impl<'a, 'b> Link<'a, 'b> {
             e => e.columns().len(),
         };
         (width == node.ndv_vars.len()).then_some(e)
+    }
+
+    /// A `GROUP BY` of `keys` over node `c`, as a `GROUP BY` of `c`'s input
+    /// if `c` is a `GROUP BY` and `keys` some of its keys: its groups'
+    /// values of them are its input's. Its aggregates, over groups, are
+    /// opaque.
+    fn regrouped(&self, c: usize, keys: &[Expr], aggs: usize) -> Option<ENode> {
+        let Some(ENode::Agg { input, keys: inner, .. }) = &self.enodes[c] else { return None };
+        let keys: Vec<Expr> = keys
+            .iter()
+            .map(|k| match k {
+                Expr::Column(k) if instance(k) == Some(0) => inner.iter().find(|i| i.to_string() == k.name).cloned(),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        Some(ENode::Agg { input: *input, keys, aggs: vec![None; aggs] })
     }
 
     /// Node `c`'s class, if it has an e-node.
@@ -644,7 +663,11 @@ impl<'a, 'b> Link<'a, 'b> {
             RightSemi | RightAnti => rc,
             _ => both,
         };
-        Some(ENode::Join { kind, null_aware: j.null_aware, left: first.0, right: second.0, on: canonical(on), columns })
+        // NULL-aware only where a key may be NULL: else as any anti join.
+        let nullable = |e: &Expr, s: &DFSchema| e.nullable(s).unwrap_or(true);
+        let null_aware = j.null_aware
+            && (j.filter.is_some() || j.on.iter().any(|(l, r)| nullable(l, j.left.schema()) || nullable(r, j.right.schema())));
+        Some(ENode::Join { kind, null_aware, left: first.0, right: second.0, on: canonical(on), columns })
     }
 
     /// Asserts each class's `eq link`s, then what relates the classes.
@@ -886,7 +909,7 @@ impl<'a, 'b> Link<'a, 'b> {
 }
 
 /// The kinds [`Link::enode`] builds: 2 aggregates, 3 joins, 4 limits.
-const STAGE: u8 = 2;
+const STAGE: u8 = 3;
 
 /// A union-find over every analyzer node, each `Spj` with the mapping of
 /// its inputs onto its parent's (none for other kinds).
@@ -1286,9 +1309,14 @@ fn sorted(mut es: Vec<Expr>) -> Vec<Expr> {
     es
 }
 
-/// `e` with each comparison's operands in `Display` order.
+/// `e` with each comparison's operands, and each `IN` list, in `Display`
+/// order.
 fn ordered(e: Expr) -> Expr {
     e.transform_up(|x| match x {
+        Expr::InList(mut l) => {
+            l.list = sorted(l.list);
+            Ok(Transformed::yes(Expr::InList(l)))
+        }
         Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op.swap() {
             Some(swapped) if left.to_string() > right.to_string() => {
                 Ok(Transformed::yes(Expr::BinaryExpr(BinaryExpr { left: right, op: swapped, right: left })))
