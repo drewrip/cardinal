@@ -351,7 +351,7 @@ fn date_part(e: Expr) -> Transformed<Expr> {
 
 /// `x LIKE 'abc%'`, `'%abc'` and `'%abc%'` as `starts_with`, `ends_with`
 /// and `contains`, as DuckDB prints them.
-fn like(e: Expr) -> Transformed<Expr> {
+pub(crate) fn like(e: Expr) -> Transformed<Expr> {
     let Expr::Like(l) = &e else { return Transformed::no(e) };
     let Expr::Literal(ScalarValue::Utf8(Some(p)) | ScalarValue::Utf8View(Some(p)) | ScalarValue::LargeUtf8(Some(p)), _) =
         l.pattern.as_ref()

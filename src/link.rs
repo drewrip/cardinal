@@ -94,6 +94,7 @@ use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
 use crate::analysis::{Analyzer, inexact_filters, product, solver_with_limits};
+use crate::observed;
 use crate::predicates::Encoder;
 use crate::properties::{self, Pair};
 use crate::rules::{grouping_sets, opaque};
@@ -467,7 +468,6 @@ impl<'a, 'b> Link<'a, 'b> {
             | LogicalPlan::Repartition(_) => ENode::Spj(self.spj(i)?),
             LogicalPlan::Join(j) if j.join_type == JoinType::Inner => ENode::Spj(self.spj(i)?),
             LogicalPlan::Sort(s) if s.fetch.is_none() => ENode::Spj(self.spj(i)?),
-            _ if !OTHER_KINDS => return None,
             LogicalPlan::Aggregate(agg) if !grouping_sets(agg) => {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
                 let over = |e: &Expr| substitute(e, agg.input.schema(), &columns).map(ordered);
@@ -478,9 +478,9 @@ impl<'a, 'b> Link<'a, 'b> {
                 let (input, _, columns) = self.rows(node.inputs[0])?;
                 ENode::Agg { input, keys: columns.into_iter().collect::<Option<_>>()?, aggs: vec![] }
             }
-            LogicalPlan::Join(j) => self.join(i, j)?,
-            LogicalPlan::Sort(s) => ENode::Limit { input: self.class(node.inputs[0])?, skip: 0, fetch: s.fetch },
-            LogicalPlan::Limit(l) => {
+            LogicalPlan::Join(j) if STAGE >= 3 => self.join(i, j)?,
+            LogicalPlan::Sort(s) if STAGE >= 4 => ENode::Limit { input: self.class(node.inputs[0])?, skip: 0, fetch: s.fetch },
+            LogicalPlan::Limit(l) if STAGE >= 4 => {
                 let (Ok(SkipType::Literal(skip)), Ok(FetchType::Literal(fetch))) = (l.get_skip_type(), l.get_fetch_type()) else {
                     return None;
                 };
@@ -885,8 +885,8 @@ impl<'a, 'b> Link<'a, 'b> {
     }
 }
 
-/// Whether [`Link::enode`] builds e-nodes other than `Spj`.
-const OTHER_KINDS: bool = false;
+/// The kinds [`Link::enode`] builds: 2 aggregates, 3 joins, 4 limits.
+const STAGE: u8 = 2;
 
 /// A union-find over every analyzer node, each `Spj` with the mapping of
 /// its inputs onto its parent's (none for other kinds).
@@ -1269,10 +1269,12 @@ fn substitute(e: &Expr, schema: &DFSchema, columns: &[Option<Expr>]) -> Option<E
 }
 
 /// The conjuncts of `preds`, without aliases, each comparison's operands
-/// in `Display` order, sorted by `Display` and deduplicated.
+/// in `Display` order and each `LIKE` as observed plans read it
+/// ([`observed::like`]), sorted by `Display` and deduplicated.
 fn canonical(preds: Vec<Expr>) -> Vec<Expr> {
+    let like = |e: Expr| e.transform_up(|x| Ok(observed::like(x))).map(|t| t.data).expect("rewriting LIKE cannot fail");
     let out: Vec<Expr> =
-        preds.into_iter().flat_map(split_conjunction_owned).map(|e| ordered(e.unalias_nested().data)).collect();
+        preds.into_iter().flat_map(split_conjunction_owned).map(|e| ordered(like(e.unalias_nested().data))).collect();
     sorted(out)
 }
 
