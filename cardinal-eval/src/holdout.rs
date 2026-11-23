@@ -10,16 +10,15 @@
 //! name order, so a job's result does not depend on the trial's order.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
-
 use anyhow::{Result, bail};
 use cardinal::{Limits, Operator};
 use clap::{Args, ValueEnum};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use crate::bench::{Benchmark, default_data};
-use crate::jobs::{Builders, Job, Planned, Pool, What, run_all};
-use crate::record::{Record, Run, host, memory_bytes, physical_cores, revision, utc_stamp};
+use crate::bench::Benchmark;
+use crate::eval::{Common, finish};
+use crate::jobs::{Builders, Job, Planned, What, run_all};
+use crate::record::Record;
 use crate::rng::permuted;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Serialize)]
@@ -41,30 +40,16 @@ pub enum Grid {
     Log,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Timing {
-    /// As many jobs at once as `--threads`: times are inflated.
-    Contended,
-    /// One job at a time, pinned to one core.
-    Exclusive,
-}
-
 #[derive(Debug, Args)]
 pub struct HoldoutArgs {
-    #[arg(long)]
-    pub bench: String,
-    #[arg(long, default_value_os_t = default_data())]
-    pub data: PathBuf,
-    #[arg(long, default_value_os_t = default_results())]
-    pub results: PathBuf,
+    #[command(flatten)]
+    pub common: Common,
     /// Default: core for JOB, root elsewhere.
     #[arg(long, value_enum)]
     pub target: Option<Target>,
     /// Default: 10; 5 with --operators, 3 with --unbounded.
     #[arg(long)]
     pub trials: Option<u32>,
-    #[arg(long, default_value_t = 0)]
-    pub seed: u64,
     /// Default: full for TPC-H, log elsewhere and with --unbounded.
     #[arg(long, value_enum)]
     pub grid: Option<Grid>,
@@ -74,37 +59,12 @@ pub struct HoldoutArgs {
     /// No k above this.
     #[arg(long)]
     pub max_k: Option<usize>,
-    /// Default: the physical cores.
-    #[arg(long)]
-    pub threads: Option<usize>,
-    /// Give every table's row count, at every k.
-    #[arg(long)]
-    pub cardinalities: bool,
-    /// No Z3 budget: `Limits::unbounded`.
-    #[arg(long)]
-    pub unbounded: bool,
     /// DSB: the first N instances of each template.
     #[arg(long, default_value_t = 1)]
     pub instances: u32,
     /// Bound every operator, not one target (§3).
     #[arg(long)]
     pub operators: bool,
-    #[arg(long, value_enum, default_value = "contended")]
-    pub timing: Timing,
-    /// Jobs run again alone after the run, which must agree.
-    #[arg(long, default_value_t = 20)]
-    pub audit: usize,
-    /// Start no job while the process uses more, in GiB. Default: 80 % of
-    /// the memory.
-    #[arg(long)]
-    pub max_memory: Option<f64>,
-    /// Continue the run in this directory.
-    #[arg(long)]
-    pub resume: Option<PathBuf>,
-}
-
-pub fn default_results() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("results")
 }
 
 /// The switches that shape a run's results, resolved.
@@ -124,18 +84,19 @@ struct Switches {
 
 impl HoldoutArgs {
     fn switches(&self) -> Switches {
-        let trials = self.trials.unwrap_or(if self.unbounded { 3 } else if self.operators { 5 } else { 10 });
-        let grid = self.grid.unwrap_or(if self.bench == "tpch" && !self.unbounded { Grid::Full } else { Grid::Log });
-        let target = self.target.unwrap_or(if self.bench == "job" { Target::Core } else { Target::Root });
+        let c = &self.common;
+        let trials = self.trials.unwrap_or(if c.unbounded { 3 } else if self.operators { 5 } else { 10 });
+        let grid = self.grid.unwrap_or(if c.bench == "tpch" && !c.unbounded { Grid::Full } else { Grid::Log });
+        let target = self.target.unwrap_or(if c.bench == "job" { Target::Core } else { Target::Root });
         Switches {
             target,
             trials,
-            seed: self.seed,
+            seed: c.seed,
             grid,
             only: self.only.clone(),
             max_k: self.max_k,
-            cardinalities: self.cardinalities,
-            unbounded: self.unbounded,
+            cardinalities: c.cardinalities,
+            unbounded: c.unbounded,
             instances: self.instances,
             operators: self.operators,
         }
@@ -179,7 +140,8 @@ pub fn joins(ops: &[Operator], id: usize) -> usize {
 }
 
 pub async fn holdout(args: HoldoutArgs) -> Result<()> {
-    let bench = Benchmark::load(&args.data, &args.bench).await?;
+    let c = &args.common;
+    let bench = Benchmark::load(&c.data, &c.bench).await?;
     bench.require_prepared()?;
     let sw = args.switches();
     if sw.operators && bench.operator_truth.is_empty() {
@@ -191,42 +153,14 @@ pub async fn holdout(args: HoldoutArgs) -> Result<()> {
     if targets.is_empty() {
         bail!("no targets");
     }
-    let limits = if sw.unbounded { Limits::unbounded() } else { Limits::default() };
-    let threads = args.threads.unwrap_or_else(physical_cores);
-    let max_memory = args.max_memory.map(|g| (g * (1u64 << 30) as f64) as u64).unwrap_or_else(|| memory_bytes().unwrap_or(u64::MAX) / 5 * 4);
-
-    let meta = json!({
-        "eval": "holdout",
-        "bench": bench.name,
-        "manifest": bench.manifest,
-        "revision": revision(),
-        "switches": sw,
-        "options": {"max_product": bench.options().max_product, "foreign_keys": bench.foreign_keys.len(), "limits": format!("{limits:?}")},
-        "q_ref": q_ref,
-        "q_target": targets,
-        "templates": targets.iter().map(|q| (q.clone(), bench.queries[q].template.clone())).collect::<BTreeMap<_, _>>(),
-        "threads": threads,
-        "timing": if args.timing == Timing::Exclusive { "exclusive" } else { "contended" },
-        "host": host(),
-        "start": utc_stamp(),
-    });
-    let run = match &args.resume {
-        Some(dir) => Run::resume(dir, &meta)?,
-        None => Run::create(&args.results, "holdout", &bench.name, &meta)?,
-    };
-    eprintln!("run: {}", run.dir.display());
-
+    let meta = c.meta("holdout", &bench, json!(sw), &q_ref, &targets);
+    let run = c.run("holdout", &bench.name, &meta)?;
     let builders = Builders::new(&bench, &targets).await?;
-    let mut planned = plan(&bench, &builders, &sw, &q_ref, &targets, limits)?;
-    let pool = Pool { threads, exclusive: args.timing == Timing::Exclusive, max_memory, audit: args.audit, seed: sw.seed };
-    let done = run_all(&builders, &mut planned, &run, &pool)?;
-
-    let summary = check(&crate::record::latest(crate::record::read_records(&run.dir)?));
-    run.finish(json!({"peak_rss_bytes": done.peak_rss, "checks": summary}))?;
-    eprintln!("{}", serde_json::to_string_pretty(&summary)?);
-    eprintln!("run: {}", run.dir.display());
-    if summary["unsound"].as_array().is_some_and(|a| !a.is_empty()) || summary["same_plans_disagree"].as_array().is_some_and(|a| !a.is_empty()) {
-        bail!("unsound bounds, or trials that disagree given the same plans");
+    let mut planned = plan(&bench, &builders, &sw, &q_ref, &targets, c.limits())?;
+    let done = run_all(&builders, &mut planned, &run, &c.pool())?;
+    let checks = finish(&run, done.peak_rss, check)?;
+    if checks["same_plans_disagree"].as_array().is_some_and(|a| !a.is_empty()) {
+        bail!("trials disagree given the same plans");
     }
     Ok(())
 }
@@ -314,35 +248,12 @@ fn plan(bench: &Benchmark, builders: &Builders, sw: &Switches, q_ref: &[String],
     Ok(jobs.into_values().collect())
 }
 
-/// The run's checks: unsound bounds, trials that disagree given the same
-/// plans (at k = n, every trial),
-/// non-monotone steps, records whose checks ran out of budget, errors.
+/// The holdout's own checks: trials that disagree given the same plans
+/// (at k = n, every trial), and non-monotone steps.
 #[allow(clippy::type_complexity)]
-fn check(records: &[Record]) -> Value {
-    let unsound: Vec<String> = records
-        .iter()
-        .filter(|r| r.holds == Some(false))
-        .map(|r| format!("{}: {:?} <= X <= {:?}, truth {:?}", r.key(), r.lower, r.upper, r.truth))
-        .collect();
-    for u in &unsound {
-        eprintln!("UNSOUND {u}");
-    }
-    let errors: Vec<String> = records.iter().filter_map(|r| r.error.as_ref().map(|e| format!("{}: {e}", r.key()))).collect();
-    let limited: Vec<String> = records
-        .iter()
-        .filter(|r| {
-            let b = r.build.as_ref().map_or(0, |b| b.link_checks.limited);
-            b + r.search.map_or(0, |s| s.limited) > 0
-        })
-        .map(Record::key)
-        .collect();
-    let timed_out = records
-        .iter()
-        .filter(|r| r.build.as_ref().map_or(0, |b| b.link_checks.timed_out) + r.search.map_or(0, |s| s.timed_out) > 0)
-        .count();
-
+fn check(records: &[Record]) -> Map<String, Value> {
     // Per (target, operator, plans given as a set): the bounds, which must
-    // be one (at k = n, every trial's).
+    // be one.
     let mut same: BTreeMap<(String, Option<usize>, Vec<String>), BTreeSet<(u64, Option<u64>)>> = BTreeMap::new();
     // Per (target, operator, trial): upper bounds by k.
     let mut steps: BTreeMap<(String, Option<usize>, Option<u32>), Vec<(usize, Option<u64>)>> = BTreeMap::new();
@@ -368,16 +279,10 @@ fn check(records: &[Record]) -> Value {
             }
         }
     }
-    json!({
-        "records": records.len(),
-        "unsound": unsound,
-        "same_plans_disagree": disagree,
-        "non_monotone": non_monotone,
-        "limited": limited.len(),
-        "limited_records": limited,
-        "timed_out": timed_out,
-        "errors": errors,
-    })
+    let mut m = Map::new();
+    m.insert("same_plans_disagree".into(), json!(disagree));
+    m.insert("non_monotone".into(), json!(non_monotone));
+    m
 }
 
 #[cfg(test)]

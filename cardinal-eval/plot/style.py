@@ -144,16 +144,20 @@ def pct(values, p):
 # The ∞ strip.
 
 
+def strip_levels(finite_max):
+    """Where the finite range of a log Q-error axis ends (`top`), where the
+    ∞ strip starts (`brk`), and where ∞ is drawn (`inf`)."""
+    top = 10 ** math.ceil(math.log10(max(finite_max, 10.0)) + 1e-9)
+    return top, top * 10**0.35, top * 10**0.75
+
+
 class Strip:
     """A log Q-error axis with a strip above for ∞: values at ∞ are drawn
     at `self.inf`, set off from the finite range by a broken-axis mark."""
 
     def __init__(self, ax, finite_max, finite_min=1.0):
         self.ax = ax
-        top = max(finite_max, 10.0)
-        self.top = 10 ** math.ceil(math.log10(top) + 1e-9)
-        self.brk = self.top * 10**0.35
-        self.inf = self.top * 10**0.75
+        self.top, self.brk, self.inf = strip_levels(finite_max)
         ax.set_yscale("log")
         ax.set_ylim(max(finite_min, 1.0) / 1.3, self.top * 10**1.0)
         ax.yaxis.set_major_locator(LogLocator(base=10, numticks=12))

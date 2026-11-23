@@ -54,6 +54,10 @@ struct Cli {
     /// analyzable query a target.
     #[arg(long)]
     no_operators: bool,
+    /// Seconds one query's validation may take: a query slower has no
+    /// operator truth, and is no target.
+    #[arg(long, default_value_t = 900)]
+    timeout: u64,
 }
 
 fn main() -> Result<()> {
@@ -106,7 +110,7 @@ fn main() -> Result<()> {
             true => BTreeMap::new(),
             false => read_json_or_default(&bench.dir.join("operator_truth.json"))?,
         };
-        let results = validate_all(&bench, &todo, cli.jobs)?;
+        let results = validate_all(&bench, &todo, cli.jobs, cli.timeout)?;
         for (q, result) in results {
             match result {
                 Ok(t) => {
@@ -158,7 +162,7 @@ struct Truth {
 
 /// [`validate`] of each of `queries`, `jobs` at once, each worker on a
 /// thread of its own with its own Parquet context.
-fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize) -> Result<Vec<(String, Result<Truth>)>> {
+fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64) -> Result<Vec<(String, Result<Truth>)>> {
     let queue = Mutex::new(queries.iter().rev().cloned().collect::<Vec<_>>());
     let out = Mutex::new(vec![]);
     std::thread::scope(|s| -> Result<()> {
@@ -170,7 +174,10 @@ fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize) -> Result<Ve
                 loop {
                     let Some(q) = queue.lock().unwrap().pop() else { return Ok(()) };
                     let start = std::time::Instant::now();
-                    let r = rt.block_on(validate(bench, &ctx, &q));
+                    let limit = std::time::Duration::from_secs(timeout);
+                    let r = rt
+                        .block_on(async { tokio::time::timeout(limit, validate(bench, &ctx, &q)).await })
+                        .unwrap_or_else(|_| Err(anyhow!("timed out after {timeout} s")));
                     eprintln!("{q}: {:.1} s{}", start.elapsed().as_secs_f64(), r.as_ref().err().map(|e| format!(": {e:#}")).unwrap_or_default());
                     out.lock().unwrap().push((q, r));
                 }

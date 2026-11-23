@@ -4,6 +4,8 @@
 //! See `EVAL.md` at the repository's root for the plan.
 
 pub mod bench;
+pub mod eval;
+pub mod own_plan;
 pub mod holdout;
 pub mod jobs;
 pub mod record;

@@ -1,0 +1,306 @@
+{
+    "io": {
+        "total_bytes_read": 9175040,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 3.62e-7,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Top": "100",
+                                "Order By": "i_item_id ASC",
+                                "Estimated Cardinality": "100"
+                            },
+                            "intermediate_rows": 2,
+                            "intermediate_size_bytes": 8264,
+                            "timing": 0.000036736,
+                            "type": "TOP_N",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Groups": [
+                                            "#0",
+                                            "#1",
+                                            "#2"
+                                        ],
+                                        "Aggregates": "",
+                                        "Estimated Cardinality": "3512668"
+                                    },
+                                    "intermediate_rows": 2,
+                                    "intermediate_size_bytes": 72,
+                                    "timing": 0.002026412,
+                                    "type": "HASH_GROUP_BY",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Projections": [
+                                                    "i_item_id",
+                                                    "i_item_desc",
+                                                    "i_current_price"
+                                                ],
+                                                "Estimated Cardinality": "3512675"
+                                            },
+                                            "intermediate_rows": 8058,
+                                            "intermediate_size_bytes": 290088,
+                                            "timing": 0.000006254999999999999,
+                                            "type": "PROJECTION",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Join Type": "INNER",
+                                                        "Conditions": "ss_item_sk = i_item_sk",
+                                                        "Estimated Cardinality": "3512675"
+                                                    },
+                                                    "intermediate_rows": 8058,
+                                                    "intermediate_size_bytes": 354552,
+                                                    "timing": 0.0020702190000000007,
+                                                    "type": "HASH_JOIN",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Table": "tpcds.main.store_sales",
+                                                                "Type": "Sequential Scan",
+                                                                "Projections": "ss_item_sk",
+                                                                "Dynamic Filters": "(optional: (ss_item_sk IN (10123, 11300)) AND optional: ss_item_sk IN PRF(i_item_sk))",
+                                                                "Estimated Cardinality": "2880404"
+                                                            },
+                                                            "intermediate_rows": 506,
+                                                            "intermediate_size_bytes": 4048,
+                                                            "row_groups_scanned": 24,
+                                                            "rows_scanned": 2880404,
+                                                            "timing": 0.020820365999999993,
+                                                            "total_row_groups_to_scan": 24,
+                                                            "type": "TABLE_SCAN"
+                                                        },
+                                                        {
+                                                            "extra_info": {
+                                                                "Join Type": "INNER",
+                                                                "Conditions": "inv_date_sk = d_date_sk",
+                                                                "Estimated Cardinality": "20309"
+                                                            },
+                                                            "intermediate_rows": 34,
+                                                            "intermediate_size_bytes": 11024,
+                                                            "timing": 0.000302009,
+                                                            "type": "HASH_JOIN",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Join Type": "INNER",
+                                                                        "Conditions": "inv_item_sk = i_item_sk",
+                                                                        "Estimated Cardinality": "101553"
+                                                                    },
+                                                                    "intermediate_rows": 34,
+                                                                    "intermediate_size_bytes": 10792,
+                                                                    "timing": 0.000272238,
+                                                                    "type": "HASH_JOIN",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Table": "tpcds.main.inventory",
+                                                                                "Type": "Sequential Scan",
+                                                                                "Projections": [
+                                                                                    "inv_item_sk",
+                                                                                    "inv_date_sk"
+                                                                                ],
+                                                                                "Filters": "((inv_quantity_on_hand >= 100) AND (inv_quantity_on_hand <= 500))",
+                                                                                "Dynamic Filters": [
+                                                                                    "(optional: (inv_item_sk IN (8514, 10123, 11300, 13677)) AND optional: inv_item_sk IN PRF(i_item_sk))",
+                                                                                    "optional: inv_date_sk IN PRF(d_date_sk)"
+                                                                                ],
+                                                                                "Estimated Cardinality": "2349000"
+                                                                            },
+                                                                            "intermediate_rows": 34,
+                                                                            "intermediate_size_bytes": 544,
+                                                                            "row_groups_scanned": 5,
+                                                                            "rows_scanned": 611183,
+                                                                            "timing": 0.006658728000000002,
+                                                                            "total_row_groups_to_scan": 96,
+                                                                            "type": "TABLE_SCAN"
+                                                                        },
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Projections": [
+                                                                                    "#0",
+                                                                                    "#1",
+                                                                                    "#3",
+                                                                                    "#4"
+                                                                                ],
+                                                                                "Estimated Cardinality": "720"
+                                                                            },
+                                                                            "intermediate_rows": 4,
+                                                                            "intermediate_size_bytes": 8368,
+                                                                            "timing": 9.48e-7,
+                                                                            "type": "PROJECTION",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Expression": "((i_manufact_id = 129) OR (i_manufact_id = 270) OR (i_manufact_id = 821) OR (i_manufact_id = 423))",
+                                                                                        "Estimated Cardinality": "720"
+                                                                                    },
+                                                                                    "intermediate_rows": 4,
+                                                                                    "intermediate_size_bytes": 8400,
+                                                                                    "timing": 0.00010255800000000002,
+                                                                                    "type": "FILTER",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "tpcds.main.item",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": [
+                                                                                                    "i_current_price",
+                                                                                                    "i_item_sk",
+                                                                                                    "i_manufact_id",
+                                                                                                    "i_item_id",
+                                                                                                    "i_item_desc"
+                                                                                                ],
+                                                                                                "Filters": [
+                                                                                                    "((i_current_price >= 62.00) AND (i_current_price <= 92.00))",
+                                                                                                    "optional: (i_manufact_id IN (129, 270, 423, 821))"
+                                                                                                ],
+                                                                                                "Estimated Cardinality": "3600"
+                                                                                            },
+                                                                                            "intermediate_rows": 620,
+                                                                                            "intermediate_size_bytes": 3170752,
+                                                                                            "row_groups_scanned": 1,
+                                                                                            "rows_scanned": 18000,
+                                                                                            "timing": 0.0042278459999999995,
+                                                                                            "total_row_groups_to_scan": 1,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Expression": "(d_date_sk BETWEEN 2450815 AND 2452635)",
+                                                                        "Estimated Cardinality": "14609"
+                                                                    },
+                                                                    "intermediate_rows": 61,
+                                                                    "intermediate_size_bytes": 488,
+                                                                    "timing": 0.00003053,
+                                                                    "type": "FILTER",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Table": "tpcds.main.date_dim",
+                                                                                "Type": "Sequential Scan",
+                                                                                "Projections": "d_date_sk",
+                                                                                "Filters": "((d_date >= '2000-05-25'::DATE) AND (d_date <= '2000-07-24'::DATE))",
+                                                                                "Estimated Cardinality": "14609"
+                                                                            },
+                                                                            "intermediate_rows": 61,
+                                                                            "intermediate_size_bytes": 488,
+                                                                            "row_groups_scanned": 1,
+                                                                            "rows_scanned": 73049,
+                                                                            "timing": 0.000505063,
+                                                                            "total_row_groups_to_scan": 1,
+                                                                            "type": "TABLE_SCAN"
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000009555,
+        "aggregate_reuse": 0.000008389,
+        "build_side_probe_side": 0.000035577,
+        "column_lifetime": 0.000033255,
+        "common_aggregate": 0.000004434,
+        "common_subexpressions": 0.000002914,
+        "common_subplan": 0.000249141,
+        "cte_filter_pusher": 0.000001088,
+        "cte_inlining": 0.000001001,
+        "deliminator": 0.000002002,
+        "duplicate_groups": 0.000008933,
+        "empty_result_pullup": 0.000001165,
+        "expression_rewriter": 0.00027427,
+        "filter_pullup": 0.000002502,
+        "filter_pushdown": 0.000201766,
+        "grouping_sets": 0.000002967,
+        "in_clause": 0.000008633,
+        "join_elimination": 0.000127394,
+        "join_filter_pushdown": 0.000094209,
+        "join_order": 0.000349042,
+        "late_materialization": 0.00000151,
+        "limit_pushdown": 9e-7,
+        "outer_join_simplification": 0.000010106,
+        "partial_aggregate_pushdown": 0.000004075,
+        "partitioned_execution": 0.000001625,
+        "projection_placement": 0.000004257,
+        "projection_pullup": 0.000008301,
+        "redundant_order_keys": 0.00000925,
+        "regex_range": 0.000013488,
+        "reorder_filter": 0.000008273,
+        "row_group_pruner": 0.00000129,
+        "row_number_rewriter": 0.000001069,
+        "sampling_pushdown": 6.99e-7,
+        "scalar_fn_pushdown": 6.7e-7,
+        "statistics_propagation": 0.00012274,
+        "top_n": 0.00000455,
+        "top_n_window_elimination": 0.000005434,
+        "total_time": 0.001862269,
+        "type_pushdown": 0.000001051,
+        "unnest_rewriter": 0.000001736,
+        "unused_columns": 0.000067136,
+        "window_self_join": 0.000006092
+    },
+    "parser": {
+        "total_time": 0.001605859
+    },
+    "physical_planner": {
+        "column_binding": 0.000013867,
+        "create_plan": 0.000115701,
+        "resolve_types": 0.000002287,
+        "total_time": 0.000143761
+    },
+    "planner": {
+        "binding_time": 0.00630781,
+        "total_time": 0.006536675
+    },
+    "query": {
+        "cpu_time": 0.03706027,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nSELECT i_item_id ,\n       i_item_desc ,\n       i_current_price\nFROM item,\n     inventory,\n     date_dim,\n     store_sales\nWHERE i_current_price BETWEEN 62 AND 62+30\n  AND inv_item_sk = i_item_sk\n  AND d_date_sk=inv_date_sk\n  AND d_date BETWEEN cast('2000-05-25' AS date) AND cast('2000-07-24' AS date)\n  AND i_manufact_id IN (129,\n                        270,\n                        821,\n                        423)\n  AND inv_quantity_on_hand BETWEEN 100 AND 500\n  AND ss_item_sk = i_item_sk\nGROUP BY i_item_id,\n         i_item_desc,\n         i_current_price\nORDER BY i_item_id\nLIMIT 100\n;",
+        "total_intermediate_rows": 17478,
+        "total_intermediate_size_bytes": 3867880,
+        "total_row_groups_scanned": 31,
+        "total_row_groups_to_scan": 122,
+        "total_rows_scanned": 3582636,
+        "total_time": 0.050188657
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 15854848,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 7864320
+    }
+}

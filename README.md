@@ -46,10 +46,11 @@ See the API docs with `cargo doc --open`.
 ## Evaluations
 
 ```sh
-cardinal-eval/prepare/tpch.sh                     # prebake data/tpch (DuckDB 2.0)
+cardinal-eval/prepare/tpch.sh                     # prebake data/tpch (DuckDB 2.0); also tpcds.sh
 cargo run --release -p cardinal-eval -- info --bench tpch
 cargo run --release -p cardinal-eval -- holdout --bench tpch [--target core] [--cardinalities] [--unbounded]
-cd cardinal-eval && uv run plot/holdout.py results/holdout/<run> [--summary]
+cargo run --release -p cardinal-eval -- own-plan --bench tpcds [--unbounded]
+cd cardinal-eval && uv run plot/holdout.py results/holdout/<run> [--summary]   # also own_plan.py
 uv run plot/runtime.py results/holdout/<run>  # of a --timing exclusive run
 ```
 

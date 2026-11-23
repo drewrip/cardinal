@@ -24,10 +24,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
-def duck(db, sql, readonly=False, fmt="-json"):
+def duck(db, sql, readonly=False, fmt="-json", timeout=None):
     env = {k: v for k, v in os.environ.items() if k != "AI_AGENT"}
     args = ["duckdb"] + (["-readonly"] if readonly else []) + [fmt, str(db)]
-    r = subprocess.run(args, input=sql, capture_output=True, text=True, env=env)
+    try:
+        r = subprocess.run(args, input=sql, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"timed out after {timeout} s")
     if r.returncode != 0 or r.stderr.strip().startswith("Error"):
         raise RuntimeError(f"{sql[:200]}: {r.stderr.strip()}")
     return r.stdout
@@ -107,12 +110,16 @@ def parquet(db, out):
             duck(db, f"COPY {t} TO '{path}' (FORMAT parquet);", readonly=True)
 
 
+# Seconds a profile may take; a query slower is no reference plan.
+PROFILE_TIMEOUT = int(os.environ.get("PROFILE_TIMEOUT", "1800"))
+
+
 def profile_one(db, sql_path, json_path):
     sql = sql_path.read_text().strip().rstrip(";")
     script = ("PRAGMA disable_print_progress_bar;\nSET threads = 1;\n"
               f"EXPLAIN (ANALYZE, FORMAT JSON)\n{sql}\n;\n")
     try:
-        text = duck(db, script, readonly=True, fmt="-list")
+        text = duck(db, script, readonly=True, fmt="-list", timeout=PROFILE_TIMEOUT)
     except RuntimeError as e:
         return str(e)
     start = text.find("\n{") + 1 if not text.startswith("{") else 0

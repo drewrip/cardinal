@@ -17,6 +17,8 @@ struct Cli {
 enum Eval {
     /// How a query's Q-error falls as more of the workload's plans are given.
     Holdout(cardinal_eval::holdout::HoldoutArgs),
+    /// Each query bounded with its own plan.
+    OwnPlan(cardinal_eval::own_plan::OwnPlanArgs),
     /// Summarize a prebaked benchmark: its queries, profiles and query sets.
     Info {
         #[arg(long)]
@@ -31,6 +33,7 @@ async fn main() -> Result<()> {
     match Cli::parse().eval {
         Eval::Info { bench, data } => info(&Benchmark::load(&data, &bench).await?),
         Eval::Holdout(args) => cardinal_eval::holdout::holdout(args).await,
+        Eval::OwnPlan(args) => cardinal_eval::own_plan::own_plan(args).await,
     }
 }
 
