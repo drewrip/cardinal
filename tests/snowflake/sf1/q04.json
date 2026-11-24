@@ -1,0 +1,223 @@
+[
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "ORDERS.O_ORDERPRIORITY",
+    "COUNT(*)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Sort",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 5,
+   "output_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "sort_keys": [
+    "ORDERS.O_ORDERPRIORITY ASC NULLS LAST"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 40,
+   "output_rows": 5
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "ORDERS.O_ORDERPRIORITY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 52523,
+   "output_rows": 40
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "ORDERS.O_ORDERPRIORITY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 211286,
+   "output_rows": 52523
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "equality_join_condition": "(ORDERS.O_ORDERKEY = LINEITEM.L_ORDERKEY)",
+   "join_type": "SEMI"
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 57218,
+   "output_rows": 57218
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)"
+   ],
+   "grouping_keys": [
+    "ORDERS.O_ORDERPRIORITY",
+    "ORDERS.O_ORDERKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   5
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 57218,
+   "output_rows": 57218
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(ORDERS.O_ORDERDATE >= '1993-07-01') AND (ORDERS.O_ORDERDATE < '1993-10-01')"
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 3026944,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 57218,
+   "pruning": {
+    "partitions_scanned": 8,
+    "partitions_total": 8
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_ORDERKEY",
+    "O_ORDERDATE",
+    "O_ORDERPRIORITY"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.ORDERS"
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 8,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 154068,
+   "output_rows": 154068
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "LINEITEM.L_COMMITDATE < LINEITEM.L_RECEIPTDATE"
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 9,
+  "PARENT_OPERATORS": [
+   8
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 154068,
+   "output_rows": 154068
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "4"
+  }
+ },
+ {
+  "QUERY_ID": "q04",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 10,
+  "PARENT_OPERATORS": [
+   9
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 22188032,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 154068,
+   "pruning": {
+    "partitions_scanned": 15,
+    "partitions_total": 15
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_ORDERKEY",
+    "L_COMMITDATE",
+    "L_RECEIPTDATE"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.LINEITEM"
+  }
+ }
+]

@@ -2,7 +2,8 @@
 //! factor 0.01, read and used as reference plans
 //! ([`cardinal::Builder::with_plans`]): which operators are counted, and
 //! that their pins agree with the constraints and the truth. Regenerate the
-//! fixtures with `scripts/snowflake_fixtures.sh`.
+//! fixtures with `scripts/snowflake_fixtures.sh`; `sf1/` holds a few at scale
+//! factor 1, from `cardinal-eval/prepare/engines_tpch.sh`.
 
 mod fixtures;
 
@@ -154,3 +155,23 @@ async fn expressions() {
     assert_eq!(filters.iter().map(|f| f.expr.as_ref().unwrap().to_string()).collect::<Vec<_>>(), [format!("{}.l_shipdate <= Date32(\"1998-09-02\")", p.nodes.iter().find_map(|n| match &n.op { Op::Scan { instance, .. } => Some(instance.clone()), _ => None }).unwrap())]);
 }
 
+
+/// At scale factor 1, Snowflake aggregates in phases on several workers:
+/// below the aggregate that completes them, q04's aggregate outputs a group
+/// per worker (40 rows for 5 priorities), and q12's eager aggregate below
+/// its join passes rows through (30,988 rows for 29,999 groups). Each is
+/// read as its input, what lies between is not counted, and the bounds hold
+/// the truth.
+#[tokio::test]
+async fn partial_aggregates() {
+    let catalog = catalog().await;
+    let options = Options { foreign_keys: foreign_keys(), ..Default::default() };
+    for (name, aggregates) in [("q04", 1), ("q12", 1), ("q19", 1)] {
+        let p = plan("sf1", name).await;
+        assert_eq!(operators(&p, "Aggregate").len(), aggregates, "{p}");
+        assert!(p.nodes[p.root].counted, "{p}");
+        let b = Analysis::plan(&catalog, &p).options(options.clone()).with_plans([&p]).build().unwrap().bounds().unwrap();
+        let truth = p.nodes[p.root].rows;
+        assert!(b.holds(truth) && b.lower == truth, "{name}: {b}, truth {truth}");
+    }
+}

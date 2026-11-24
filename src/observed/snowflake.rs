@@ -35,6 +35,9 @@
 //! - A top-n's input is pruned of what cannot be in its rows (an
 //!   aggregate's groups, by a key it sorts on), and a limit stops its
 //!   input: neither's input is counted.
+//! - An aggregate another completes above it may be partial: a group per
+//!   worker, or rows passed through. It is read as its input, and nothing
+//!   up to the aggregate that completes it is counted.
 //!
 //! What is not printed is not guessed. A `Limit` prints no count, so its
 //! count is the query's (`sql`). An uncorrelated scalar subquery runs as an
@@ -42,7 +45,7 @@
 //! is the last, and that value is not read. Neither are the internal
 //! functions of an aggregation split in phases (`SUM_INTERNAL`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::tree_node::{Transformed, TreeNode};
@@ -99,7 +102,8 @@ pub fn from_snowflake_plan(catalog: &Catalog, name: &str, plan: &QueryPlan, sql:
             (not_in, _) => Some(not_in),
         }
     });
-    let mut b = Builder { catalog, step, text, counted, nodes: vec![], built: HashMap::new(), not_in };
+    let mut b = Builder { catalog, step, text, counted, nodes: vec![], built: HashMap::new(), not_in, partial: Partial::default() };
+    b.partial = b.partials();
     let root = b.node(root)?;
     b.limits();
     b.bloom_filters();
@@ -142,6 +146,20 @@ struct Builder<'a> {
     /// Whether the query's anti joins are `NOT IN` (null-aware), not `NOT
     /// EXISTS`: `None` if it has both, or is not known.
     not_in: Option<bool>,
+    partial: Partial,
+}
+
+/// The aggregates that may be partial ([`Builder::partials`]), by operator
+/// id, and what they leave uncounted.
+#[derive(Default)]
+struct Partial {
+    /// Read as their input.
+    spliced: HashSet<u32>,
+    /// Operators above one, up to the aggregate that completes it: their
+    /// counts are of partial groups.
+    uncounted: HashSet<u32>,
+    /// The aggregates that complete one: their values are not read.
+    completing: HashSet<u32>,
 }
 
 impl<'a> Builder<'a> {
@@ -173,6 +191,7 @@ impl<'a> Builder<'a> {
             }
             // Read into the scan below it, if one.
             ("JoinFilter", [c]) if self.scan_below(c) => return self.node(c),
+            ("Aggregate", [c]) if self.partial.spliced.contains(&n.id) => return self.node(c),
             _ => {}
         }
         let ids = kids.iter().map(|k| self.node(k)).collect::<Result<Vec<_>>>()?;
@@ -190,8 +209,13 @@ impl<'a> Builder<'a> {
             }
             op => (op, columns),
         };
+        let op = match op {
+            Op::Aggregate { keys, values } if self.partial.completing.contains(&n.id) => Op::Aggregate { keys, values: vec![None; values.len()] },
+            op => op,
+        };
         let blocking = matches!(op, Op::Sort | Op::TopN { .. } | Op::Aggregate { .. });
         let (rows, counted) = self.rows(n);
+        let counted = counted && !self.partial.uncounted.contains(&n.id);
         self.nodes.push(ONode { op, rows, counted, children, columns, ordered, blocking, engine_op: n.operator.clone(), cut_short: false });
         Ok(self.nodes.len() - 1)
     }
@@ -202,6 +226,60 @@ impl<'a> Builder<'a> {
             Some(rows) if self.counted => (rows, true),
             _ => (0, false),
         }
+    }
+
+    /// The aggregates that may be partial. Snowflake aggregates in phases on
+    /// several workers: below the aggregate that completes it, an aggregate
+    /// may output a group once per worker, or pass rows through (eager
+    /// aggregation below a join, by its key). One is taken as partial where
+    /// another aggregate above it, through joins, filters and sorts, reads
+    /// its values only in its own aggregates. A partial aggregate keeps its
+    /// input's set of keys, so the one above has as many groups over its
+    /// input: it is read as its input, and what lies between is not counted.
+    fn partials(&self) -> Partial {
+        let mut p = Partial::default();
+        let aggregate = |n: &Node| n.operator == "Aggregate";
+        // The aggregate above `n` through joins, filters and sorts, if one,
+        // and the operators on the way.
+        let above = |n: &'a Node| -> Option<(&'a Node, Vec<&'a Node>)> {
+            let mut path = vec![];
+            let mut at = n;
+            loop {
+                let [parent] = at.parents[..] else { return None };
+                let parent = self.get(parent).ok()?;
+                match parent.operator.as_str() {
+                    "Aggregate" => return Some((parent, path)),
+                    "Filter" | "JoinFilter" | "Sort" | "CartesianJoin" => {}
+                    t if t.ends_with("Join") => {}
+                    _ => return None,
+                }
+                path.push(parent);
+                at = parent;
+            }
+        };
+        for n in self.step.nodes.iter().filter(|n| aggregate(n)) {
+            let Some((over, path)) = above(n) else { continue };
+            let values = strings(&n.attributes, "functions");
+            let mut texts = strings(&over.attributes, "grouping_keys");
+            for x in &path {
+                texts.extend(x.attributes.keys().flat_map(|k| strings(&x.attributes, k)));
+            }
+            if !values.iter().any(|v| texts.iter().any(|t| t.contains(v.as_str()))) {
+                p.spliced.insert(n.id);
+            }
+        }
+        for &id in &p.spliced {
+            let mut at = self.get(id).ok();
+            while let Some(n) = at.and_then(&above) {
+                p.uncounted.extend(n.1.iter().map(|x| x.id));
+                if !p.spliced.contains(&n.0.id) {
+                    p.completing.insert(n.0.id);
+                    break;
+                }
+                at = Some(n.0);
+            }
+        }
+        p
     }
 
     /// Whether only filters lie between `n` and a scan below it.
