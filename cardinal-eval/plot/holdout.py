@@ -8,7 +8,7 @@
                            [--split-template] [--tex]
 
 Per benchmark, `holdout-<bench>.pdf`: Q-error against k over every target,
-and the most and least improved target. Runs of one benchmark with other
+and the most improved and worst remaining target (highest median qU at k = n). Runs of one benchmark with other
 switches (row counts, unbounded) overlay their medians in the first panel.
 `holdout-all.pdf` overlays every benchmark's median, k as the share of
 Q_ref given. Runs with --operators make `holdout-<bench>-operators.pdf`.
@@ -184,11 +184,12 @@ def bench_figure(bench, kind, runs, out, lo, hi, split_template):
         style.save(fig, out / f"holdout-{bench}{'' if kind == 'root' else '-' + kind}")
         return
     most = sorted(imp, key=lambda t: (-imp[t][0], imp[t][1]))[0]
-    least = sorted(imp, key=lambda t: (imp[t][0], -imp[t][1]))[0]
-    for col, (t, what) in enumerate([(most, "most"), (least, "least")], start=1):
+    # The highest qU left with every plan; of those, the least improved.
+    worst = sorted(imp, key=lambda t: (-imp[t][1], imp[t][0]))[0]
+    for col, (t, what) in enumerate([(most, "most improved"), (worst, "worst remaining")], start=1):
         a = fig.add_subplot(gs[:, col])
         target_panel(a, records, t, lo, hi)
-        a.set_xlabel(f"plans given, k ({what} improved)")
+        a.set_xlabel(f"plans given, k ({what})")
         xscale(a, meta, n)
     style.save(fig, out / f"holdout-{bench}{'' if kind == 'root' else '-' + kind}")
 
@@ -284,21 +285,23 @@ def summary(bench, kind, meta, records):
         print(f"  {k:>4} {f(pct(v, 50)):>10} {f(pct(v, 25)) + ' – ' + f(pct(v, 75)):>22} "
               f"{sum(not math.isinf(x) for x in v) / len(v):>8.0%} {sum(bool(r['exact']) for r in good if r['k'] == k) / len(v):>6.0%}")
     if kind == "operator":
-        # Most and least improved query, each scored by the median
-        # improvement of its operators.
+        # The most improved query, by the median improvement of its
+        # operators, and the worst remaining, by their median final qU.
         per = defaultdict(list)
         for r in good:
             per[(r["target"], r["operator"])].append({**r, "target": f"{r['target']}#{r['operator']}"})
         imp = improvement([r for rs in per.values() for r in rs])
-        by_query = defaultdict(list)
+        by_query, final = defaultdict(list), defaultdict(list)
         for t, (d, qn, _, _) in imp.items():
             by_query[t.split("#")[0]].append(d)
+            final[t.split("#")[0]].append(qn)
         score = {t: pct(v, 50) for t, v in by_query.items()}
+        left = {t: pct(v, 50) for t, v in final.items()}
         if score:
             most = max(score, key=lambda t: score[t])
-            least = min(score, key=lambda t: score[t])
+            worst = max(left, key=lambda t: (left[t], -score[t]))
             print(f"  most improved query: {most} (median log10 improvement {score[most]:.2f}); "
-                  f"least: {least} ({score[least]:.2f})")
+                  f"worst remaining: {worst} (median final qU {left[worst]:.3g})")
     unsound = [r for r in good if r.get("holds") is False]
     checks = meta.get("checks", {})
     print(f"  unsound: {len(unsound)}; non-monotone steps: {len(checks.get('non_monotone', []))}; "
