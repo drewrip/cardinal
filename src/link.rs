@@ -1685,6 +1685,14 @@ mod tests {
         assert_eq!((d.stats.limited, d.stats.unsat, d.stats.timed_out, d.stats.incomplete), (1, 1, 0, 0), "{:?}", d.stats);
     }
 
+    /// A check its timer stops is counted as timed out, not limited.
+    #[test]
+    fn decide_timeout_is_told_from_the_limit() {
+        let mut d = Check::new(u32::MAX, Some(200));
+        assert!(!d.valid(&hard()));
+        assert_eq!((d.stats.timed_out, d.stats.limited), (1, 0), "{:?}", d.stats);
+    }
+
     #[test]
     fn union_find_composes_mappings() {
         // x's inputs 0, 1 are y's 1, 0; y's are z's 1, 0: x's are z's.

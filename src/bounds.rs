@@ -121,10 +121,12 @@ impl CheckStats {
         match result {
             SatResult::Sat => self.sat += 1,
             SatResult::Unsat => self.unsat += 1,
+            // Z3 reports a check stopped by its timer as "timeout" or as
+            // "canceled", as it does one stopped at the resource limit:
+            // which one it was, the work spent tells.
             SatResult::Unknown => match solver.get_reason_unknown().as_deref() {
-                Some("timeout") => self.timed_out += 1,
-                Some("canceled" | "max. resource limit exceeded") => self.limited += 1,
                 _ if spent >= u64::from(rlimit) => self.limited += 1,
+                Some("timeout" | "canceled" | "max. resource limit exceeded") => self.timed_out += 1,
                 _ => self.incomplete += 1,
             },
         }

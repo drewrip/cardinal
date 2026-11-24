@@ -286,7 +286,9 @@ fn send(tx: &Sender<Record>, p: &Planned, result: &Result<Outcome, String>, buil
 /// each gives the same bounds and `rlimit` counts.
 fn audit(builders: &Builders, planned: &[Planned], outcomes: &BTreeMap<usize, Result<Outcome, String>>, pool: &Pool) -> Result<()> {
     let mut rng = crate::rng::rng(pool.seed, "audit", "", 0);
-    let ok: Vec<usize> = outcomes.iter().filter(|(_, r)| r.is_ok()).map(|(&i, _)| i).collect();
+    // A job whose checks hit the wall-clock guard depends on the load: it
+    // is not audited.
+    let ok: Vec<usize> = outcomes.iter().filter(|(_, r)| r.as_ref().is_ok_and(|o| !o.timed_out())).map(|(&i, _)| i).collect();
     let picked = ok.iter().copied().choose_multiple(&mut rng, pool.audit.min(ok.len()));
     if picked.is_empty() {
         return Ok(());
@@ -297,6 +299,10 @@ fn audit(builders: &Builders, planned: &[Planned], outcomes: &BTreeMap<usize, Re
         let job = &planned[i].job;
         let Ok(before) = &outcomes[&i] else { continue };
         let again = builders.run(job)?.0;
+        if again.timed_out() {
+            eprintln!("audit: {} with {} plans timed out alone: not compared", job.target, job.plans.len());
+            continue;
+        }
         if before.fingerprint() != again.fingerprint() {
             failures.push(format!("{} with {} plans: {:?} then {:?}", job.target, job.plans.len(), before.fingerprint(), again.fingerprint()));
         }
