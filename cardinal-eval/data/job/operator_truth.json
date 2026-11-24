@@ -8416,6 +8416,854 @@
       "var": "op42_Projection"
     }
   ],
+  "15a": [
+    {
+      "operator": "TableScan: aka_title projection=[movie_id]",
+      "rows": 361472,
+      "var": "op0_Scan_aka_title"
+    },
+    {
+      "operator": "SubqueryAlias: aka_t",
+      "rows": 361472,
+      "var": "op1_SubqueryAlias"
+    },
+    {
+      "operator": "TableScan: movie_companies projection=[movie_id, company_id, company_type_id, note]",
+      "rows": 2609129,
+      "var": "op2_Scan_movie_companies"
+    },
+    {
+      "operator": "Filter: movie_companies.note LIKE Utf8View(\"%(200%)%\") AND movie_companies.note LIKE Utf8View(\"%(worldwide)%\")",
+      "rows": 61664,
+      "var": "op3_Filter"
+    },
+    {
+      "operator": "Projection: movie_companies.movie_id, movie_companies.company_id, movie_companies.company_type_id",
+      "rows": 61664,
+      "var": "op4_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: mc",
+      "rows": 61664,
+      "var": "op5_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = mc.movie_id",
+      "rows": 20965,
+      "var": "op6_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: company_name projection=[id, country_code]",
+      "rows": 234997,
+      "var": "op7_Scan_company_name"
+    },
+    {
+      "operator": "Filter: company_name.country_code = Utf8View(\"[us]\")",
+      "rows": 84843,
+      "var": "op8_Filter"
+    },
+    {
+      "operator": "Projection: company_name.id",
+      "rows": 84843,
+      "var": "op9_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: cn",
+      "rows": 84843,
+      "var": "op10_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_id = cn.id",
+      "rows": 13699,
+      "var": "op11_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mc.company_type_id",
+      "rows": 13699,
+      "var": "op12_Projection"
+    },
+    {
+      "operator": "TableScan: company_type projection=[id]",
+      "rows": 4,
+      "var": "op13_Scan_company_type"
+    },
+    {
+      "operator": "SubqueryAlias: ct",
+      "rows": 4,
+      "var": "op14_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_type_id = ct.id",
+      "rows": 13699,
+      "var": "op15_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id",
+      "rows": 13699,
+      "var": "op16_Projection"
+    },
+    {
+      "operator": "TableScan: movie_info projection=[movie_id, info_type_id, info, note]",
+      "rows": 14835720,
+      "var": "op17_Scan_movie_info"
+    },
+    {
+      "operator": "Filter: movie_info.note LIKE Utf8View(\"%internet%\") AND movie_info.info LIKE Utf8View(\"USA:% 200%\")",
+      "rows": 1771,
+      "var": "op18_Filter"
+    },
+    {
+      "operator": "Projection: movie_info.movie_id, movie_info.info_type_id, movie_info.info",
+      "rows": 1771,
+      "var": "op19_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: mi",
+      "rows": 1771,
+      "var": "op20_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mc.movie_id = mi.movie_id, aka_t.movie_id = mi.movie_id",
+      "rows": 71,
+      "var": "op21_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: info_type projection=[id, info]",
+      "rows": 113,
+      "var": "op22_Scan_info_type"
+    },
+    {
+      "operator": "Filter: info_type.info = Utf8View(\"release dates\")",
+      "rows": 1,
+      "var": "op23_Filter"
+    },
+    {
+      "operator": "Projection: info_type.id",
+      "rows": 1,
+      "var": "op24_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: it1",
+      "rows": 1,
+      "var": "op25_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mi.info_type_id = it1.id",
+      "rows": 71,
+      "var": "op26_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mi.movie_id, mi.info",
+      "rows": 71,
+      "var": "op27_Projection"
+    },
+    {
+      "operator": "TableScan: movie_keyword projection=[movie_id, keyword_id]",
+      "rows": 4523930,
+      "var": "op28_Scan_movie_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: mk",
+      "rows": 4523930,
+      "var": "op29_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mi.movie_id = mk.movie_id, mc.movie_id = mk.movie_id, aka_t.movie_id = mk.movie_id",
+      "rows": 482,
+      "var": "op30_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: keyword projection=[id]",
+      "rows": 134170,
+      "var": "op31_Scan_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: k",
+      "rows": 134170,
+      "var": "op32_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mk.keyword_id = k.id",
+      "rows": 482,
+      "var": "op33_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mi.movie_id, mi.info, mk.movie_id",
+      "rows": 482,
+      "var": "op34_Projection"
+    },
+    {
+      "operator": "TableScan: title projection=[id, title, production_year]",
+      "rows": 2528312,
+      "var": "op35_Scan_title"
+    },
+    {
+      "operator": "Filter: title.production_year > Int32(2000)",
+      "rows": 1381453,
+      "var": "op36_Filter"
+    },
+    {
+      "operator": "Projection: title.id, title.title",
+      "rows": 1381453,
+      "var": "op37_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: t",
+      "rows": 1381453,
+      "var": "op38_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = t.id, mi.movie_id = t.id, mk.movie_id = t.id, mc.movie_id = t.id",
+      "rows": 328,
+      "var": "op39_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: mi.info, t.title",
+      "rows": 328,
+      "var": "op40_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[min(mi.info), min(t.title)]]",
+      "rows": 1,
+      "var": "op41_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: min(mi.info) AS release_date, min(t.title) AS internet_movie",
+      "rows": 1,
+      "var": "op42_Projection"
+    }
+  ],
+  "15b": [
+    {
+      "operator": "TableScan: aka_title projection=[movie_id]",
+      "rows": 361472,
+      "var": "op0_Scan_aka_title"
+    },
+    {
+      "operator": "SubqueryAlias: aka_t",
+      "rows": 361472,
+      "var": "op1_SubqueryAlias"
+    },
+    {
+      "operator": "TableScan: movie_companies projection=[movie_id, company_id, company_type_id, note]",
+      "rows": 2609129,
+      "var": "op2_Scan_movie_companies"
+    },
+    {
+      "operator": "Filter: movie_companies.note LIKE Utf8View(\"%(200%)%\") AND movie_companies.note LIKE Utf8View(\"%(worldwide)%\")",
+      "rows": 61664,
+      "var": "op3_Filter"
+    },
+    {
+      "operator": "Projection: movie_companies.movie_id, movie_companies.company_id, movie_companies.company_type_id",
+      "rows": 61664,
+      "var": "op4_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: mc",
+      "rows": 61664,
+      "var": "op5_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = mc.movie_id",
+      "rows": 20965,
+      "var": "op6_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: company_name projection=[id, name, country_code]",
+      "rows": 234997,
+      "var": "op7_Scan_company_name"
+    },
+    {
+      "operator": "Filter: company_name.country_code = Utf8View(\"[us]\") AND company_name.name = Utf8View(\"YouTube\")",
+      "rows": 1,
+      "var": "op8_Filter"
+    },
+    {
+      "operator": "Projection: company_name.id",
+      "rows": 1,
+      "var": "op9_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: cn",
+      "rows": 1,
+      "var": "op10_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_id = cn.id",
+      "rows": 27,
+      "var": "op11_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mc.company_type_id",
+      "rows": 27,
+      "var": "op12_Projection"
+    },
+    {
+      "operator": "TableScan: company_type projection=[id]",
+      "rows": 4,
+      "var": "op13_Scan_company_type"
+    },
+    {
+      "operator": "SubqueryAlias: ct",
+      "rows": 4,
+      "var": "op14_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_type_id = ct.id",
+      "rows": 27,
+      "var": "op15_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id",
+      "rows": 27,
+      "var": "op16_Projection"
+    },
+    {
+      "operator": "TableScan: movie_info projection=[movie_id, info_type_id, info, note]",
+      "rows": 14835720,
+      "var": "op17_Scan_movie_info"
+    },
+    {
+      "operator": "Filter: movie_info.note LIKE Utf8View(\"%internet%\") AND movie_info.info LIKE Utf8View(\"USA:% 200%\")",
+      "rows": 1771,
+      "var": "op18_Filter"
+    },
+    {
+      "operator": "Projection: movie_info.movie_id, movie_info.info_type_id, movie_info.info",
+      "rows": 1771,
+      "var": "op19_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: mi",
+      "rows": 1771,
+      "var": "op20_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mc.movie_id = mi.movie_id, aka_t.movie_id = mi.movie_id",
+      "rows": 3,
+      "var": "op21_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: info_type projection=[id, info]",
+      "rows": 113,
+      "var": "op22_Scan_info_type"
+    },
+    {
+      "operator": "Filter: info_type.info = Utf8View(\"release dates\")",
+      "rows": 1,
+      "var": "op23_Filter"
+    },
+    {
+      "operator": "Projection: info_type.id",
+      "rows": 1,
+      "var": "op24_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: it1",
+      "rows": 1,
+      "var": "op25_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mi.info_type_id = it1.id",
+      "rows": 3,
+      "var": "op26_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mi.movie_id, mi.info",
+      "rows": 3,
+      "var": "op27_Projection"
+    },
+    {
+      "operator": "TableScan: movie_keyword projection=[movie_id, keyword_id]",
+      "rows": 4523930,
+      "var": "op28_Scan_movie_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: mk",
+      "rows": 4523930,
+      "var": "op29_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mi.movie_id = mk.movie_id, mc.movie_id = mk.movie_id, aka_t.movie_id = mk.movie_id",
+      "rows": 37,
+      "var": "op30_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: keyword projection=[id]",
+      "rows": 134170,
+      "var": "op31_Scan_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: k",
+      "rows": 134170,
+      "var": "op32_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mk.keyword_id = k.id",
+      "rows": 37,
+      "var": "op33_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mi.movie_id, mi.info, mk.movie_id",
+      "rows": 37,
+      "var": "op34_Projection"
+    },
+    {
+      "operator": "TableScan: title projection=[id, title, production_year]",
+      "rows": 2528312,
+      "var": "op35_Scan_title"
+    },
+    {
+      "operator": "Filter: title.production_year >= Int32(2005) AND title.production_year <= Int32(2010)",
+      "rows": 716259,
+      "var": "op36_Filter"
+    },
+    {
+      "operator": "Projection: title.id, title.title",
+      "rows": 716259,
+      "var": "op37_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: t",
+      "rows": 716259,
+      "var": "op38_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = t.id, mi.movie_id = t.id, mk.movie_id = t.id, mc.movie_id = t.id",
+      "rows": 37,
+      "var": "op39_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: mi.info, t.title",
+      "rows": 37,
+      "var": "op40_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[min(mi.info), min(t.title)]]",
+      "rows": 1,
+      "var": "op41_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: min(mi.info) AS release_date, min(t.title) AS youtube_movie",
+      "rows": 1,
+      "var": "op42_Projection"
+    }
+  ],
+  "15c": [
+    {
+      "operator": "TableScan: aka_title projection=[movie_id]",
+      "rows": 361472,
+      "var": "op0_Scan_aka_title"
+    },
+    {
+      "operator": "SubqueryAlias: aka_t",
+      "rows": 361472,
+      "var": "op1_SubqueryAlias"
+    },
+    {
+      "operator": "TableScan: movie_companies projection=[movie_id, company_id, company_type_id]",
+      "rows": 2609129,
+      "var": "op2_Scan_movie_companies"
+    },
+    {
+      "operator": "SubqueryAlias: mc",
+      "rows": 2609129,
+      "var": "op3_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = mc.movie_id",
+      "rows": 1946320,
+      "var": "op4_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: company_name projection=[id, country_code]",
+      "rows": 234997,
+      "var": "op5_Scan_company_name"
+    },
+    {
+      "operator": "Filter: company_name.country_code = Utf8View(\"[us]\")",
+      "rows": 84843,
+      "var": "op6_Filter"
+    },
+    {
+      "operator": "Projection: company_name.id",
+      "rows": 84843,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: cn",
+      "rows": 84843,
+      "var": "op8_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_id = cn.id",
+      "rows": 627946,
+      "var": "op9_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mc.company_type_id",
+      "rows": 627946,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "TableScan: company_type projection=[id]",
+      "rows": 4,
+      "var": "op11_Scan_company_type"
+    },
+    {
+      "operator": "SubqueryAlias: ct",
+      "rows": 4,
+      "var": "op12_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_type_id = ct.id",
+      "rows": 627946,
+      "var": "op13_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id",
+      "rows": 627946,
+      "var": "op14_Projection"
+    },
+    {
+      "operator": "TableScan: movie_info projection=[movie_id, info_type_id, info, note]",
+      "rows": 14835720,
+      "var": "op15_Scan_movie_info"
+    },
+    {
+      "operator": "Filter: movie_info.note LIKE Utf8View(\"%internet%\") AND (movie_info.info LIKE Utf8View(\"USA:% 199%\") OR movie_info.info LIKE Utf8View(\"USA:% 200%\"))",
+      "rows": 1783,
+      "var": "op16_Filter"
+    },
+    {
+      "operator": "Projection: movie_info.movie_id, movie_info.info_type_id, movie_info.info",
+      "rows": 1783,
+      "var": "op17_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: mi",
+      "rows": 1783,
+      "var": "op18_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mc.movie_id = mi.movie_id, aka_t.movie_id = mi.movie_id",
+      "rows": 284,
+      "var": "op19_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: info_type projection=[id, info]",
+      "rows": 113,
+      "var": "op20_Scan_info_type"
+    },
+    {
+      "operator": "Filter: info_type.info = Utf8View(\"release dates\")",
+      "rows": 1,
+      "var": "op21_Filter"
+    },
+    {
+      "operator": "Projection: info_type.id",
+      "rows": 1,
+      "var": "op22_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: it1",
+      "rows": 1,
+      "var": "op23_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mi.info_type_id = it1.id",
+      "rows": 284,
+      "var": "op24_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mi.movie_id, mi.info",
+      "rows": 284,
+      "var": "op25_Projection"
+    },
+    {
+      "operator": "TableScan: movie_keyword projection=[movie_id, keyword_id]",
+      "rows": 4523930,
+      "var": "op26_Scan_movie_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: mk",
+      "rows": 4523930,
+      "var": "op27_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mi.movie_id = mk.movie_id, mc.movie_id = mk.movie_id, aka_t.movie_id = mk.movie_id",
+      "rows": 2271,
+      "var": "op28_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: keyword projection=[id]",
+      "rows": 134170,
+      "var": "op29_Scan_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: k",
+      "rows": 134170,
+      "var": "op30_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mk.keyword_id = k.id",
+      "rows": 2271,
+      "var": "op31_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, mc.movie_id, mi.movie_id, mi.info, mk.movie_id",
+      "rows": 2271,
+      "var": "op32_Projection"
+    },
+    {
+      "operator": "TableScan: title projection=[id, title, production_year]",
+      "rows": 2528312,
+      "var": "op33_Scan_title"
+    },
+    {
+      "operator": "Filter: title.production_year > Int32(1990)",
+      "rows": 1749032,
+      "var": "op34_Filter"
+    },
+    {
+      "operator": "Projection: title.id, title.title",
+      "rows": 1749032,
+      "var": "op35_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: t",
+      "rows": 1749032,
+      "var": "op36_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = t.id, mi.movie_id = t.id, mk.movie_id = t.id, mc.movie_id = t.id",
+      "rows": 2271,
+      "var": "op37_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: mi.info, t.title",
+      "rows": 2271,
+      "var": "op38_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[min(mi.info), min(t.title)]]",
+      "rows": 1,
+      "var": "op39_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: min(mi.info) AS release_date, min(t.title) AS modern_american_internet_movie",
+      "rows": 1,
+      "var": "op40_Projection"
+    }
+  ],
+  "15d": [
+    {
+      "operator": "TableScan: aka_title projection=[movie_id, title]",
+      "rows": 361472,
+      "var": "op0_Scan_aka_title"
+    },
+    {
+      "operator": "SubqueryAlias: aka_t",
+      "rows": 361472,
+      "var": "op1_SubqueryAlias"
+    },
+    {
+      "operator": "TableScan: movie_companies projection=[movie_id, company_id, company_type_id]",
+      "rows": 2609129,
+      "var": "op2_Scan_movie_companies"
+    },
+    {
+      "operator": "SubqueryAlias: mc",
+      "rows": 2609129,
+      "var": "op3_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = mc.movie_id",
+      "rows": 1946320,
+      "var": "op4_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: company_name projection=[id, country_code]",
+      "rows": 234997,
+      "var": "op5_Scan_company_name"
+    },
+    {
+      "operator": "Filter: company_name.country_code = Utf8View(\"[us]\")",
+      "rows": 84843,
+      "var": "op6_Filter"
+    },
+    {
+      "operator": "Projection: company_name.id",
+      "rows": 84843,
+      "var": "op7_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: cn",
+      "rows": 84843,
+      "var": "op8_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_id = cn.id",
+      "rows": 627946,
+      "var": "op9_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, aka_t.title, mc.movie_id, mc.company_type_id",
+      "rows": 627946,
+      "var": "op10_Projection"
+    },
+    {
+      "operator": "TableScan: company_type projection=[id]",
+      "rows": 4,
+      "var": "op11_Scan_company_type"
+    },
+    {
+      "operator": "SubqueryAlias: ct",
+      "rows": 4,
+      "var": "op12_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mc.company_type_id = ct.id",
+      "rows": 627946,
+      "var": "op13_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, aka_t.title, mc.movie_id",
+      "rows": 627946,
+      "var": "op14_Projection"
+    },
+    {
+      "operator": "TableScan: movie_info projection=[movie_id, info_type_id, note]",
+      "rows": 14835720,
+      "var": "op15_Scan_movie_info"
+    },
+    {
+      "operator": "Filter: movie_info.note LIKE Utf8View(\"%internet%\")",
+      "rows": 10810,
+      "var": "op16_Filter"
+    },
+    {
+      "operator": "Projection: movie_info.movie_id, movie_info.info_type_id",
+      "rows": 10810,
+      "var": "op17_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: mi",
+      "rows": 10810,
+      "var": "op18_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mc.movie_id = mi.movie_id, aka_t.movie_id = mi.movie_id",
+      "rows": 1485,
+      "var": "op19_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: info_type projection=[id, info]",
+      "rows": 113,
+      "var": "op20_Scan_info_type"
+    },
+    {
+      "operator": "Filter: info_type.info = Utf8View(\"release dates\")",
+      "rows": 1,
+      "var": "op21_Filter"
+    },
+    {
+      "operator": "Projection: info_type.id",
+      "rows": 1,
+      "var": "op22_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: it1",
+      "rows": 1,
+      "var": "op23_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mi.info_type_id = it1.id",
+      "rows": 896,
+      "var": "op24_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, aka_t.title, mc.movie_id, mi.movie_id",
+      "rows": 896,
+      "var": "op25_Projection"
+    },
+    {
+      "operator": "TableScan: movie_keyword projection=[movie_id, keyword_id]",
+      "rows": 4523930,
+      "var": "op26_Scan_movie_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: mk",
+      "rows": 4523930,
+      "var": "op27_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: mi.movie_id = mk.movie_id, mc.movie_id = mk.movie_id, aka_t.movie_id = mk.movie_id",
+      "rows": 11557,
+      "var": "op28_InnerEquiJoin"
+    },
+    {
+      "operator": "TableScan: keyword projection=[id]",
+      "rows": 134170,
+      "var": "op29_Scan_keyword"
+    },
+    {
+      "operator": "SubqueryAlias: k",
+      "rows": 134170,
+      "var": "op30_SubqueryAlias"
+    },
+    {
+      "operator": "LeftSemi Join: mk.keyword_id = k.id",
+      "rows": 11557,
+      "var": "op31_LeftSemiKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.movie_id, aka_t.title, mc.movie_id, mi.movie_id, mk.movie_id",
+      "rows": 11557,
+      "var": "op32_Projection"
+    },
+    {
+      "operator": "TableScan: title projection=[id, title, production_year]",
+      "rows": 2528312,
+      "var": "op33_Scan_title"
+    },
+    {
+      "operator": "Filter: title.production_year > Int32(1990)",
+      "rows": 1749032,
+      "var": "op34_Filter"
+    },
+    {
+      "operator": "Projection: title.id, title.title",
+      "rows": 1749032,
+      "var": "op35_Projection"
+    },
+    {
+      "operator": "SubqueryAlias: t",
+      "rows": 1749032,
+      "var": "op36_SubqueryAlias"
+    },
+    {
+      "operator": "Inner Join: aka_t.movie_id = t.id, mi.movie_id = t.id, mk.movie_id = t.id, mc.movie_id = t.id",
+      "rows": 11347,
+      "var": "op37_InnerKeyJoin"
+    },
+    {
+      "operator": "Projection: aka_t.title, t.title",
+      "rows": 11347,
+      "var": "op38_Projection"
+    },
+    {
+      "operator": "Aggregate: groupBy=[[]], aggr=[[min(aka_t.title), min(t.title)]]",
+      "rows": 1,
+      "var": "op39_ScalarAggregate"
+    },
+    {
+      "operator": "Projection: min(aka_t.title) AS aka_title, min(t.title) AS internet_movie_title",
+      "rows": 1,
+      "var": "op40_Projection"
+    }
+  ],
   "16a": [
     {
       "operator": "TableScan: aka_name projection=[person_id, name]",

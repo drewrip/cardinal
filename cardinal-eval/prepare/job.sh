@@ -99,9 +99,15 @@ for f in sorted(os.listdir(src)):
     if not m:
         continue
     name = f"{int(m.group(1)):02d}{m.group(2)}"
-    with open(os.path.join(src, f)) as i, open(os.path.join(out, "queries", name + ".sql"), "w") as o:
-        o.write(i.read().strip() + "\n")
+    sql = open(os.path.join(src, f)).read().strip()
     meta[name] = {"template": f"{int(m.group(1)):02d}"}
+    # `at` is reserved in DuckDB 2.0: 15a-d's alias of aka_title is renamed,
+    # which changes nothing else.
+    renamed = re.sub(r"\bat\.", "aka_t.", re.sub(r"\bAS at\b", "AS aka_t", sql))
+    if renamed != sql:
+        meta[name]["rewritten"] = "alias at renamed aka_t (reserved in DuckDB 2.0)"
+    with open(os.path.join(out, "queries", name + ".sql"), "w") as o:
+        o.write(renamed + "\n")
 json.dump(meta, open(os.path.join(out, "queries.json"), "w"), indent=1, sort_keys=True)
 EOF
 duck profile "$db" "$out" "$jobs"
