@@ -61,6 +61,11 @@ struct Cli {
     /// operator truth, and is no target.
     #[arg(long, default_value_t = 900)]
     timeout: u64,
+    /// GiB the process may use: past it, the queries being validated stop,
+    /// have no operator truth, and are no targets. Default: 60 % of the
+    /// memory.
+    #[arg(long)]
+    max_memory: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -113,7 +118,11 @@ fn main() -> Result<()> {
             true => BTreeMap::new(),
             false => read_json_or_default(&bench.dir.join("operator_truth.json"))?,
         };
-        let results = validate_all(&bench, &todo, cli.jobs, cli.timeout)?;
+        let limit = cli
+            .max_memory
+            .map(|g| (g * (1u64 << 30) as f64) as u64)
+            .unwrap_or_else(|| cardinal_eval::record::memory_bytes().unwrap_or(u64::MAX) / 10 * 6);
+        let results = validate_all(&bench, &todo, cli.jobs, cli.timeout, limit)?;
         for (q, result) in results {
             match result {
                 Ok(t) => {
@@ -133,6 +142,18 @@ fn main() -> Result<()> {
             }
         }
         write(&bench, "operator_truth.json", &json!(stored))?;
+        // A target needs its operators' truth, its root counted as DuckDB
+        // counted it (those of --only and those stored before alike).
+        for q in &analyzable {
+            let root = stored.get(q).and_then(|ops| ops.last()).and_then(|o| o.rows);
+            if !exclusions.contains_key(q) && root != truth.get(q).copied() {
+                let why = match stored.get(q) {
+                    None => "no target: no operator truth".to_string(),
+                    Some(_) => format!("no target: DataFusion counts {root:?} rows, DuckDB {:?}", truth.get(q)),
+                };
+                exclusions.insert(q.clone(), why);
+            }
+        }
         q_target.retain(|q| !exclusions.contains_key(q));
     }
 
@@ -166,7 +187,7 @@ struct Truth {
 
 /// [`validate`] of each of `queries`, `jobs` at once, each worker on a
 /// thread of its own with its own Parquet context.
-fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64) -> Result<Vec<(String, Result<Truth>)>> {
+fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64, max_memory: u64) -> Result<Vec<(String, Result<Truth>)>> {
     let queue = Mutex::new(queries.iter().rev().cloned().collect::<Vec<_>>());
     let cache = bench.dir.join("raw").join("operator_truth");
     let cache = &cache;
@@ -188,10 +209,18 @@ fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64
                     }
                     let start = std::time::Instant::now();
                     let limit = std::time::Duration::from_secs(timeout);
-                    let r = rt
-                        .block_on(async { tokio::time::timeout(limit, validate(bench, &ctx, &q)).await })
-                        .unwrap_or_else(|_| Err(anyhow!("timed out after {timeout} s")));
+                    let r = rt.block_on(async {
+                        tokio::select! {
+                            r = tokio::time::timeout(limit, validate(bench, &ctx, &q)) =>
+                                r.unwrap_or_else(|_| Err(anyhow!("timed out after {timeout} s"))),
+                            _ = over_memory(max_memory) =>
+                                Err(anyhow!("stopped: the process used over {} GiB", max_memory >> 30)),
+                        }
+                    });
                     eprintln!("{q}: {:.1} s{}", start.elapsed().as_secs_f64(), r.as_ref().err().map(|e| format!(": {e:#}")).unwrap_or_default());
+                    // Give freed memory back, so the guard reads what is in use.
+                    // SAFETY: malloc_trim only releases free heap memory.
+                    unsafe { libc::malloc_trim(0) };
                     if let Ok(t) = &r {
                         std::fs::create_dir_all(cached.parent().unwrap())?;
                         std::fs::write(&cached, serde_json::to_string(t)?)?;
@@ -208,6 +237,13 @@ fn validate_all(bench: &Benchmark, queries: &[String], jobs: usize, timeout: u64
     let mut out = out.into_inner().unwrap();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+/// Returns once the process uses more than `limit` bytes.
+async fn over_memory(limit: u64) {
+    while cardinal_eval::jobs::rss() <= limit {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// Query `q` analyzed over `ctx`'s Parquet tables and validated: each

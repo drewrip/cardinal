@@ -1,0 +1,418 @@
+{
+    "io": {
+        "total_bytes_read": 6291456,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 3.51e-7,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Aggregates": [
+                                    "min(#0)",
+                                    "min(#1)",
+                                    "min(#2)",
+                                    "min(#3)",
+                                    "min(#4)",
+                                    "min(#5)"
+                                ],
+                                "Estimated Cardinality": "1"
+                            },
+                            "intermediate_rows": 1,
+                            "intermediate_size_bytes": 4156,
+                            "timing": 0.000013586000000000002,
+                            "type": "UNGROUPED_AGGREGATE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Projections": [
+                                            "cc_call_center_id",
+                                            "cc_name",
+                                            "cc_manager",
+                                            "cr_net_loss",
+                                            "cr_item_sk",
+                                            "cr_order_number"
+                                        ],
+                                        "Estimated Cardinality": "6"
+                                    },
+                                    "intermediate_rows": 26,
+                                    "intermediate_size_bytes": 13848,
+                                    "timing": 6.95e-7,
+                                    "type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Join Type": "INNER",
+                                                "Conditions": "cc_call_center_sk = cr_call_center_sk",
+                                                "Estimated Cardinality": "6"
+                                            },
+                                            "intermediate_rows": 26,
+                                            "intermediate_size_bytes": 13848,
+                                            "timing": 0.00015572899999999999,
+                                            "type": "HASH_JOIN",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Table": "dsb.main.call_center",
+                                                        "Type": "Sequential Scan",
+                                                        "Projections": [
+                                                            "cc_call_center_sk",
+                                                            "cc_call_center_id",
+                                                            "cc_name",
+                                                            "cc_manager"
+                                                        ],
+                                                        "Dynamic Filters": "optional: (cc_call_center_sk IN (1, 2, 4))",
+                                                        "Estimated Cardinality": "6"
+                                                    },
+                                                    "intermediate_rows": 6,
+                                                    "intermediate_size_bytes": 312,
+                                                    "row_groups_scanned": 1,
+                                                    "rows_scanned": 6,
+                                                    "timing": 0.000310531,
+                                                    "total_row_groups_to_scan": 1,
+                                                    "type": "TABLE_SCAN"
+                                                },
+                                                {
+                                                    "extra_info": {
+                                                        "Join Type": "INNER",
+                                                        "Conditions": "cd_demo_sk = c_current_cdemo_sk",
+                                                        "Estimated Cardinality": "6"
+                                                    },
+                                                    "intermediate_rows": 26,
+                                                    "intermediate_size_bytes": 1032,
+                                                    "timing": 0.0002573,
+                                                    "type": "HASH_JOIN",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Expression": "(cd_demo_sk BETWEEN 3 AND 1920799)",
+                                                                "Estimated Cardinality": "384160"
+                                                            },
+                                                            "intermediate_rows": 26,
+                                                            "intermediate_size_bytes": 104,
+                                                            "timing": 0.000007347,
+                                                            "type": "FILTER",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Projections": "#0",
+                                                                        "Estimated Cardinality": "384160"
+                                                                    },
+                                                                    "intermediate_rows": 26,
+                                                                    "intermediate_size_bytes": 104,
+                                                                    "timing": 8.73e-7,
+                                                                    "type": "PROJECTION",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Expression": "(((cd_marital_status = 'M') OR (cd_marital_status = 'W')) AND ((cd_education_status = 'Unknown') OR (cd_education_status = 'Advanced Degree')) AND (((cd_marital_status = 'M') AND (cd_education_status = 'Unknown')) OR ((cd_marital_status = 'W') AND (cd_education_status = 'Advanced Degree'))))",
+                                                                                "Estimated Cardinality": "384160"
+                                                                            },
+                                                                            "intermediate_rows": 26,
+                                                                            "intermediate_size_bytes": 936,
+                                                                            "timing": 0.0012012600000000002,
+                                                                            "type": "FILTER",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Table": "dsb.main.customer_demographics",
+                                                                                        "Type": "Sequential Scan",
+                                                                                        "Projections": [
+                                                                                            "cd_demo_sk",
+                                                                                            "cd_marital_status",
+                                                                                            "cd_education_status"
+                                                                                        ],
+                                                                                        "Filters": [
+                                                                                            "optional: ((cd_marital_status = 'M') OR (cd_marital_status = 'W'))",
+                                                                                            "optional: ((cd_education_status = 'Unknown') OR (cd_education_status = 'Advanced Degree'))"
+                                                                                        ],
+                                                                                        "Dynamic Filters": "optional: cd_demo_sk IN PRF(c_current_cdemo_sk)",
+                                                                                        "Estimated Cardinality": "1920800"
+                                                                                    },
+                                                                                    "intermediate_rows": 124,
+                                                                                    "intermediate_size_bytes": 61296,
+                                                                                    "row_groups_scanned": 20,
+                                                                                    "rows_scanned": 1920800,
+                                                                                    "timing": 0.010596269999999996,
+                                                                                    "total_row_groups_to_scan": 20,
+                                                                                    "type": "TABLE_SCAN"
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        },
+                                                        {
+                                                            "extra_info": {
+                                                                "Join Type": "INNER",
+                                                                "Conditions": "hd_demo_sk = c_current_hdemo_sk",
+                                                                "Estimated Cardinality": "27"
+                                                            },
+                                                            "intermediate_rows": 129,
+                                                            "intermediate_size_bytes": 3864,
+                                                            "timing": 0.00036129099999999997,
+                                                            "type": "HASH_JOIN",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Table": "dsb.main.household_demographics",
+                                                                        "Type": "Sequential Scan",
+                                                                        "Projections": "hd_demo_sk",
+                                                                        "Filters": "((hd_buy_potential >= '1001-5000') AND (hd_buy_potential < '1001-5001'))",
+                                                                        "Dynamic Filters": "optional: hd_demo_sk IN PRF(c_current_hdemo_sk)",
+                                                                        "Estimated Cardinality": "1440"
+                                                                    },
+                                                                    "intermediate_rows": 114,
+                                                                    "intermediate_size_bytes": 456,
+                                                                    "row_groups_scanned": 1,
+                                                                    "rows_scanned": 7200,
+                                                                    "timing": 0.00048171100000000006,
+                                                                    "total_row_groups_to_scan": 1,
+                                                                    "type": "TABLE_SCAN"
+                                                                },
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Join Type": "INNER",
+                                                                        "Conditions": "ca_address_sk = c_current_addr_sk",
+                                                                        "Estimated Cardinality": "136"
+                                                                    },
+                                                                    "intermediate_rows": 1016,
+                                                                    "intermediate_size_bytes": 33056,
+                                                                    "timing": 0.0005713230000000001,
+                                                                    "type": "HASH_JOIN",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Expression": "(ca_address_sk <= 49999)",
+                                                                                "Estimated Cardinality": "8334"
+                                                                            },
+                                                                            "intermediate_rows": 974,
+                                                                            "intermediate_size_bytes": 3896,
+                                                                            "timing": 0.00004949100000000001,
+                                                                            "type": "FILTER",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Table": "dsb.main.customer_address",
+                                                                                        "Type": "Sequential Scan",
+                                                                                        "Projections": "ca_address_sk",
+                                                                                        "Filters": "(ca_gmt_offset = -6.00)",
+                                                                                        "Dynamic Filters": "optional: ca_address_sk IN PRF(c_current_addr_sk)",
+                                                                                        "Estimated Cardinality": "8334"
+                                                                                    },
+                                                                                    "intermediate_rows": 974,
+                                                                                    "intermediate_size_bytes": 3896,
+                                                                                    "row_groups_scanned": 1,
+                                                                                    "rows_scanned": 50000,
+                                                                                    "timing": 0.0009967,
+                                                                                    "total_row_groups_to_scan": 1,
+                                                                                    "type": "TABLE_SCAN"
+                                                                                }
+                                                                            ]
+                                                                        },
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Join Type": "INNER",
+                                                                                "Conditions": "c_customer_sk = cr_returning_customer_sk",
+                                                                                "Estimated Cardinality": "818"
+                                                                            },
+                                                                            "intermediate_rows": 2347,
+                                                                            "intermediate_size_bytes": 76980,
+                                                                            "timing": 0.0010216169999999998,
+                                                                            "type": "HASH_JOIN",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Table": "dsb.main.customer",
+                                                                                        "Type": "Sequential Scan",
+                                                                                        "Projections": [
+                                                                                            "c_customer_sk",
+                                                                                            "c_current_cdemo_sk",
+                                                                                            "c_current_hdemo_sk",
+                                                                                            "c_current_addr_sk"
+                                                                                        ],
+                                                                                        "Dynamic Filters": "optional: c_customer_sk IN PRF(cr_returning_customer_sk)",
+                                                                                        "Estimated Cardinality": "100000"
+                                                                                    },
+                                                                                    "intermediate_rows": 2308,
+                                                                                    "intermediate_size_bytes": 62016,
+                                                                                    "row_groups_scanned": 1,
+                                                                                    "rows_scanned": 100000,
+                                                                                    "timing": 0.002039015,
+                                                                                    "total_row_groups_to_scan": 1,
+                                                                                    "type": "TABLE_SCAN"
+                                                                                },
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Join Type": "INNER",
+                                                                                        "Conditions": "cr_returned_date_sk = d_date_sk",
+                                                                                        "Estimated Cardinality": "839"
+                                                                                    },
+                                                                                    "intermediate_rows": 2407,
+                                                                                    "intermediate_size_bytes": 67976,
+                                                                                    "timing": 0.000380179,
+                                                                                    "type": "HASH_JOIN",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "dsb.main.catalog_returns",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": [
+                                                                                                    "cr_call_center_sk",
+                                                                                                    "cr_returned_date_sk",
+                                                                                                    "cr_returning_customer_sk",
+                                                                                                    "cr_net_loss",
+                                                                                                    "cr_item_sk",
+                                                                                                    "cr_order_number"
+                                                                                                ],
+                                                                                                "Dynamic Filters": "optional: cr_returned_date_sk IN PRF(d_date_sk)",
+                                                                                                "Estimated Cardinality": "215301"
+                                                                                            },
+                                                                                            "intermediate_rows": 2407,
+                                                                                            "intermediate_size_bytes": 66216,
+                                                                                            "row_groups_scanned": 1,
+                                                                                            "rows_scanned": 122880,
+                                                                                            "timing": 0.0030175779999999995,
+                                                                                            "total_row_groups_to_scan": 2,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        },
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Expression": "(d_date_sk BETWEEN 2450837 AND 2453225)",
+                                                                                                "Estimated Cardinality": "285"
+                                                                                            },
+                                                                                            "intermediate_rows": 31,
+                                                                                            "intermediate_size_bytes": 124,
+                                                                                            "timing": 0.00001878,
+                                                                                            "type": "FILTER",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Table": "dsb.main.date_dim",
+                                                                                                        "Type": "Sequential Scan",
+                                                                                                        "Projections": "d_date_sk",
+                                                                                                        "Filters": [
+                                                                                                            "(d_year = 1999)",
+                                                                                                            "(d_moy = 3)"
+                                                                                                        ],
+                                                                                                        "Estimated Cardinality": "285"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 31,
+                                                                                                    "intermediate_size_bytes": 124,
+                                                                                                    "row_groups_scanned": 1,
+                                                                                                    "rows_scanned": 73049,
+                                                                                                    "timing": 0.000525982,
+                                                                                                    "total_row_groups_to_scan": 1,
+                                                                                                    "type": "TABLE_SCAN"
+                                                                                                }
+                                                                                            ]
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000010675,
+        "aggregate_reuse": 0.000021683,
+        "build_side_probe_side": 0.000079963,
+        "column_lifetime": 0.000132328,
+        "common_aggregate": 0.000022965,
+        "common_subexpressions": 0.000007634,
+        "common_subplan": 0.000273528,
+        "cte_filter_pusher": 0.000001075,
+        "cte_inlining": 0.000001149,
+        "deliminator": 0.000001967,
+        "duplicate_groups": 0.000026177,
+        "empty_result_pullup": 0.000001697,
+        "expression_rewriter": 0.000526586,
+        "filter_pullup": 0.000002429,
+        "filter_pushdown": 0.000218372,
+        "grouping_sets": 0.000004638,
+        "in_clause": 0.000003256,
+        "join_elimination": 0.000009245,
+        "join_filter_pushdown": 0.000226725,
+        "join_order": 0.00128035,
+        "late_materialization": 0.000001891,
+        "limit_pushdown": 0.000001645,
+        "outer_join_simplification": 0.000014502,
+        "partial_aggregate_pushdown": 0.000007496,
+        "partitioned_execution": 0.000001753,
+        "projection_placement": 0.000009153,
+        "projection_pullup": 0.000019293,
+        "redundant_order_keys": 0.000014454,
+        "regex_range": 0.000012496,
+        "reorder_filter": 0.000040201,
+        "row_group_pruner": 0.000001432,
+        "row_number_rewriter": 0.000001584,
+        "sampling_pushdown": 0.00000108,
+        "scalar_fn_pushdown": 9.77e-7,
+        "statistics_propagation": 0.000306128,
+        "top_n": 0.000001082,
+        "top_n_window_elimination": 0.000005934,
+        "total_time": 0.003769872,
+        "type_pushdown": 0.000001386,
+        "unnest_rewriter": 0.000002564,
+        "unused_columns": 0.000259147,
+        "window_self_join": 0.000006202
+    },
+    "parser": {
+        "total_time": 0.001245992
+    },
+    "physical_planner": {
+        "column_binding": 0.000044338,
+        "create_plan": 0.000207136,
+        "resolve_types": 0.000007169,
+        "total_time": 0.000288951
+    },
+    "planner": {
+        "binding_time": 0.005454974,
+        "total_time": 0.00579489
+    },
+    "query": {
+        "cpu_time": 0.022007608999999994,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nselect  \n        min(cc_call_center_id),\n        min(cc_name),\n        min(cc_manager),\n        min(cr_net_loss),\n        min(cr_item_sk),\n        min(cr_order_number)\nfrom\n        call_center,\n        catalog_returns,\n        date_dim,\n        customer,\n        customer_address,\n        customer_demographics,\n        household_demographics\nwhere\n        cr_call_center_sk       = cc_call_center_sk\nand     cr_returned_date_sk     = d_date_sk\nand     cr_returning_customer_sk= c_customer_sk\nand     cd_demo_sk              = c_current_cdemo_sk\nand     hd_demo_sk              = c_current_hdemo_sk\nand     ca_address_sk           = c_current_addr_sk\nand     d_year                  = 1999 \nand     d_moy                   = 3\nand     ( (cd_marital_status       = 'M' and cd_education_status     = 'Unknown')\n        or(cd_marital_status       = 'W' and cd_education_status     = 'Advanced Degree'))\nand     hd_buy_potential like '1001-5000%'\nand     ca_gmt_offset           = -6\n;",
+        "total_intermediate_rows": 13025,
+        "total_intermediate_size_bytes": 414240,
+        "total_row_groups_scanned": 26,
+        "total_row_groups_to_scan": 27,
+        "total_rows_scanned": 2273935,
+        "total_time": 0.037657745
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 13487568,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 21233664
+    }
+}

@@ -1,0 +1,532 @@
+{
+    "io": {
+        "total_bytes_read": 2359296,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 0.0,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "CTE Name": "inv",
+                                "Table Index": "0",
+                                "Execution Mode": "MATERIALIZED",
+                                "Order Mode": "UNORDERED",
+                                "Materialized Consumers": "2",
+                                "Estimated Cardinality": "0"
+                            },
+                            "intermediate_rows": 0,
+                            "intermediate_size_bytes": 0,
+                            "timing": 0.0,
+                            "type": "CTE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Projections": [
+                                            "w_warehouse_sk",
+                                            "i_item_sk",
+                                            "d_moy",
+                                            "mean",
+                                            "cov"
+                                        ],
+                                        "Estimated Cardinality": "15"
+                                    },
+                                    "intermediate_rows": 0,
+                                    "intermediate_size_bytes": 0,
+                                    "timing": 0.0,
+                                    "type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Expression": "(CASE  WHEN ((mean = 0.0)) THEN (0.0) ELSE (stdev / mean) END > 1.0)",
+                                                "Estimated Cardinality": "15"
+                                            },
+                                            "intermediate_rows": 0,
+                                            "intermediate_size_bytes": 0,
+                                            "timing": 0.005446529,
+                                            "type": "FILTER",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Projections": [
+                                                            "CAST(#1 AS INTEGER)",
+                                                            "CAST(#2 AS INTEGER)",
+                                                            "CAST(#3 AS INTEGER)",
+                                                            "#4",
+                                                            "#5"
+                                                        ],
+                                                        "Estimated Cardinality": "78"
+                                                    },
+                                                    "intermediate_rows": 2118,
+                                                    "intermediate_size_bytes": 59816,
+                                                    "timing": 0.000013897000000000001,
+                                                    "type": "PROJECTION",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Groups": [
+                                                                    "#0",
+                                                                    "#1",
+                                                                    "#2",
+                                                                    "#3"
+                                                                ],
+                                                                "Aggregates": [
+                                                                    "stddev_samp(#4)",
+                                                                    "avg(#5)"
+                                                                ],
+                                                                "Estimated Cardinality": "78"
+                                                            },
+                                                            "intermediate_rows": 2118,
+                                                            "intermediate_size_bytes": 77272,
+                                                            "timing": 0.002715661,
+                                                            "type": "HASH_GROUP_BY",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Projections": [
+                                                                            "w_warehouse_name",
+                                                                            "w_warehouse_sk",
+                                                                            "i_item_sk",
+                                                                            "d_moy",
+                                                                            "CAST(inv_quantity_on_hand AS DOUBLE)",
+                                                                            "inv_quantity_on_hand"
+                                                                        ],
+                                                                        "Estimated Cardinality": "79"
+                                                                    },
+                                                                    "intermediate_rows": 2708,
+                                                                    "intermediate_size_bytes": 86672,
+                                                                    "timing": 0.000031932,
+                                                                    "type": "PROJECTION",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Projections": [
+                                                                                    "CAST(#0 AS SMALLINT)",
+                                                                                    "CAST(#1 AS TINYINT)",
+                                                                                    "#2",
+                                                                                    "CAST(#3 AS TINYINT)",
+                                                                                    "#4"
+                                                                                ],
+                                                                                "Estimated Cardinality": "79"
+                                                                            },
+                                                                            "intermediate_rows": 2708,
+                                                                            "intermediate_size_bytes": 65008,
+                                                                            "timing": 0.00003031,
+                                                                            "type": "PROJECTION",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Join Type": "INNER",
+                                                                                        "Conditions": "inv_warehouse_sk = w_warehouse_sk",
+                                                                                        "Estimated Cardinality": "79"
+                                                                                    },
+                                                                                    "intermediate_rows": 2708,
+                                                                                    "intermediate_size_bytes": 87136,
+                                                                                    "timing": 0.000198118,
+                                                                                    "type": "HASH_JOIN",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Join Type": "INNER",
+                                                                                                "Conditions": "inv_item_sk = i_item_sk",
+                                                                                                "Estimated Cardinality": "79"
+                                                                                            },
+                                                                                            "intermediate_rows": 2708,
+                                                                                            "intermediate_size_bytes": 59136,
+                                                                                            "timing": 0.000317839,
+                                                                                            "type": "HASH_JOIN",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Join Type": "INNER",
+                                                                                                        "Conditions": "inv_date_sk = d_date_sk",
+                                                                                                        "Estimated Cardinality": "1832"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 2708,
+                                                                                                    "intermediate_size_bytes": 43792,
+                                                                                                    "timing": 0.0009236880000000003,
+                                                                                                    "type": "HASH_JOIN",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Table": "dsb.main.inventory",
+                                                                                                                "Type": "Sequential Scan",
+                                                                                                                "Projections": [
+                                                                                                                    "inv_item_sk",
+                                                                                                                    "inv_warehouse_sk",
+                                                                                                                    "inv_date_sk",
+                                                                                                                    "inv_quantity_on_hand"
+                                                                                                                ],
+                                                                                                                "Filters": "((inv_quantity_on_hand >= 331) AND (inv_quantity_on_hand <= 531))",
+                                                                                                                "Dynamic Filters": [
+                                                                                                                    "optional: inv_item_sk IN PRF(i_item_sk)",
+                                                                                                                    "optional: inv_warehouse_sk IN PRF(w_warehouse_sk)",
+                                                                                                                    "optional: inv_date_sk IN PRF(d_date_sk)"
+                                                                                                                ],
+                                                                                                                "Estimated Cardinality": "2349000"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 2708,
+                                                                                                            "intermediate_size_bytes": 88640,
+                                                                                                            "row_groups_scanned": 4,
+                                                                                                            "rows_scanned": 418140,
+                                                                                                            "timing": 0.08185052800000003,
+                                                                                                            "total_row_groups_to_scan": 113,
+                                                                                                            "type": "TABLE_SCAN"
+                                                                                                        },
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Expression": "((d_date_sk BETWEEN 2450815 AND 2452635) AND ((d_moy = 10) OR (d_moy = 11)))",
+                                                                                                                "Estimated Cardinality": "285"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 61,
+                                                                                                            "intermediate_size_bytes": 488,
+                                                                                                            "timing": 0.000050369999999999994,
+                                                                                                            "type": "FILTER",
+                                                                                                            "children": [
+                                                                                                                {
+                                                                                                                    "extra_info": {
+                                                                                                                        "Table": "dsb.main.date_dim",
+                                                                                                                        "Type": "Sequential Scan",
+                                                                                                                        "Projections": [
+                                                                                                                            "d_date_sk",
+                                                                                                                            "d_moy"
+                                                                                                                        ],
+                                                                                                                        "Filters": "(d_year = 1999)",
+                                                                                                                        "Estimated Cardinality": "285"
+                                                                                                                    },
+                                                                                                                    "intermediate_rows": 365,
+                                                                                                                    "intermediate_size_bytes": 2920,
+                                                                                                                    "row_groups_scanned": 1,
+                                                                                                                    "rows_scanned": 73049,
+                                                                                                                    "timing": 0.000403674,
+                                                                                                                    "total_row_groups_to_scan": 1,
+                                                                                                                    "type": "TABLE_SCAN"
+                                                                                                                }
+                                                                                                            ]
+                                                                                                        }
+                                                                                                    ]
+                                                                                                },
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Projections": "#0",
+                                                                                                        "Estimated Cardinality": "720"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 837,
+                                                                                                    "intermediate_size_bytes": 3348,
+                                                                                                    "timing": 0.000002582,
+                                                                                                    "type": "PROJECTION",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Expression": "((i_category = 'Children') OR (i_category = 'Home'))",
+                                                                                                                "Estimated Cardinality": "720"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 837,
+                                                                                                            "intermediate_size_bytes": 19044,
+                                                                                                            "timing": 0.00024112800000000004,
+                                                                                                            "type": "FILTER",
+                                                                                                            "children": [
+                                                                                                                {
+                                                                                                                    "extra_info": {
+                                                                                                                        "Table": "dsb.main.item",
+                                                                                                                        "Type": "Sequential Scan",
+                                                                                                                        "Projections": [
+                                                                                                                            "i_item_sk",
+                                                                                                                            "i_category"
+                                                                                                                        ],
+                                                                                                                        "Filters": [
+                                                                                                                            "optional: (i_category IN ('Children', 'Home'))",
+                                                                                                                            "(i_manager_id >= 81)"
+                                                                                                                        ],
+                                                                                                                        "Estimated Cardinality": "3600"
+                                                                                                                    },
+                                                                                                                    "intermediate_rows": 3635,
+                                                                                                                    "intermediate_size_bytes": 75004,
+                                                                                                                    "row_groups_scanned": 1,
+                                                                                                                    "rows_scanned": 18000,
+                                                                                                                    "timing": 0.001049464,
+                                                                                                                    "total_row_groups_to_scan": 1,
+                                                                                                                    "type": "TABLE_SCAN"
+                                                                                                                }
+                                                                                                            ]
+                                                                                                        }
+                                                                                                    ]
+                                                                                                }
+                                                                                            ]
+                                                                                        },
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "dsb.main.warehouse",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": [
+                                                                                                    "w_warehouse_sk",
+                                                                                                    "w_warehouse_name"
+                                                                                                ],
+                                                                                                "Estimated Cardinality": "5"
+                                                                                            },
+                                                                                            "intermediate_rows": 5,
+                                                                                            "intermediate_size_bytes": 356,
+                                                                                            "row_groups_scanned": 1,
+                                                                                            "rows_scanned": 5,
+                                                                                            "timing": 0.000190044,
+                                                                                            "total_row_groups_to_scan": 1,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "extra_info": {
+                                        "Projections": [
+                                            "CAST(#0 AS INTEGER)",
+                                            "CAST(#1 AS INTEGER)",
+                                            "CAST(#2 AS INTEGER)",
+                                            "#3",
+                                            "#4",
+                                            "CAST(#5 AS INTEGER)",
+                                            "CAST(#6 AS INTEGER)",
+                                            "CAST(#7 AS INTEGER)",
+                                            "#8",
+                                            "#9"
+                                        ],
+                                        "Estimated Cardinality": "0"
+                                    },
+                                    "intermediate_rows": 0,
+                                    "intermediate_size_bytes": 0,
+                                    "timing": 0.0,
+                                    "type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Order By": [
+                                                    "w_warehouse_sk ASC",
+                                                    "i_item_sk ASC",
+                                                    "d_moy ASC",
+                                                    "mean ASC",
+                                                    "cov ASC",
+                                                    "d_moy ASC",
+                                                    "mean ASC",
+                                                    "cov ASC"
+                                                ],
+                                                "Estimated Cardinality": "0"
+                                            },
+                                            "intermediate_rows": 0,
+                                            "intermediate_size_bytes": 0,
+                                            "timing": 1.64e-7,
+                                            "type": "ORDER_BY",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Projections": [
+                                                            "CAST(#0 AS TINYINT)",
+                                                            "CAST(#1 AS SMALLINT)",
+                                                            "CAST(#2 AS TINYINT)",
+                                                            "#3",
+                                                            "#4",
+                                                            "CAST(#5 AS TINYINT)",
+                                                            "CAST(#6 AS SMALLINT)",
+                                                            "CAST(#7 AS TINYINT)",
+                                                            "#8",
+                                                            "#9"
+                                                        ],
+                                                        "Estimated Cardinality": "0"
+                                                    },
+                                                    "intermediate_rows": 0,
+                                                    "intermediate_size_bytes": 0,
+                                                    "timing": 0.0,
+                                                    "type": "PROJECTION",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Projections": [
+                                                                    "w_warehouse_sk",
+                                                                    "i_item_sk",
+                                                                    "d_moy",
+                                                                    "mean",
+                                                                    "cov",
+                                                                    "w_warehouse_sk",
+                                                                    "i_item_sk",
+                                                                    "d_moy",
+                                                                    "mean",
+                                                                    "cov"
+                                                                ],
+                                                                "Estimated Cardinality": "0"
+                                                            },
+                                                            "intermediate_rows": 0,
+                                                            "intermediate_size_bytes": 0,
+                                                            "timing": 0.0,
+                                                            "type": "PROJECTION",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Join Type": "INNER",
+                                                                        "Conditions": [
+                                                                            "i_item_sk = i_item_sk",
+                                                                            "w_warehouse_sk = w_warehouse_sk"
+                                                                        ],
+                                                                        "Estimated Cardinality": "0"
+                                                                    },
+                                                                    "intermediate_rows": 0,
+                                                                    "intermediate_size_bytes": 0,
+                                                                    "timing": 8.07e-7,
+                                                                    "type": "HASH_JOIN",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Expression": "(d_moy = 10)",
+                                                                                "Estimated Cardinality": "15"
+                                                                            },
+                                                                            "intermediate_rows": 0,
+                                                                            "intermediate_size_bytes": 0,
+                                                                            "timing": 0.0,
+                                                                            "type": "FILTER",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "CTE Index": "0",
+                                                                                        "Estimated Cardinality": "15"
+                                                                                    },
+                                                                                    "intermediate_rows": 0,
+                                                                                    "intermediate_size_bytes": 0,
+                                                                                    "timing": 3.47e-7,
+                                                                                    "type": "CTE_SCAN"
+                                                                                }
+                                                                            ]
+                                                                        },
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Expression": "(d_moy = 11)",
+                                                                                "Estimated Cardinality": "15"
+                                                                            },
+                                                                            "intermediate_rows": 0,
+                                                                            "intermediate_size_bytes": 0,
+                                                                            "timing": 1.64e-7,
+                                                                            "type": "FILTER",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "CTE Index": "0",
+                                                                                        "Estimated Cardinality": "15"
+                                                                                    },
+                                                                                    "intermediate_rows": 0,
+                                                                                    "intermediate_size_bytes": 0,
+                                                                                    "timing": 8.33e-7,
+                                                                                    "type": "CTE_SCAN"
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000040791,
+        "aggregate_reuse": 0.000017709,
+        "build_side_probe_side": 0.000038389,
+        "column_lifetime": 0.000065478,
+        "common_aggregate": 0.000006953,
+        "common_subexpressions": 0.000017429,
+        "common_subplan": 0.000198693,
+        "cte_filter_pusher": 0.000189415,
+        "cte_inlining": 0.000011994,
+        "deliminator": 0.000001956,
+        "duplicate_groups": 0.000026482,
+        "empty_result_pullup": 0.000001566,
+        "expression_rewriter": 0.00034844,
+        "filter_pullup": 0.000002871,
+        "filter_pushdown": 0.000217394,
+        "grouping_sets": 0.000006816,
+        "in_clause": 0.000009049,
+        "join_elimination": 0.000019198,
+        "join_filter_pushdown": 0.000145324,
+        "join_order": 0.00057475,
+        "late_materialization": 0.000001776,
+        "limit_pushdown": 0.000001338,
+        "outer_join_simplification": 0.000020209,
+        "partial_aggregate_pushdown": 0.000017971,
+        "partitioned_execution": 0.000001793,
+        "projection_placement": 0.00006504,
+        "projection_pullup": 0.000030406,
+        "redundant_order_keys": 0.000012318,
+        "regex_range": 0.000014227,
+        "reorder_filter": 0.000015,
+        "row_group_pruner": 0.000001089,
+        "row_number_rewriter": 0.000001505,
+        "sampling_pushdown": 0.000001248,
+        "scalar_fn_pushdown": 0.000001008,
+        "statistics_propagation": 0.000647642,
+        "top_n": 0.000001078,
+        "top_n_window_elimination": 0.000005441,
+        "total_time": 0.003222012,
+        "type_pushdown": 0.000001405,
+        "unnest_rewriter": 0.000002911,
+        "unused_columns": 0.000254767,
+        "window_self_join": 0.000006699
+    },
+    "parser": {
+        "total_time": 0.002953123
+    },
+    "physical_planner": {
+        "column_binding": 0.000034823,
+        "create_plan": 0.000156125,
+        "resolve_types": 0.000004315,
+        "total_time": 0.000221882
+    },
+    "planner": {
+        "binding_time": 0.005151158,
+        "total_time": 0.005494009
+    },
+    "query": {
+        "cpu_time": 0.09346807900000004,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nwith inv as\n(select w_warehouse_name,w_warehouse_sk,i_item_sk,d_moy\n       ,stdev,mean, case mean when 0 then null else stdev/mean end cov\n from(select w_warehouse_name,w_warehouse_sk,i_item_sk,d_moy\n            ,stddev_samp(inv_quantity_on_hand) stdev,avg(inv_quantity_on_hand) mean\n      from inventory\n          ,item\n          ,warehouse\n          ,date_dim\n      where inv_item_sk = i_item_sk\n        and inv_warehouse_sk = w_warehouse_sk\n        and inv_date_sk = d_date_sk\n        and d_year =1999\n        and i_category IN ('Children', 'Home')\n        and i_manager_id BETWEEN 81 and 100\n        and inv_quantity_on_hand between 331 and 531\n      group by w_warehouse_name,w_warehouse_sk,i_item_sk,d_moy) foo\n where case mean when 0 then 0 else stdev/mean end > 1)\nselect inv1.w_warehouse_sk,inv1.i_item_sk,inv1.d_moy,inv1.mean, inv1.cov\n        ,inv2.w_warehouse_sk,inv2.i_item_sk,inv2.d_moy,inv2.mean, inv2.cov\nfrom inv inv1,inv inv2\nwhere inv1.i_item_sk = inv2.i_item_sk\n  and inv1.w_warehouse_sk =  inv2.w_warehouse_sk\n  and inv1.d_moy=10\n  and inv2.d_moy=10+1\norder by inv1.w_warehouse_sk,inv1.i_item_sk,inv1.d_moy,inv1.mean,inv1.cov\n        ,inv2.d_moy,inv2.mean, inv2.cov\n;",
+        "total_intermediate_rows": 26224,
+        "total_intermediate_size_bytes": 668632,
+        "total_row_groups_scanned": 7,
+        "total_row_groups_to_scan": 116,
+        "total_rows_scanned": 509194,
+        "total_time": 0.107062581
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 16601496,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 11010048
+    }
+}

@@ -240,7 +240,7 @@ def operators_figure(bench, run, out, lo, hi):
     for j in range(6):
         sub = [r for r in records if group(r) == j]
         if sub:
-            median_band(axes[1], strip, sub, lo, hi, j, f"{names[j]} joins", band=False)
+            median_band(axes[1], strip, sub, lo, hi, j, f"{names[j]} join{'' if names[j] == '1' else 's'}", band=False)
     axes[1].legend(fontsize=6, ncol=2)
     axes[1].set_xlabel("plans given, k")
     axes[1].set_title("median by joins at or below", fontsize=8)
@@ -281,6 +281,22 @@ def summary(bench, kind, meta, records):
         f = lambda x: "∞" if math.isinf(x) else f"{x:.3g}"
         print(f"  {k:>4} {f(pct(v, 50)):>10} {f(pct(v, 25)) + ' – ' + f(pct(v, 75)):>22} "
               f"{sum(not math.isinf(x) for x in v) / len(v):>8.0%} {sum(bool(r['exact']) for r in good if r['k'] == k) / len(v):>6.0%}")
+    if kind == "operator":
+        # Most and least improved query, each scored by the median
+        # improvement of its operators.
+        per = defaultdict(list)
+        for r in good:
+            per[(r["target"], r["operator"])].append({**r, "target": f"{r['target']}#{r['operator']}"})
+        imp = improvement([r for rs in per.values() for r in rs])
+        by_query = defaultdict(list)
+        for t, (d, qn, _, _) in imp.items():
+            by_query[t.split("#")[0]].append(d)
+        score = {t: pct(v, 50) for t, v in by_query.items()}
+        if score:
+            most = max(score, key=lambda t: score[t])
+            least = min(score, key=lambda t: score[t])
+            print(f"  most improved query: {most} (median log10 improvement {score[most]:.2f}); "
+                  f"least: {least} ({score[least]:.2f})")
     unsound = [r for r in good if r.get("holds") is False]
     checks = meta.get("checks", {})
     print(f"  unsound: {len(unsound)}; non-monotone steps: {len(checks.get('non_monotone', []))}; "
