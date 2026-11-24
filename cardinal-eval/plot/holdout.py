@@ -213,7 +213,9 @@ def all_figure(runs, out, lo, hi):
         rs = ok(rs)
         n = n_of(rs)
         ks = by_k(rs)
-        strip.line([k / n for k in ks], [pct([q(r) for r in v], 50) for v in ks.values()], label=bench.upper(), **style.style(i))
+        kind = rs[0]["target_kind"] if rs else "root"
+        label = f"{bench.upper()} ({kind})"
+        strip.line([k / n for k in ks], [pct([q(r) for r in v], 50) for v in ks.values()], label=label, **style.style(i))
     ax.set_xlabel("share of the other queries' plans given")
     ax.set_ylabel(r"median $q_U$")
     ax.set_xlim(0, 1)
