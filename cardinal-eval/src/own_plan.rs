@@ -37,7 +37,7 @@ pub async fn own_plan(args: OwnPlanArgs) -> Result<()> {
     if targets.is_empty() {
         bail!("no targets with a {} profile", args.engine);
     }
-    let switches = json!({"cardinalities": c.cardinalities, "unbounded": c.unbounded, "engine": args.engine, "only": args.only});
+    let switches = json!({"cardinalities": c.cardinalities, "unbounded": c.unbounded, "budget_scale": c.budget_scale, "engine": args.engine, "only": args.only});
     let meta = c.meta("own-plan", &bench, switches, &bench.q_ref, &targets);
     let run = c.run("own-plan", &bench.name, &meta)?;
     let builders = Builders::new(&bench, &targets).await?;

@@ -40,6 +40,9 @@ pub struct Common {
     /// No Z3 budget: `Limits::unbounded`.
     #[arg(long)]
     pub unbounded: bool,
+    /// Multiply every Z3 budget, and the wall-clock guard, by this.
+    #[arg(long, default_value_t = 1, conflicts_with = "unbounded")]
+    pub budget_scale: u32,
     #[arg(long, value_enum, default_value = "contended")]
     pub timing: Timing,
     /// Jobs run again alone after the run, which must agree.
@@ -60,7 +63,17 @@ pub fn default_results() -> PathBuf {
 
 impl Common {
     pub fn limits(&self) -> Limits {
-        if self.unbounded { Limits::unbounded() } else { Limits::default() }
+        if self.unbounded {
+            return Limits::unbounded();
+        }
+        let d = Limits::default();
+        let n = self.budget_scale;
+        Limits {
+            search_first: d.search_first.saturating_mul(n),
+            search: d.search.saturating_mul(n),
+            link: d.link.saturating_mul(n),
+            timeout_ms: d.timeout_ms.map(|t| t.saturating_mul(n)),
+        }
     }
 
     pub fn threads(&self) -> usize {

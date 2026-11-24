@@ -118,6 +118,8 @@ def label(meta):
         parts.append("with row counts")
     if sw.get("unbounded"):
         parts.append("unbounded")
+    if sw.get("budget_scale", 1) > 1:
+        parts.append(f"budget ×{sw['budget_scale']}")
     return ", ".join(parts) or "plans only"
 
 

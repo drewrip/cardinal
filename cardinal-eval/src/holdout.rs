@@ -88,6 +88,7 @@ struct Switches {
     max_k: Option<usize>,
     cardinalities: bool,
     unbounded: bool,
+    budget_scale: u32,
     instances: u32,
     operators: bool,
 }
@@ -110,6 +111,7 @@ impl HoldoutArgs {
             max_k: self.max_k,
             cardinalities: c.cardinalities,
             unbounded: c.unbounded,
+            budget_scale: c.budget_scale,
             instances: self.instances,
             operators: self.operators,
         }

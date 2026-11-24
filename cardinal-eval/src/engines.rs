@@ -58,7 +58,7 @@ pub async fn engines(args: EnginesArgs) -> Result<()> {
         eprintln!("ROOT MISMATCH {m}");
     }
 
-    let switches = json!({"cardinalities": c.cardinalities, "unbounded": c.unbounded, "engines": engines, "only": args.only});
+    let switches = json!({"cardinalities": c.cardinalities, "unbounded": c.unbounded, "budget_scale": c.budget_scale, "engines": engines, "only": args.only});
     let meta = c.meta("engines", &bench, switches, &bench.q_ref, &targets);
     let run = c.run("engines", &bench.name, &meta)?;
     let builders = Builders::new(&bench, &targets).await?;
