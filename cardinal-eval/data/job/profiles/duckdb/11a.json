@@ -1,0 +1,427 @@
+{
+    "io": {
+        "total_bytes_read": 4718592,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 3.82e-7,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Aggregates": [
+                                    "min(#0)",
+                                    "min(#1)",
+                                    "min(#2)"
+                                ],
+                                "Estimated Cardinality": "1"
+                            },
+                            "intermediate_rows": 1,
+                            "intermediate_size_bytes": 8240,
+                            "timing": 0.000022283,
+                            "type": "UNGROUPED_AGGREGATE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Projections": [
+                                            "name",
+                                            "link",
+                                            "title"
+                                        ],
+                                        "Estimated Cardinality": "0"
+                                    },
+                                    "intermediate_rows": 310,
+                                    "intermediate_size_bytes": 14880,
+                                    "timing": 6.25e-7,
+                                    "type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Join Type": "INNER",
+                                                "Conditions": "id = company_type_id",
+                                                "Estimated Cardinality": "0"
+                                            },
+                                            "intermediate_rows": 310,
+                                            "intermediate_size_bytes": 16120,
+                                            "timing": 0.00022222299999999996,
+                                            "type": "HASH_JOIN",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Expression": "(id <= 2)",
+                                                        "Estimated Cardinality": "1"
+                                                    },
+                                                    "intermediate_rows": 1,
+                                                    "intermediate_size_bytes": 4,
+                                                    "timing": 0.000009246,
+                                                    "type": "FILTER",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Table": "job.main.company_type",
+                                                                "Type": "Sequential Scan",
+                                                                "Projections": "id",
+                                                                "Filters": "(kind = 'production companies')",
+                                                                "Dynamic Filters": "(optional: (id >= 1) AND optional: (id <= 2))",
+                                                                "Estimated Cardinality": "1"
+                                                            },
+                                                            "intermediate_rows": 1,
+                                                            "intermediate_size_bytes": 4,
+                                                            "row_groups_scanned": 1,
+                                                            "rows_scanned": 4,
+                                                            "timing": 0.000156964,
+                                                            "total_row_groups_to_scan": 1,
+                                                            "type": "TABLE_SCAN"
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "extra_info": {
+                                                        "Join Type": "INNER",
+                                                        "Conditions": "id = company_id",
+                                                        "Estimated Cardinality": "0"
+                                                    },
+                                                    "intermediate_rows": 330,
+                                                    "intermediate_size_bytes": 1070976,
+                                                    "timing": 0.0005379089999999999,
+                                                    "type": "HASH_JOIN",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Table": "job.main.company_name",
+                                                                "Type": "Sequential Scan",
+                                                                "Projections": [
+                                                                    "name",
+                                                                    "id"
+                                                                ],
+                                                                "Filters": [
+                                                                    "(country_code != '[pl]')",
+                                                                    "(contains(name, 'Film') OR contains(name, 'Warner'))"
+                                                                ],
+                                                                "Dynamic Filters": "optional: id IN PRF(company_id)",
+                                                                "Estimated Cardinality": "46999"
+                                                            },
+                                                            "intermediate_rows": 11,
+                                                            "intermediate_size_bytes": 5228300,
+                                                            "row_groups_scanned": 1,
+                                                            "rows_scanned": 122880,
+                                                            "timing": 0.017129138999999998,
+                                                            "total_row_groups_to_scan": 2,
+                                                            "type": "TABLE_SCAN"
+                                                        },
+                                                        {
+                                                            "extra_info": {
+                                                                "Join Type": "INNER",
+                                                                "Conditions": "movie_id = movie_id",
+                                                                "Estimated Cardinality": "0"
+                                                            },
+                                                            "intermediate_rows": 705,
+                                                            "intermediate_size_bytes": 28200,
+                                                            "timing": 0.000294573,
+                                                            "type": "HASH_JOIN",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Expression": "(movie_id <= 186175)",
+                                                                        "Estimated Cardinality": "521825"
+                                                                    },
+                                                                    "intermediate_rows": 69,
+                                                                    "intermediate_size_bytes": 828,
+                                                                    "timing": 0.000035789,
+                                                                    "type": "FILTER",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Table": "job.main.movie_companies",
+                                                                                "Type": "Sequential Scan",
+                                                                                "Projections": [
+                                                                                    "movie_id",
+                                                                                    "company_type_id",
+                                                                                    "company_id"
+                                                                                ],
+                                                                                "Filters": "(note IS NULL)",
+                                                                                "Dynamic Filters": "optional: movie_id IN PRF(movie_id)",
+                                                                                "Estimated Cardinality": "521825"
+                                                                            },
+                                                                            "intermediate_rows": 69,
+                                                                            "intermediate_size_bytes": 828,
+                                                                            "row_groups_scanned": 4,
+                                                                            "rows_scanned": 472910,
+                                                                            "timing": 0.007610620999999999,
+                                                                            "total_row_groups_to_scan": 23,
+                                                                            "type": "TABLE_SCAN"
+                                                                        }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Join Type": "INNER",
+                                                                        "Conditions": "id = movie_id",
+                                                                        "Estimated Cardinality": "0"
+                                                                    },
+                                                                    "intermediate_rows": 152,
+                                                                    "intermediate_size_bytes": 9568,
+                                                                    "timing": 0.00015008,
+                                                                    "type": "HASH_JOIN",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Expression": "(id BETWEEN 2 AND 186175)",
+                                                                                "Estimated Cardinality": "505662"
+                                                                            },
+                                                                            "intermediate_rows": 25,
+                                                                            "intermediate_size_bytes": 4596,
+                                                                            "timing": 0.000082507,
+                                                                            "type": "FILTER",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Table": "job.main.title",
+                                                                                        "Type": "Sequential Scan",
+                                                                                        "Projections": [
+                                                                                            "id",
+                                                                                            "title"
+                                                                                        ],
+                                                                                        "Filters": "((production_year >= 1950) AND (production_year <= 2000))",
+                                                                                        "Dynamic Filters": "optional: id IN PRF(movie_id)",
+                                                                                        "Estimated Cardinality": "505662"
+                                                                                    },
+                                                                                    "intermediate_rows": 25,
+                                                                                    "intermediate_size_bytes": 5468012,
+                                                                                    "row_groups_scanned": 2,
+                                                                                    "rows_scanned": 241664,
+                                                                                    "timing": 0.014873846999999999,
+                                                                                    "total_row_groups_to_scan": 21,
+                                                                                    "type": "TABLE_SCAN"
+                                                                                }
+                                                                            ]
+                                                                        },
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Join Type": "INNER",
+                                                                                "Conditions": "id = link_type_id",
+                                                                                "Estimated Cardinality": "0"
+                                                                            },
+                                                                            "intermediate_rows": 199,
+                                                                            "intermediate_size_bytes": 3980,
+                                                                            "timing": 0.00017334099999999998,
+                                                                            "type": "HASH_JOIN",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Expression": "(id <= 17)",
+                                                                                        "Estimated Cardinality": "3"
+                                                                                    },
+                                                                                    "intermediate_rows": 2,
+                                                                                    "intermediate_size_bytes": 40,
+                                                                                    "timing": 0.000013256,
+                                                                                    "type": "FILTER",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "job.main.link_type",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": [
+                                                                                                    "link",
+                                                                                                    "id"
+                                                                                                ],
+                                                                                                "Filters": "contains(link, 'follow')",
+                                                                                                "Dynamic Filters": "(optional: (id >= 1) AND optional: (id <= 16))",
+                                                                                                "Estimated Cardinality": "3"
+                                                                                            },
+                                                                                            "intermediate_rows": 2,
+                                                                                            "intermediate_size_bytes": 40,
+                                                                                            "row_groups_scanned": 1,
+                                                                                            "rows_scanned": 18,
+                                                                                            "timing": 0.000307366,
+                                                                                            "total_row_groups_to_scan": 1,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        }
+                                                                                    ]
+                                                                                },
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Join Type": "INNER",
+                                                                                        "Conditions": "movie_id = movie_id",
+                                                                                        "Estimated Cardinality": "0"
+                                                                                    },
+                                                                                    "intermediate_rows": 251,
+                                                                                    "intermediate_size_bytes": 2008,
+                                                                                    "timing": 0.000254619,
+                                                                                    "type": "HASH_JOIN",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "job.main.movie_link",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": [
+                                                                                                    "link_type_id",
+                                                                                                    "movie_id"
+                                                                                                ],
+                                                                                                "Dynamic Filters": "(optional: (movie_id IN (963, 4566, 15613, 18389, 19450, 31741, 31756, 32301, 34011, 34044, 34045, 35358, 41539, 54699, 77673, 79190, 92002, 96348, 97017, 116519, 128412, 132196, 133769, 138918, 138924, 138926, 138930, 138932, 138933, 138934, 138935, 160018, 161855, 162358, 162862, 165160, 174392, 177170, 177173, 177199, 177200, 181193, 181204)) AND optional: movie_id IN PRF(movie_id))",
+                                                                                                "Estimated Cardinality": "29997"
+                                                                                            },
+                                                                                            "intermediate_rows": 250,
+                                                                                            "intermediate_size_bytes": 2000,
+                                                                                            "row_groups_scanned": 1,
+                                                                                            "rows_scanned": 29997,
+                                                                                            "timing": 0.00045964599999999997,
+                                                                                            "total_row_groups_to_scan": 1,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        },
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Join Type": "INNER",
+                                                                                                "Conditions": "keyword_id = id",
+                                                                                                "Estimated Cardinality": "67"
+                                                                                            },
+                                                                                            "intermediate_rows": 46,
+                                                                                            "intermediate_size_bytes": 368,
+                                                                                            "timing": 0.00019154300000000002,
+                                                                                            "type": "HASH_JOIN",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Table": "job.main.movie_keyword",
+                                                                                                        "Type": "Sequential Scan",
+                                                                                                        "Projections": [
+                                                                                                            "movie_id",
+                                                                                                            "keyword_id"
+                                                                                                        ],
+                                                                                                        "Filters": "(movie_id <= 186175)",
+                                                                                                        "Dynamic Filters": "(keyword_id = 398)",
+                                                                                                        "Estimated Cardinality": "4523930"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 46,
+                                                                                                    "intermediate_size_bytes": 368,
+                                                                                                    "row_groups_scanned": 2,
+                                                                                                    "rows_scanned": 156893,
+                                                                                                    "timing": 0.001972135,
+                                                                                                    "total_row_groups_to_scan": 46,
+                                                                                                    "type": "TABLE_SCAN"
+                                                                                                },
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Table": "job.main.keyword",
+                                                                                                        "Type": "Sequential Scan",
+                                                                                                        "Projections": "id",
+                                                                                                        "Filters": "(keyword = 'sequel')",
+                                                                                                        "Estimated Cardinality": "2"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 1,
+                                                                                                    "intermediate_size_bytes": 4,
+                                                                                                    "row_groups_scanned": 2,
+                                                                                                    "rows_scanned": 134170,
+                                                                                                    "timing": 0.008815478,
+                                                                                                    "total_row_groups_to_scan": 2,
+                                                                                                    "type": "TABLE_SCAN"
+                                                                                                }
+                                                                                            ]
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000011206,
+        "aggregate_reuse": 0.000019986,
+        "build_side_probe_side": 0.000054463,
+        "column_lifetime": 0.000077244,
+        "common_aggregate": 0.000018764,
+        "common_subexpressions": 0.000003495,
+        "common_subplan": 0.000282453,
+        "cte_filter_pusher": 0.000001113,
+        "cte_inlining": 0.000001014,
+        "deliminator": 0.000002228,
+        "duplicate_groups": 0.000008894,
+        "empty_result_pullup": 0.00000136,
+        "expression_rewriter": 0.000298649,
+        "filter_pullup": 0.000002534,
+        "filter_pushdown": 0.000223403,
+        "grouping_sets": 0.000003269,
+        "in_clause": 0.000001795,
+        "join_elimination": 0.000008131,
+        "join_filter_pushdown": 0.000198879,
+        "join_order": 0.00585978,
+        "late_materialization": 0.000001963,
+        "limit_pushdown": 9.64e-7,
+        "outer_join_simplification": 0.000015136,
+        "partial_aggregate_pushdown": 0.000004482,
+        "partitioned_execution": 0.000002122,
+        "projection_placement": 0.000006101,
+        "projection_pullup": 0.000012525,
+        "redundant_order_keys": 0.000014142,
+        "regex_range": 0.000013368,
+        "reorder_filter": 0.000018414,
+        "row_group_pruner": 8.63e-7,
+        "row_number_rewriter": 0.000001192,
+        "sampling_pushdown": 7.52e-7,
+        "scalar_fn_pushdown": 8.4e-7,
+        "statistics_propagation": 0.000330859,
+        "top_n": 9.13e-7,
+        "top_n_window_elimination": 0.000005068,
+        "total_time": 0.007840729,
+        "type_pushdown": 0.000001204,
+        "unnest_rewriter": 0.000001929,
+        "unused_columns": 0.000132766,
+        "window_self_join": 0.000006333
+    },
+    "parser": {
+        "total_time": 0.001790303
+    },
+    "physical_planner": {
+        "column_binding": 0.000024586,
+        "create_plan": 0.000116934,
+        "resolve_types": 0.000003464,
+        "total_time": 0.000159641
+    },
+    "planner": {
+        "binding_time": 0.000889056,
+        "total_time": 0.001247999
+    },
+    "query": {
+        "cpu_time": 0.053313572000000004,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nSELECT MIN(cn.name) AS from_company,\n       MIN(lt.link) AS movie_link_type,\n       MIN(t.title) AS non_polish_sequel_movie\nFROM company_name AS cn,\n     company_type AS ct,\n     keyword AS k,\n     link_type AS lt,\n     movie_companies AS mc,\n     movie_keyword AS mk,\n     movie_link AS ml,\n     title AS t\nWHERE cn.country_code !='[pl]'\n  AND (cn.name LIKE '%Film%'\n       OR cn.name LIKE '%Warner%')\n  AND ct.kind ='production companies'\n  AND k.keyword ='sequel'\n  AND lt.link LIKE '%follow%'\n  AND mc.note IS NULL\n  AND t.production_year BETWEEN 1950 AND 2000\n  AND lt.id = ml.link_type_id\n  AND ml.movie_id = t.id\n  AND t.id = mk.movie_id\n  AND mk.keyword_id = k.id\n  AND t.id = mc.movie_id\n  AND mc.company_type_id = ct.id\n  AND mc.company_id = cn.id\n  AND ml.movie_id = mk.movie_id\n  AND ml.movie_id = mc.movie_id\n  AND mk.movie_id = mc.movie_id\n;",
+        "total_intermediate_rows": 2806,
+        "total_intermediate_size_bytes": 11859364,
+        "total_row_groups_scanned": 14,
+        "total_row_groups_to_scan": 97,
+        "total_rows_scanned": 1158536,
+        "total_time": 0.067887398
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 25366576,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 25427968
+    }
+}

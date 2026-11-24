@@ -1,0 +1,485 @@
+{
+    "io": {
+        "total_bytes_read": 65011712,
+        "total_bytes_written": 0
+    },
+    "operator": [
+        {
+            "extra_info": {},
+            "intermediate_rows": 0,
+            "intermediate_size_bytes": 0,
+            "timing": 0.0,
+            "type": "RESULT_COLLECTOR",
+            "children": [
+                {
+                    "extra_info": {},
+                    "intermediate_rows": 0,
+                    "intermediate_size_bytes": 0,
+                    "timing": 4.74e-7,
+                    "type": "EXPLAIN_ANALYZE",
+                    "children": [
+                        {
+                            "extra_info": {
+                                "Aggregates": [
+                                    "min(#0)",
+                                    "min(#1)"
+                                ],
+                                "Estimated Cardinality": "1"
+                            },
+                            "intermediate_rows": 1,
+                            "intermediate_size_bytes": 8224,
+                            "timing": 0.000023024000000000002,
+                            "type": "UNGROUPED_AGGREGATE",
+                            "children": [
+                                {
+                                    "extra_info": {
+                                        "Projections": [
+                                            "name",
+                                            "title"
+                                        ],
+                                        "Estimated Cardinality": "0"
+                                    },
+                                    "intermediate_rows": 32,
+                                    "intermediate_size_bytes": 5120,
+                                    "timing": 0.000001584,
+                                    "type": "PROJECTION",
+                                    "children": [
+                                        {
+                                            "extra_info": {
+                                                "Join Type": "INNER",
+                                                "Conditions": "id = movie_id",
+                                                "Estimated Cardinality": "0"
+                                            },
+                                            "intermediate_rows": 32,
+                                            "intermediate_size_bytes": 5120,
+                                            "timing": 0.000380609,
+                                            "type": "HASH_JOIN",
+                                            "children": [
+                                                {
+                                                    "extra_info": {
+                                                        "Expression": "(id BETWEEN 284 AND 2524994)",
+                                                        "Estimated Cardinality": "505662"
+                                                    },
+                                                    "intermediate_rows": 7,
+                                                    "intermediate_size_bytes": 4236,
+                                                    "timing": 0.000074321,
+                                                    "type": "FILTER",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Table": "job.main.title",
+                                                                "Type": "Sequential Scan",
+                                                                "Projections": [
+                                                                    "id",
+                                                                    "title"
+                                                                ],
+                                                                "Filters": "((production_year >= 1980) AND (production_year <= 1995))",
+                                                                "Dynamic Filters": "optional: id IN PRF(movie_id)",
+                                                                "Estimated Cardinality": "505662"
+                                                            },
+                                                            "intermediate_rows": 7,
+                                                            "intermediate_size_bytes": 3134836,
+                                                            "row_groups_scanned": 10,
+                                                            "rows_scanned": 1174584,
+                                                            "timing": 0.032019148,
+                                                            "total_row_groups_to_scan": 21,
+                                                            "type": "TABLE_SCAN"
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "extra_info": {
+                                                        "Join Type": "INNER",
+                                                        "Conditions": "id = link_type_id",
+                                                        "Estimated Cardinality": "0"
+                                                    },
+                                                    "intermediate_rows": 151,
+                                                    "intermediate_size_bytes": 3624,
+                                                    "timing": 0.000309835,
+                                                    "type": "HASH_JOIN",
+                                                    "children": [
+                                                        {
+                                                            "extra_info": {
+                                                                "Expression": "(id <= 17)",
+                                                                "Estimated Cardinality": "2"
+                                                            },
+                                                            "intermediate_rows": 1,
+                                                            "intermediate_size_bytes": 4,
+                                                            "timing": 0.000011012,
+                                                            "type": "FILTER",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Table": "job.main.link_type",
+                                                                        "Type": "Sequential Scan",
+                                                                        "Projections": "id",
+                                                                        "Filters": "(link = 'features')",
+                                                                        "Dynamic Filters": "(optional: (id >= 5) AND optional: (id <= 16))",
+                                                                        "Estimated Cardinality": "2"
+                                                                    },
+                                                                    "intermediate_rows": 1,
+                                                                    "intermediate_size_bytes": 4,
+                                                                    "row_groups_scanned": 1,
+                                                                    "rows_scanned": 18,
+                                                                    "timing": 0.000348899,
+                                                                    "total_row_groups_to_scan": 1,
+                                                                    "type": "TABLE_SCAN"
+                                                                }
+                                                            ]
+                                                        },
+                                                        {
+                                                            "extra_info": {
+                                                                "Join Type": "INNER",
+                                                                "Conditions": "linked_movie_id = movie_id",
+                                                                "Estimated Cardinality": "0"
+                                                            },
+                                                            "intermediate_rows": 510,
+                                                            "intermediate_size_bytes": 20944,
+                                                            "timing": 0.0007342890000000001,
+                                                            "type": "HASH_JOIN",
+                                                            "children": [
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Table": "job.main.movie_link",
+                                                                        "Type": "Sequential Scan",
+                                                                        "Projections": [
+                                                                            "linked_movie_id",
+                                                                            "link_type_id"
+                                                                        ],
+                                                                        "Dynamic Filters": "optional: linked_movie_id IN PRF(movie_id)",
+                                                                        "Estimated Cardinality": "29997"
+                                                                    },
+                                                                    "intermediate_rows": 188,
+                                                                    "intermediate_size_bytes": 1504,
+                                                                    "row_groups_scanned": 1,
+                                                                    "rows_scanned": 29997,
+                                                                    "timing": 0.000517625,
+                                                                    "total_row_groups_to_scan": 1,
+                                                                    "type": "TABLE_SCAN"
+                                                                },
+                                                                {
+                                                                    "extra_info": {
+                                                                        "Join Type": "INNER",
+                                                                        "Conditions": "person_id = person_id",
+                                                                        "Estimated Cardinality": "0"
+                                                                    },
+                                                                    "intermediate_rows": 3354,
+                                                                    "intermediate_size_bytes": 67080,
+                                                                    "timing": 0.0005959380000000001,
+                                                                    "type": "HASH_JOIN",
+                                                                    "children": [
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Expression": "(movie_id BETWEEN 284 AND 2524994)",
+                                                                                "Estimated Cardinality": "36244344"
+                                                                            },
+                                                                            "intermediate_rows": 2196,
+                                                                            "intermediate_size_bytes": 17568,
+                                                                            "timing": 0.000394956,
+                                                                            "type": "FILTER",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Table": "job.main.cast_info",
+                                                                                        "Type": "Sequential Scan",
+                                                                                        "Projections": [
+                                                                                            "person_id",
+                                                                                            "movie_id"
+                                                                                        ],
+                                                                                        "Filters": "(person_id >= 4)",
+                                                                                        "Dynamic Filters": "(optional: (person_id IN (50306, 56790, 199053, 241001, 263654, 273492, 283502, 284817, 369193, 408600, 1789242, 1814084, 1845927)) AND optional: person_id IN PRF(person_id))",
+                                                                                        "Estimated Cardinality": "36244344"
+                                                                                    },
+                                                                                    "intermediate_rows": 2196,
+                                                                                    "intermediate_size_bytes": 17568,
+                                                                                    "row_groups_scanned": 242,
+                                                                                    "rows_scanned": 24497729,
+                                                                                    "timing": 0.21482377199999997,
+                                                                                    "total_row_groups_to_scan": 348,
+                                                                                    "type": "TABLE_SCAN"
+                                                                                }
+                                                                            ]
+                                                                        },
+                                                                        {
+                                                                            "extra_info": {
+                                                                                "Join Type": "INNER",
+                                                                                "Conditions": "person_id = person_id",
+                                                                                "Estimated Cardinality": "0"
+                                                                            },
+                                                                            "intermediate_rows": 20,
+                                                                            "intermediate_size_bytes": 4496,
+                                                                            "timing": 0.00043032599999999997,
+                                                                            "type": "HASH_JOIN",
+                                                                            "children": [
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Expression": "(person_id <= 4061926)",
+                                                                                        "Estimated Cardinality": "180268"
+                                                                                    },
+                                                                                    "intermediate_rows": 20,
+                                                                                    "intermediate_size_bytes": 80,
+                                                                                    "timing": 0.00008711399999999999,
+                                                                                    "type": "FILTER",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Table": "job.main.aka_name",
+                                                                                                "Type": "Sequential Scan",
+                                                                                                "Projections": "person_id",
+                                                                                                "Filters": "contains(name, 'a')",
+                                                                                                "Dynamic Filters": "(optional: (person_id IN (46828, 50306, 56790, 164766, 175762, 199053, 241001, 263654, 273492, 283502, 284817, 369193, 381388, 408600, 1789242, 1814084, 1845927)) AND optional: person_id IN PRF(person_id))",
+                                                                                                "Estimated Cardinality": "180268"
+                                                                                            },
+                                                                                            "intermediate_rows": 20,
+                                                                                            "intermediate_size_bytes": 80,
+                                                                                            "row_groups_scanned": 8,
+                                                                                            "rows_scanned": 901343,
+                                                                                            "timing": 0.05715584600000001,
+                                                                                            "total_row_groups_to_scan": 8,
+                                                                                            "type": "TABLE_SCAN"
+                                                                                        }
+                                                                                    ]
+                                                                                },
+                                                                                {
+                                                                                    "extra_info": {
+                                                                                        "Join Type": "INNER",
+                                                                                        "Conditions": "id = person_id",
+                                                                                        "Estimated Cardinality": "0"
+                                                                                    },
+                                                                                    "intermediate_rows": 17,
+                                                                                    "intermediate_size_bytes": 4572,
+                                                                                    "timing": 0.00037140599999999996,
+                                                                                    "type": "HASH_JOIN",
+                                                                                    "children": [
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Expression": "(id BETWEEN 4 AND 4061926)",
+                                                                                                "Estimated Cardinality": "166699"
+                                                                                            },
+                                                                                            "intermediate_rows": 17,
+                                                                                            "intermediate_size_bytes": 4436,
+                                                                                            "timing": 0.000028032000000000002,
+                                                                                            "type": "FILTER",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Projections": [
+                                                                                                            "#1",
+                                                                                                            "#2"
+                                                                                                        ],
+                                                                                                        "Estimated Cardinality": "166699"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 17,
+                                                                                                    "intermediate_size_bytes": 4436,
+                                                                                                    "timing": 0.000001604,
+                                                                                                    "type": "PROJECTION",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Expression": "(((gender = 'm') OR (gender = 'f')) AND ((gender = 'm') OR ((gender = 'f') AND prefix(name, 'B'))))",
+                                                                                                                "Estimated Cardinality": "166699"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 17,
+                                                                                                            "intermediate_size_bytes": 4708,
+                                                                                                            "timing": 0.0006219209999999999,
+                                                                                                            "type": "FILTER",
+                                                                                                            "children": [
+                                                                                                                {
+                                                                                                                    "extra_info": {
+                                                                                                                        "Table": "job.main.\"name\"",
+                                                                                                                        "Type": "Sequential Scan",
+                                                                                                                        "Projections": [
+                                                                                                                            "gender",
+                                                                                                                            "name",
+                                                                                                                            "id"
+                                                                                                                        ],
+                                                                                                                        "Filters": [
+                                                                                                                            "(name_pcode_cf <= 'F')",
+                                                                                                                            "optional: ((gender = 'm') OR (gender = 'f'))"
+                                                                                                                        ],
+                                                                                                                        "Dynamic Filters": "optional: id IN PRF(person_id)",
+                                                                                                                        "Estimated Cardinality": "833498"
+                                                                                                                    },
+                                                                                                                    "intermediate_rows": 21,
+                                                                                                                    "intermediate_size_bytes": 9425308,
+                                                                                                                    "row_groups_scanned": 9,
+                                                                                                                    "rows_scanned": 1105920,
+                                                                                                                    "timing": 0.051327726000000004,
+                                                                                                                    "total_row_groups_to_scan": 34,
+                                                                                                                    "type": "TABLE_SCAN"
+                                                                                                                }
+                                                                                                            ]
+                                                                                                        }
+                                                                                                    ]
+                                                                                                }
+                                                                                            ]
+                                                                                        },
+                                                                                        {
+                                                                                            "extra_info": {
+                                                                                                "Join Type": "INNER",
+                                                                                                "Conditions": "info_type_id = id",
+                                                                                                "Estimated Cardinality": "8"
+                                                                                            },
+                                                                                            "intermediate_rows": 62,
+                                                                                            "intermediate_size_bytes": 496,
+                                                                                            "timing": 0.000203244,
+                                                                                            "type": "HASH_JOIN",
+                                                                                            "children": [
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Expression": "(person_id <= 4061926)",
+                                                                                                        "Estimated Cardinality": "495"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 62,
+                                                                                                    "intermediate_size_bytes": 496,
+                                                                                                    "timing": 0.000298126,
+                                                                                                    "type": "FILTER",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Table": "job.main.person_info",
+                                                                                                                "Type": "Sequential Scan",
+                                                                                                                "Projections": [
+                                                                                                                    "person_id",
+                                                                                                                    "info_type_id"
+                                                                                                                ],
+                                                                                                                "Filters": "(note = 'Volker Boehm')",
+                                                                                                                "Dynamic Filters": "(info_type_id = 19)",
+                                                                                                                "Estimated Cardinality": "495"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 64,
+                                                                                                            "intermediate_size_bytes": 512,
+                                                                                                            "row_groups_scanned": 25,
+                                                                                                            "rows_scanned": 2963664,
+                                                                                                            "timing": 0.04853941500000002,
+                                                                                                            "total_row_groups_to_scan": 25,
+                                                                                                            "type": "TABLE_SCAN"
+                                                                                                        }
+                                                                                                    ]
+                                                                                                },
+                                                                                                {
+                                                                                                    "extra_info": {
+                                                                                                        "Expression": "(id BETWEEN 15 AND 39)",
+                                                                                                        "Estimated Cardinality": "2"
+                                                                                                    },
+                                                                                                    "intermediate_rows": 1,
+                                                                                                    "intermediate_size_bytes": 4,
+                                                                                                    "timing": 0.000033032,
+                                                                                                    "type": "FILTER",
+                                                                                                    "children": [
+                                                                                                        {
+                                                                                                            "extra_info": {
+                                                                                                                "Table": "job.main.info_type",
+                                                                                                                "Type": "Sequential Scan",
+                                                                                                                "Projections": "id",
+                                                                                                                "Filters": "(info = 'mini biography')",
+                                                                                                                "Estimated Cardinality": "2"
+                                                                                                            },
+                                                                                                            "intermediate_rows": 1,
+                                                                                                            "intermediate_size_bytes": 4,
+                                                                                                            "row_groups_scanned": 1,
+                                                                                                            "rows_scanned": 113,
+                                                                                                            "timing": 0.000346813,
+                                                                                                            "total_row_groups_to_scan": 1,
+                                                                                                            "type": "TABLE_SCAN"
+                                                                                                        }
+                                                                                                    ]
+                                                                                                }
+                                                                                            ]
+                                                                                        }
+                                                                                    ]
+                                                                                }
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "optimizer": {
+        "aggregate_function_rewriter": 0.000016137,
+        "aggregate_reuse": 0.000035337,
+        "build_side_probe_side": 0.000088889,
+        "column_lifetime": 0.000122742,
+        "common_aggregate": 0.000032926,
+        "common_subexpressions": 0.000005864,
+        "common_subplan": 0.000395131,
+        "cte_filter_pusher": 0.000001864,
+        "cte_inlining": 0.000001504,
+        "deliminator": 0.000002838,
+        "duplicate_groups": 0.000018689,
+        "empty_result_pullup": 0.000001829,
+        "expression_rewriter": 0.000792363,
+        "filter_pullup": 0.000004039,
+        "filter_pushdown": 0.000492862,
+        "grouping_sets": 0.000006746,
+        "in_clause": 0.000003685,
+        "join_elimination": 0.000011013,
+        "join_filter_pushdown": 0.000345543,
+        "join_order": 0.009830765,
+        "late_materialization": 0.000003165,
+        "limit_pushdown": 0.000001417,
+        "outer_join_simplification": 0.0000252,
+        "partial_aggregate_pushdown": 0.000008246,
+        "partitioned_execution": 0.000002762,
+        "projection_placement": 0.000009109,
+        "projection_pullup": 0.000023702,
+        "redundant_order_keys": 0.00002031,
+        "regex_range": 0.000017034,
+        "reorder_filter": 0.00005694,
+        "row_group_pruner": 0.000001637,
+        "row_number_rewriter": 0.000001821,
+        "sampling_pushdown": 0.000001214,
+        "scalar_fn_pushdown": 0.000001296,
+        "statistics_propagation": 0.000950955,
+        "top_n": 0.000001357,
+        "top_n_window_elimination": 0.00000768,
+        "total_time": 0.014007015,
+        "type_pushdown": 0.000002023,
+        "unnest_rewriter": 0.00000268,
+        "unused_columns": 0.000340517,
+        "window_self_join": 0.000008363
+    },
+    "parser": {
+        "total_time": 0.002379966
+    },
+    "physical_planner": {
+        "column_binding": 0.00005579,
+        "create_plan": 0.000183678,
+        "resolve_types": 0.00000645,
+        "total_time": 0.000269152
+    },
+    "planner": {
+        "binding_time": 0.001179878,
+        "total_time": 0.001660383
+    },
+    "query": {
+        "cpu_time": 0.409680091,
+        "sql": "EXPLAIN (ANALYZE, FORMAT JSON)\nSELECT MIN(n.name) AS of_person,\n       MIN(t.title) AS biography_movie\nFROM aka_name AS an,\n     cast_info AS ci,\n     info_type AS it,\n     link_type AS lt,\n     movie_link AS ml,\n     name AS n,\n     person_info AS pi,\n     title AS t\nWHERE an.name LIKE '%a%'\n  AND it.info ='mini biography'\n  AND lt.link ='features'\n  AND n.name_pcode_cf BETWEEN 'A' AND 'F'\n  AND (n.gender='m'\n       OR (n.gender = 'f'\n           AND n.name LIKE 'B%'))\n  AND pi.note ='Volker Boehm'\n  AND t.production_year BETWEEN 1980 AND 1995\n  AND n.id = an.person_id\n  AND n.id = pi.person_id\n  AND ci.person_id = n.id\n  AND t.id = ci.movie_id\n  AND ml.linked_movie_id = t.id\n  AND lt.id = ml.link_type_id\n  AND it.id = pi.info_type_id\n  AND pi.person_id = an.person_id\n  AND pi.person_id = ci.person_id\n  AND an.person_id = ci.person_id\n  AND ci.movie_id = ml.linked_movie_id\n;",
+        "total_intermediate_rows": 9015,
+        "total_intermediate_size_bytes": 12735460,
+        "total_row_groups_scanned": 297,
+        "total_row_groups_to_scan": 439,
+        "total_rows_scanned": 30673368,
+        "total_time": 0.440057338
+    },
+    "system": {
+        "blocked_thread_time": 0.0,
+        "peak_buffer_memory": 95102136,
+        "peak_streaming_buffer_size": 0,
+        "peak_temp_dir_size": 0,
+        "total_memory_allocated": 30670848
+    }
+}
