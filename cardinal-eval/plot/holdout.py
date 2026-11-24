@@ -165,7 +165,11 @@ def bench_figure(bench, kind, runs, out, lo, hi, split_template):
         else:
             median_band(ax, strip, rs, lo, hi, i, label, band=i == 0)
         ks = by_k(rs)
-        share.plot(list(ks), [sum(r["upper"] is not None for r in v) / len(v) for v in ks.values()], **{**style.style(i), "marker": None})
+        line = {**style.style(i), "marker": None}
+        share.plot(list(ks), [sum(r["upper"] is not None for r in v) / len(v) for v in ks.values()],
+                   **line, label="bounded" if i == 0 else None)
+        share.plot(list(ks), [sum(q(r) <= 2 for r in v) / len(v) for v in ks.values()],
+                   **{**line, "linestyle": ":"}, label=r"$q_U \leq 2$" if i == 0 else None)
     trivial = sum(1 for r in records if r["k"] == 0 and r["trial"] == 1 and (r["exact"] or q(r) <= 2))
     targets = len({r["target"] for r in records})
     ax.set_title(f"{bench.upper()} ({kind}): all {targets} targets, {trivial} trivial at k = 0", fontsize=8)
@@ -175,7 +179,8 @@ def bench_figure(bench, kind, runs, out, lo, hi, split_template):
     plt.setp(ax.get_xticklabels(), visible=False)
     share.set_ylim(0, 1.05)
     share.set_yticks([0, 1])
-    share.set_ylabel("bounded", fontsize=7)
+    share.set_ylabel("share", fontsize=7)
+    share.legend(loc="lower right", fontsize=6, ncol=2, handlelength=1.5)
     share.set_xlabel("plans given, k")
     xscale(share, meta, n)
 
