@@ -11,6 +11,11 @@ connection $CARDINAL_SF_CONNECTION (default my_example_connection) of
 ~/.config/snowflake, key pair $CARDINAL_SF_PRIVATE_KEY_PATH, role
 $CARDINAL_SF_ROLE (default CMUADMIN).
 
+$CARDINAL_SF_WAREHOUSE names an existing X-Small warehouse to use instead,
+where the role may not create one. One the role cannot alter is shared: it
+is left as it is (no resource monitor, never suspended by this script), and
+its metered credits include others' use, which only overstates the total.
+
 Credits. The budget is 2.0 credits across every run, kept in the ledger
 snowflake_credits.json beside the profiles: every statement that needs the
 warehouse, its time, its estimated credits and the running total. A
@@ -42,7 +47,7 @@ from pathlib import Path
 
 import snowflake.connector
 
-WAREHOUSE = "CARDINAL_EVAL_WH"
+WAREHOUSE = os.environ.get("CARDINAL_SF_WAREHOUSE", "CARDINAL_EVAL_WH")
 MONITOR = "CARDINAL_EVAL_RM"
 BUDGET = 2.0
 CREDITS_PER_HOUR = 1.0  # X-Small
@@ -156,10 +161,17 @@ def ddl(schema_sql):
     return [s.strip() for s in text.split(";") if s.strip()]
 
 
-def warehouse_state(cur):
+def warehouse(cur):
+    """The warehouse's SHOW WAREHOUSES row, by column, or None."""
     cur.execute(f"SHOW WAREHOUSES LIKE '{WAREHOUSE}'")
+    cols = [d[0].lower() for d in cur.description]
     rows = cur.fetchall()
-    return rows[0][1] if rows else None
+    return dict(zip(cols, rows[0])) if rows else None
+
+
+def warehouse_state(cur):
+    w = warehouse(cur)
+    return w["state"] if w else None
 
 
 def main():
@@ -190,17 +202,33 @@ def main():
         return
 
     # The warehouse: X-Small, suspended until used, ours alone.
-    if warehouse_state(cur) is None:
+    w = warehouse(cur)
+    if w is None:
         cur.execute(f"CREATE WAREHOUSE {WAREHOUSE} WAREHOUSE_SIZE = XSMALL AUTO_SUSPEND = {int(SUSPEND_S)} "
                     f"AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE")
-    cur.execute(f"ALTER WAREHOUSE {WAREHOUSE} SET WAREHOUSE_SIZE = XSMALL AUTO_SUSPEND = {int(SUSPEND_S)}")
+        w = warehouse(cur)
     try:
-        cur.execute(f"CREATE RESOURCE MONITOR IF NOT EXISTS {MONITOR} WITH CREDIT_QUOTA = {BUDGET} "
-                    f"TRIGGERS ON 100 PERCENT DO SUSPEND_IMMEDIATE")
-        cur.execute(f"ALTER WAREHOUSE {WAREHOUSE} SET RESOURCE_MONITOR = {MONITOR}")
-        print(f"resource monitor {MONITOR}: CREDIT_QUOTA = {BUDGET}, suspends at 100 %", file=sys.stderr)
-    except snowflake.connector.errors.ProgrammingError as e:
-        print(f"no resource monitor ({str(e).splitlines()[-1]}): relying on the ledger alone", file=sys.stderr)
+        cur.execute(f"ALTER WAREHOUSE {WAREHOUSE} SET WAREHOUSE_SIZE = XSMALL AUTO_SUSPEND = {int(SUSPEND_S)}")
+        shared = False
+    except snowflake.connector.errors.ProgrammingError:
+        shared = True
+    if shared:
+        size = str(w["size"]).replace("-", "").upper()
+        if size != "XSMALL" or int(w["auto_suspend"] or 0) > SUSPEND_S:
+            sys.exit(f"{WAREHOUSE} is {w['size']} with AUTO_SUSPEND {w['auto_suspend']}, not X-Small with "
+                     f"{int(SUSPEND_S)} s, and may not be altered: the ledger's estimates would not hold")
+        print(f"{WAREHOUSE} is shared: left as it is, no resource monitor; relying on the ledger alone, "
+              f"metered credits include others' use", file=sys.stderr)
+        ledger.d["warehouse"] = WAREHOUSE
+        ledger.d["shared"] = True
+    if not shared:
+        try:
+            cur.execute(f"CREATE RESOURCE MONITOR IF NOT EXISTS {MONITOR} WITH CREDIT_QUOTA = {BUDGET} "
+                        f"TRIGGERS ON 100 PERCENT DO SUSPEND_IMMEDIATE")
+            cur.execute(f"ALTER WAREHOUSE {WAREHOUSE} SET RESOURCE_MONITOR = {MONITOR}")
+            print(f"resource monitor {MONITOR}: CREDIT_QUOTA = {BUDGET}, suspends at 100 %", file=sys.stderr)
+        except snowflake.connector.errors.ProgrammingError as e:
+            print(f"no resource monitor ({str(e).splitlines()[-1]}): relying on the ledger alone", file=sys.stderr)
     cur.execute(f"USE WAREHOUSE {WAREHOUSE}")
 
     def run(what, sql):
@@ -269,14 +297,15 @@ def main():
     reconcile("queries")
     ledger.tail("queries")
 
-    cur.execute(f"ALTER WAREHOUSE {WAREHOUSE} SUSPEND") if warehouse_state(cur) == "STARTED" else None
+    if not shared and warehouse_state(cur) == "STARTED":
+        cur.execute(f"ALTER WAREHOUSE {WAREHOUSE} SUSPEND")
     cur.execute("SELECT CURRENT_VERSION()")
     version = cur.fetchone()[0]
     con.close()
     manifest_path = args.data / "manifest.json"
     m = json.loads(manifest_path.read_text())
     m.setdefault("engines", {})["snowflake"] = version
-    m["snowflake"] = {"schema": f"{database}.{schema}", "warehouse": WAREHOUSE, "size": "X-Small",
+    m["snowflake"] = {"schema": f"{database}.{schema}", "warehouse": WAREHOUSE, "shared": shared, "size": "X-Small",
                       "use_cached_result": False, "failures": failures,
                       "credits": {"estimated": ledger.d["estimated_total"], "metered": ledger.d["metered_total"],
                                   "limit": ledger.d["limit"]}}

@@ -1,0 +1,242 @@
+[
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "(SUM(CUSTOMER.C_ACCTBAL)) / (COUNT(CUSTOMER.C_ACCTBAL))"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 38120,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(CUSTOMER.C_ACCTBAL)",
+    "COUNT(CUSTOMER.C_ACCTBAL)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 38120,
+   "output_rows": 38120
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(CUSTOMER.C_ACCTBAL > 0) AND ((SUBSTRING(CUSTOMER.C_PHONE, 1, 2)) IN '13' IN '31' IN '23' IN '29' IN '30' IN '18' IN '17')"
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 1368064,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 38120,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "C_PHONE",
+    "C_ACCTBAL"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.CUSTOMER"
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "SUBSTRING(CUSTOMER.C_PHONE, 1, 2)",
+    "COUNT(*)",
+    "SUM(CUSTOMER.C_ACCTBAL)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Sort",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 7,
+   "output_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "sort_keys": [
+    "SUBSTRING(CUSTOMER.C_PHONE, 1, 2) ASC NULLS LAST"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 6384,
+   "output_rows": 7
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "COUNT(*)",
+    "SUM(CUSTOMER.C_ACCTBAL)"
+   ],
+   "grouping_keys": [
+    "SUBSTRING(CUSTOMER.C_PHONE, 1, 2)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 209989,
+   "output_rows": 6384
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "equality_join_condition": "(CUSTOMER.C_CUSTKEY = ORDERS.O_CUSTKEY)",
+   "join_type": "ANTI"
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 19000,
+   "output_rows": 19000
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "((SUBSTRING(CUSTOMER.C_PHONE, 1, 2)) IN '13' IN '31' IN '23' IN '29' IN '30' IN '18' IN '17') AND ((CUSTOMER.C_ACCTBAL) > Subquery(Step1))"
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 1507328,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 19000,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "C_CUSTKEY",
+    "C_PHONE",
+    "C_ACCTBAL"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.CUSTOMER"
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 190989,
+   "output_rows": 190989
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "3"
+  }
+ },
+ {
+  "QUERY_ID": "q22",
+  "STEP_ID": 2,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 3526656,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 190989,
+   "pruning": {
+    "partitions_scanned": 8,
+    "partitions_total": 8
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "O_CUSTKEY"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.ORDERS"
+  }
+ }
+]

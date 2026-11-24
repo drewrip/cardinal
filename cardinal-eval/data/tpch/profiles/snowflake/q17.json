@@ -1,0 +1,258 @@
+[
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 0,
+  "PARENT_OPERATORS": null,
+  "OPERATOR_TYPE": "Result",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "expressions": [
+    "(SUM(LINEITEM.L_EXTENDEDPRICE)) / 7"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 1,
+  "PARENT_OPERATORS": [
+   0
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 587,
+   "output_rows": 1
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(LINEITEM.L_EXTENDEDPRICE)"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 2,
+  "PARENT_OPERATORS": [
+   1
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 12219,
+   "output_rows": 587
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "additional_join_condition": "(LINEITEM.L_QUANTITY) < (0.2 * ((SUM(LINEITEM.L_QUANTITY)) / (NVL(COUNT(LINEITEM.L_QUANTITY), 0))))",
+   "equality_join_condition": "(PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+   "join_type": "INNER"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 3,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "Join",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 592,
+   "output_rows": 204
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "equality_join_condition": "(PART.P_PARTKEY = LINEITEM.L_PARTKEY)",
+   "join_type": "INNER"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 4,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 204,
+   "output_rows": 204
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(PART.P_BRAND = 'Brand#23') AND (PART.P_CONTAINER = 'MED BOX')"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 5,
+  "PARENT_OPERATORS": [
+   4
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 294912,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 204,
+   "pruning": {
+    "partitions_scanned": 1,
+    "partitions_total": 1
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "P_PARTKEY",
+    "P_BRAND",
+    "P_CONTAINER"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.PART"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 6,
+  "PARENT_OPERATORS": [
+   3
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 388,
+   "output_rows": 388
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "(SUM(LINEITEM.L_QUANTITY) IS NOT NULL) AND (COUNT(LINEITEM.L_QUANTITY) IS NOT NULL)"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 7,
+  "PARENT_OPERATORS": [
+   6
+  ],
+  "OPERATOR_TYPE": "Aggregate",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 11645,
+   "output_rows": 388
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "functions": [
+    "SUM(LINEITEM.L_QUANTITY)",
+    "COUNT(LINEITEM.L_QUANTITY)"
+   ],
+   "grouping_keys": [
+    "LINEITEM.L_PARTKEY"
+   ]
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 8,
+  "PARENT_OPERATORS": [
+   7
+  ],
+  "OPERATOR_TYPE": "Filter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 11645,
+   "output_rows": 11645
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "filter_condition": "LINEITEM.L_PARTKEY IS NOT NULL"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 9,
+  "PARENT_OPERATORS": [
+   8
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 11645,
+   "output_rows": 11645
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "3"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 10,
+  "PARENT_OPERATORS": [
+   9
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 18989056,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 11645,
+   "pruning": {
+    "partitions_scanned": 15,
+    "partitions_total": 15
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_PARTKEY",
+    "L_QUANTITY"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.LINEITEM"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 11,
+  "PARENT_OPERATORS": [
+   2
+  ],
+  "OPERATOR_TYPE": "JoinFilter",
+  "OPERATOR_STATISTICS": {
+   "input_rows": 12015,
+   "output_rows": 12015
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "join_id": "2"
+  }
+ },
+ {
+  "QUERY_ID": "q17",
+  "STEP_ID": 1,
+  "OPERATOR_ID": 12,
+  "PARENT_OPERATORS": [
+   11
+  ],
+  "OPERATOR_TYPE": "TableScan",
+  "OPERATOR_STATISTICS": {
+   "io": {
+    "bytes_scanned": 37150720,
+    "percentage_scanned_from_cache": 1,
+    "scan_progress": 1
+   },
+   "output_rows": 12015,
+   "pruning": {
+    "partitions_scanned": 15,
+    "partitions_total": 15
+   }
+  },
+  "OPERATOR_ATTRIBUTES": {
+   "columns": [
+    "L_PARTKEY",
+    "L_QUANTITY",
+    "L_EXTENDEDPRICE"
+   ],
+   "table_name": "CMU.CARDINAL_EVAL_TPCH_SF1.LINEITEM"
+  }
+ }
+]
