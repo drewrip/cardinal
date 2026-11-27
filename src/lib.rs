@@ -10,7 +10,10 @@
 //! ([`Analysis::sql`], [`Analysis::plan`], ...), then what is known of the
 //! data it runs on: executed plans of other queries
 //! ([`Builder::with_plans`]) and tables' row counts
-//! ([`Builder::with_cardinalities`]).
+//! ([`Builder::with_cardinalities`]). Every query comes with the
+//! [`observed::Catalog`] reference plans are read against: `ctx`'s for
+//! [`Analysis::sql`], and the one given with an engine's plan or a logical
+//! plan ([`Analysis::logical`]).
 //!
 //! ```ignore
 //! let a = Analysis::sql(&ctx, sql).await?
@@ -108,10 +111,6 @@ pub enum Error {
     /// An engine's plan profile that could not be read.
     #[error("unreadable plan profile: {0}")]
     Observed(String),
-    /// Reference plans given for a query with no catalog to read them
-    /// against ([`Analysis::logical`]).
-    #[error("reference plans need a catalog: make the query with Analysis::sql or Analysis::plan")]
-    NoCatalog,
     /// An operator id the query does not have ([`Analysis::node_bounds`]).
     #[error("no operator {0}")]
     NoOperator(usize),

@@ -12,7 +12,11 @@ use std::time::Instant;
 
 use cardinal::observed::ObservedPlan;
 use cardinal::{Analysis, Options};
-use fixtures::{catalog, foreign_keys, plans};
+use datafusion::common::TableReference;
+use datafusion::common::tree_node::Transformed;
+use datafusion::logical_expr::LogicalPlan;
+use datafusion::prelude::SessionContext;
+use fixtures::{catalog, context, foreign_keys, plans, query};
 
 async fn profiles() -> Vec<ObservedPlan> {
     let mut out = vec![];
@@ -60,14 +64,79 @@ async fn trace_leaves_the_constraints() {
     assert!(reduced < before, "{reduced} of {before}");
 }
 
-/// Reference plans given to a query with no catalog to read them against
-/// are refused.
+/// A logical plan takes reference plans, read against its catalog.
 #[tokio::test]
-async fn plans_need_a_catalog() {
+async fn logical_takes_reference_plans() {
+    let catalog = catalog().await;
     let all = profiles().await;
     let plan = datafusion::logical_expr::LogicalPlanBuilder::empty(true).build().unwrap();
-    let e = Analysis::logical(plan).with_plans(&all).build().unwrap_err();
-    assert!(matches!(e, cardinal::Error::NoCatalog), "{e}");
+    Analysis::logical(&catalog, plan).with_plans(&all).build().unwrap();
+}
+
+/// `sql` planned and optimized by `ctx`, its scans named by their bare
+/// table names.
+async fn bare_plan(ctx: &SessionContext, sql: &str) -> LogicalPlan {
+    let state = ctx.state();
+    let plan = state.optimize(&state.create_logical_plan(sql).await.unwrap()).unwrap();
+    plan.transform_up_with_subqueries(|p| match p {
+        LogicalPlan::TableScan(mut scan) => {
+            scan.table_name = TableReference::bare(scan.table_name.table());
+            Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+        }
+        p => Ok(Transformed::no(p)),
+    })
+    .unwrap()
+    .data
+}
+
+/// DataFusion's plan for a query, given as a logical plan, proves what
+/// [`Analysis::sql`] proves of it with the same reference plans and row
+/// counts.
+#[tokio::test]
+async fn logical_matches_sql() {
+    let ctx = context();
+    let catalog = catalog().await;
+    let all = profiles().await;
+    let sizes = [("part", 2000u64), ("supplier", 100), ("partsupp", 8000), ("nation", 25)];
+    for (dir, name) in [("tpch", "q03"), ("tpch", "q11"), ("extra", "join_filtered")] {
+        let sql = query(dir, name);
+        let others: Vec<&ObservedPlan> = all.iter().filter(|p| p.name != name).collect();
+        let plan = bare_plan(&ctx, &sql).await;
+        let logical = Analysis::logical(&catalog, plan)
+            .options(options())
+            .with_plans(others.iter().copied())
+            .with_cardinalities(sizes)
+            .build()
+            .unwrap()
+            .bounds()
+            .unwrap();
+        let from_sql = Analysis::sql(&ctx, &sql)
+            .await
+            .unwrap()
+            .options(options())
+            .with_plans(others.iter().copied())
+            .with_cardinalities(sizes)
+            .build()
+            .unwrap()
+            .bounds()
+            .unwrap();
+        assert_eq!(logical, from_sql, "{name}");
+    }
+}
+
+/// [`caps_through_a_foreign_key`] through [`Analysis::logical`] of
+/// DataFusion's plan for q11: its scans pin by their names.
+#[tokio::test]
+async fn logical_pins_by_name() {
+    let ctx = context();
+    let catalog = catalog().await;
+    let all = profiles().await;
+    let q = all.iter().find(|p| p.name == "q11").unwrap();
+    let others = all.iter().filter(|p| p.name != q.name);
+    let plan = bare_plan(&ctx, &query("tpch", "q11")).await;
+    let b = Analysis::logical(&catalog, plan).options(options()).with_plans(others).build().unwrap().bounds().unwrap();
+    assert!(b.holds(q.nodes[q.root].rows), "{b}");
+    assert_eq!(b.upper, Some(2000), "{b}");
 }
 
 /// Each query's bounds, and time, alone and with every other profile.

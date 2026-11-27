@@ -20,14 +20,15 @@ use z3::ast::Int;
 use crate::analysis::{Analyzer, ScanKind};
 use crate::observed::{self, Catalog, ObservedPlan};
 use crate::trace::{FactClaim, FactInfo, FactRef, Trace};
-use crate::{Analysis, BuildStats, Error, Options, Result, in_own_context, joint, link};
+use crate::{Analysis, BuildStats, Options, Result, in_own_context, joint, link};
 
 /// An [`Analysis`] being made: the query to bound, the [`Options`], the
 /// executed plans of other queries to analyze it with
 /// ([`Builder::with_plans`]) and tables' row counts
 /// ([`Builder::with_cardinalities`]). Made by [`Analysis::sql`], [`Analysis::plan`],
 /// [`Analysis::duckdb`], [`Analysis::postgres`], [`Analysis::snowflake`] or
-/// [`Analysis::logical`].
+/// [`Analysis::logical`], each with the [`Catalog`] reference plans are read
+/// against.
 ///
 /// ```ignore
 /// let a = Analysis::plan(&catalog, &plan)
@@ -40,7 +41,7 @@ use crate::{Analysis, BuildStats, Error, Options, Result, in_own_context, joint,
 #[derive(Clone)]
 pub struct Builder<'c> {
     query: Query<'c>,
-    catalog: Option<CatalogRef<'c>>,
+    catalog: CatalogRef<'c>,
     options: Options,
     plans: Vec<&'c ObservedPlan>,
     cardinalities: Vec<(String, u64)>,
@@ -82,7 +83,7 @@ impl Analysis {
     pub async fn sql(ctx: &SessionContext, sql: &str) -> Result<Builder<'static>> {
         let query = plan_sql(ctx, sql).await?;
         let catalog = Catalog::from_context(ctx).await?;
-        Ok(Builder::new(query, Some(CatalogRef::Owned(Arc::new(catalog)))))
+        Ok(Builder::new(query, CatalogRef::Owned(Arc::new(catalog))))
     }
 
     /// `plan`, the plan an engine chose for a query, in place of the plan
@@ -91,21 +92,21 @@ impl Analysis {
     /// [`Catalog::to_logical`]. The plan's row counts, if any, are not
     /// read. Reference plans are read against `catalog`.
     pub fn plan<'c>(catalog: &'c Catalog, plan: &'c ObservedPlan) -> Builder<'c> {
-        Builder::new(Query::Observed(std::borrow::Cow::Borrowed(plan)), Some(CatalogRef::Borrowed(catalog)))
+        Builder::new(Query::Observed(std::borrow::Cow::Borrowed(plan)), CatalogRef::Borrowed(catalog))
     }
 
     /// [`Analysis::plan`] on DuckDB's plan for `sql`, as printed by `EXPLAIN
     /// (FORMAT JSON)` (or by `EXPLAIN (ANALYZE, FORMAT JSON)`).
     pub fn duckdb<'c>(catalog: &'c Catalog, json: &str, sql: Option<&str>) -> Result<Builder<'c>> {
         let plan = observed::from_duckdb_explain(catalog, "", json, sql)?;
-        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), Some(CatalogRef::Borrowed(catalog))))
+        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), CatalogRef::Borrowed(catalog)))
     }
 
     /// [`Analysis::plan`] on PostgreSQL's plan for `sql`, as printed by
     /// `EXPLAIN (VERBOSE, FORMAT JSON)` (or with `ANALYZE`, too).
     pub fn postgres<'c>(catalog: &'c Catalog, json: &str, sql: Option<&str>) -> Result<Builder<'c>> {
         let plan = observed::from_postgres_explain(catalog, "", json, sql)?;
-        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), Some(CatalogRef::Borrowed(catalog))))
+        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), CatalogRef::Borrowed(catalog)))
     }
 
     /// [`Analysis::plan`] on Snowflake's plan for `sql`, as printed by
@@ -113,17 +114,20 @@ impl Analysis {
     /// [`snowflake_explain::QueryPlan`]): see [`observed::from_snowflake`].
     pub fn snowflake<'c>(catalog: &'c Catalog, json: &str, sql: Option<&str>) -> Result<Builder<'c>> {
         let plan = observed::from_snowflake_explain(catalog, "", json, sql)?;
-        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), Some(CatalogRef::Borrowed(catalog))))
+        Ok(Builder::new(Query::Observed(std::borrow::Cow::Owned(plan)), CatalogRef::Borrowed(catalog)))
     }
 
-    /// An already-built logical plan.
+    /// An already-built logical plan, reading reference plans against
+    /// `catalog`.
     ///
-    /// With no catalog to consult, every scan except a recursive CTE's work
-    /// table counts as a base table, and names are resolved against
-    /// DataFusion's default catalog and schema (`datafusion.public`). It
-    /// takes no reference plans.
-    pub fn logical(plan: LogicalPlan) -> Builder<'static> {
-        Builder::new(Query::DataFusion { plan, base: None, defaults: default_names() }, None)
+    /// Every scan except a recursive CTE's work table counts as a base
+    /// table, and names resolve in DataFusion's default catalog and schema
+    /// (`datafusion.public`), as reference plans' scans do. A plan with
+    /// bare table names therefore matches reference plans' tables.
+    /// `catalog` reads reference plans; it does not decide which scans
+    /// count as base tables.
+    pub fn logical<'c>(catalog: &'c Catalog, plan: LogicalPlan) -> Builder<'c> {
+        Builder::new(Query::DataFusion { plan, base: None, defaults: default_names() }, CatalogRef::Borrowed(catalog))
     }
 }
 
@@ -162,10 +166,10 @@ impl<'c> Builder<'c> {
     /// `sql`, planned with `ctx` as [`Analysis::sql`] plans it, reading
     /// reference plans against `catalog`, `ctx`'s.
     pub(crate) async fn sql(ctx: &SessionContext, sql: &str, catalog: Arc<Catalog>) -> Result<Builder<'static>> {
-        Ok(Builder::new(plan_sql(ctx, sql).await?, Some(CatalogRef::Owned(catalog))))
+        Ok(Builder::new(plan_sql(ctx, sql).await?, CatalogRef::Owned(catalog)))
     }
 
-    fn new(query: Query<'c>, catalog: Option<CatalogRef<'c>>) -> Builder<'c> {
+    fn new(query: Query<'c>, catalog: CatalogRef<'c>) -> Builder<'c> {
         Builder { query, catalog, options: Options::default(), plans: vec![], cardinalities: vec![] }
     }
 
@@ -212,7 +216,7 @@ impl<'c> Builder<'c> {
     /// run or does not translate, which is left out.
     #[doc(hidden)]
     pub fn relevant(&self, plan: &ObservedPlan) -> bool {
-        let Some(catalog) = self.catalog.as_ref().map(CatalogRef::get) else { return false };
+        let catalog = self.catalog.get();
         let Ok((query, _, _)) = self.query_plan() else { return false };
         joint::relevant(catalog, &query, plan, &self.options)
     }
@@ -223,16 +227,13 @@ impl<'c> Builder<'c> {
     fn query_plan(&self) -> Result<(LogicalPlan, (String, String), Option<&HashMap<usize, ScanKind>>)> {
         Ok(match &self.query {
             Query::DataFusion { plan, base, defaults } => (plan.clone(), defaults.clone(), base.as_ref()),
-            Query::Observed(p) => {
-                let catalog = self.catalog.as_ref().map(CatalogRef::get).expect("an engine's plan comes with its catalog");
-                (catalog.to_logical(p)?, default_names(), None)
-            }
+            Query::Observed(p) => (self.catalog.get().to_logical(p)?, default_names(), None),
         })
     }
 
     fn analyze(&self) -> Result<Analysis> {
         let options = &self.options;
-        let catalog = self.catalog.as_ref().map(CatalogRef::get);
+        let catalog = self.catalog.get();
         let (plan, defaults, base) = self.query_plan()?;
         // An engine's plan, and a reference plan, scan the catalog's tables
         // by their bare names.
@@ -249,10 +250,9 @@ impl<'c> Builder<'c> {
             }
         };
         let start = Instant::now();
-        let plans = match (self.plans.is_empty(), catalog) {
-            (true, _) => vec![],
-            (false, Some(c)) => joint::translate(c, &self.plans),
-            (false, None) => return Err(Error::NoCatalog),
+        let plans = match self.plans.is_empty() {
+            true => vec![],
+            false => joint::translate(catalog, &self.plans),
         };
         let translating = start.elapsed();
         let sizes: Vec<(String, u64)> = self
