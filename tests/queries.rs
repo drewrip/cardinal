@@ -6,6 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
+use cardinal::observed::Catalog;
 use cardinal::{Analysis, Bounds, Builder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
@@ -391,7 +392,9 @@ async fn pushed_down_scan_filters_and_fetch() {
     .unwrap()
     .build()
     .unwrap();
-    let a = Run::new(Analysis::logical(plan));
+    // `Run` keeps its builder, which borrows the catalog.
+    let catalog = Box::leak(Box::new(Catalog::from_context(&SessionContext::new()).await.unwrap()));
+    let a = Run::new(Analysis::logical(catalog, plan));
     assert_reduces(&a);
     assert!(has_op(&a, "ScanFilter"));
     // A scan's fetch is a hint (providers may return more rows), so it must not
@@ -455,7 +458,8 @@ async fn raw_scan_keys_ignore_pushed_filters() {
         .unwrap();
     // MemTable ignores pushed filters, so validating would count the
     // filtered scan's rows wrong: check the claims instead.
-    let a = Analysis::logical(plan).build().unwrap();
+    let catalog = Catalog::from_context(&SessionContext::new()).await.unwrap();
+    let a = Analysis::logical(&catalog, plan).build().unwrap();
     assert!(a.constraints().contains("(= op1_ScanFilter_c1 op1_ScanFilter)"));
     assert!(!a.constraints().contains("(= op0_Scan_pairs_c1 op0_Scan_pairs)"));
 }
@@ -716,10 +720,12 @@ async fn keyed_join_also_bounded_by_product() {
 fn futures_are_send() {
     fn assert_send<T: Send>(_: &T) {}
     let ctx = SessionContext::new();
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let catalog = rt.block_on(Catalog::from_context(&ctx)).unwrap();
     let analyze = Analysis::sql(&ctx, "SELECT 1");
     assert_send(&analyze);
     drop(analyze);
-    let a = Analysis::logical(datafusion::logical_expr::LogicalPlan::EmptyRelation(
+    let a = Analysis::logical(&catalog, datafusion::logical_expr::LogicalPlan::EmptyRelation(
         datafusion::logical_expr::EmptyRelation {
             produce_one_row: true,
             schema: Arc::new(datafusion::common::DFSchema::empty()),
